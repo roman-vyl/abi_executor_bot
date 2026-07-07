@@ -91,7 +91,32 @@ For a short smoke:
 take < entry < stop
 ```
 
-## 4. Cleanup Check
+## 4. Amend Smoke
+
+This creates a stop-market entry, queries it, changes its trigger price, queries it again, and cancels it.
+
+The same write guard applies: `ABI_CONFIRM_TESTNET_WRITE=YES` is required, and `/execution/mode` must report a `demo` or `testnet` environment with `canExecuteLive: true`.
+
+Example:
+
+```bash
+ABI_CONFIRM_TESTNET_WRITE=YES \
+ABI_BASE_URL=http://127.0.0.1:8787 \
+ABI_SMOKE_SYMBOL=BTCUSDT \
+ABI_SMOKE_SIDE=long \
+ABI_SMOKE_ENTRY_PRICE=61234.5 \
+ABI_SMOKE_AMENDED_ENTRY_PRICE=61300.0 \
+ABI_SMOKE_STOP_PRICE=60880.0 \
+ABI_SMOKE_TAKE_PRICE=62000.0 \
+ABI_SMOKE_TRIGGER_DIRECTION=rises_to \
+npm run smoke:sandbox:amend
+```
+
+For a long smoke, both entry prices must stay between stop and take. For a short smoke, both entry prices must stay between take and stop. Choose sandbox trigger prices that will not execute before the amend and cancel steps finish.
+
+The script prints the create, first query, update, second query, and cancel statuses. When the query responses contain trigger prices, it also prints the initial and amended values. If a step fails after creation starts, it attempts to cancel the entry order automatically.
+
+## 5. Cleanup Check
 
 After the write smoke, confirm there are no remaining active orders for the symbol:
 
