@@ -44,10 +44,10 @@ Abi allows multiple active intents for the same symbol when they have different 
 
 ## Bybit balance check
 
-Abi can read Bybit wallet balance without placing orders:
+Abi can read Bybit wallet balance without placing orders. See [docs/LOCAL_ENV.md](docs/LOCAL_ENV.md) for safe local credential setup.
 
 ```env
-BYBIT_TESTNET=true
+BYBIT_ENV=demo
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_ACCOUNT_TYPE=UNIFIED

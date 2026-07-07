@@ -8,6 +8,8 @@ Bybit demo trading API keys must use the demo REST domain. Abi selects that doma
 BYBIT_ENV=demo
 ```
 
+Load demo credentials from environment variables or an ignored local `.env` file as described in [docs/LOCAL_ENV.md](docs/LOCAL_ENV.md). Do not put credentials in this document or other tracked files.
+
 Testnet keys use:
 
 ```env
@@ -22,8 +24,6 @@ ABI_PORT=8787 \
 ABI_DRY_RUN=false \
 ABI_LIVE_TRADING_ENABLED=true \
 BYBIT_ENV=demo \
-BYBIT_API_KEY=... \
-BYBIT_API_SECRET=... \
 npm start
 ```
 

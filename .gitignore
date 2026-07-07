@@ -3,5 +3,8 @@ dist/
 var/
 .env
 .env.*
+!.env.example
+*.jsonl
+*.zip
 .DS_Store
 *.log
