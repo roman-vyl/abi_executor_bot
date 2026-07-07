@@ -1,0 +1,26 @@
+schema: spec-driven
+
+context: |
+  Abi is a TypeScript Node.js execution service for bbb research signals.
+  Keep HTTP routes thin; use-case logic lives in src/services and src/services/intents.
+  Domain types and execution plans live in src/domain, risk checks in src/risk,
+  guarded Bybit execution in src/execution, exchange mapping in src/exchange,
+  and append-only intent history in src/journal.
+  bbb owns signal strategy and entry/stop-loss/take-profit prices. Abi owns
+  position sizing, deterministic orderLinkId generation, execution, journaling,
+  and intent status.
+  Position sizing is currently fixed at ABI_FIXED_SMOKE_QTY=0.001.
+  Stop-loss and take-profit orders are planned but are not automatically placed
+  after an entry fill. Mainnet live execution is blocked by the live guard.
+  Preserve dry-run behavior and demo/testnet safety gates.
+  Validate changes with npm test and npm run typecheck when runtime code changes.
+
+rules:
+  proposal:
+    - State the user-visible or operational outcome and explicit non-goals.
+    - Call out trading-safety, idempotency, recovery, and journal-state implications.
+    - Identify whether behavior affects dry-run, demo/testnet live execution, or mainnet guards.
+  tasks:
+    - Include focused tests for changed behavior and run npm test.
+    - Keep runtime changes within the existing architecture and avoid unrelated refactors.
+    - For live smoke work, include guard verification and cleanup checks.
