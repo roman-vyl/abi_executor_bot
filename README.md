@@ -2,6 +2,27 @@
 
 Abi is a separate execution service for bbb signals.
 
+## Current Status
+
+The Bybit demo smoke flow has been verified end to end:
+
+- wallet balance query;
+- active-orders query;
+- open-positions query;
+- stop-market entry creation;
+- entry lookup by `orderLinkId`;
+- entry trigger-price amendment;
+- entry cancellation;
+- cleanup verification with no active BTCUSDT orders and position size `0`.
+
+Current limitations:
+
+- position sizing uses the fixed `ABI_FIXED_SMOKE_QTY=0.001` quantity;
+- stop-loss and take-profit orders are only planned for creation after the entry fills; Abi does not yet watch for fills or place this protection automatically;
+- the live-execution guard blocks mainnet, so live writes are limited to Bybit demo or testnet environments.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the next development steps and [docs/BBB_CONTRACT.md](docs/BBB_CONTRACT.md) for the current bbb-to-Abi payload contract.
+
 ## Current signal contract
 
 bbb sends the trading intent without position size:
