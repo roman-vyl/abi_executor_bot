@@ -7,7 +7,7 @@ import { buildExecutionPlan } from "../domain/executionPlan.js";
 import type { BybitAdapter } from "../exchange/bybitAdapter.js";
 import { mapExecutionPlanToBybit } from "../exchange/bybitOrderMapper.js";
 import { readJsonBody, writeJson } from "../app/http.js";
-import { createPlannedIntentStatus } from "../domain/intents.js";
+import { createFailedToCreateEntryIntentStatus, createPlannedIntentStatus } from "../domain/intents.js";
 import type { Journal } from "../journal/journal.js";
 import { calculatePositionSize } from "../risk/positionSizing.js";
 import { checkSignalRisk } from "../risk/riskGuard.js";
@@ -138,10 +138,20 @@ export async function handleSignalRoutes(input: {
         payload: bybitPayloads.createEntryOrder,
       });
     } catch (error) {
+      const failedIntentStatus = createFailedToCreateEntryIntentStatus(
+        result.intent.signalId,
+        result.intent.instanceId,
+      );
       const entryExecutionFailed = {
         status: "bybit_entry_order_create_failed",
         error: error instanceof Error ? error.message : "failed to create Bybit entry order",
       };
+
+      await journal.appendEvent({
+        eventType: "intent_status_changed",
+        signalId: result.intent.signalId,
+        payload: failedIntentStatus,
+      });
 
       await journal.appendEvent({
         eventType: "bybit_entry_order_create_failed",
@@ -152,7 +162,7 @@ export async function handleSignalRoutes(input: {
       writeJson(response, 502, {
         status: "bybit_entry_order_create_failed",
         signalId: result.intent.signalId,
-        intentStatus,
+        intentStatus: failedIntentStatus,
         wouldCreateEntry: executionPlan.entryOrder,
         wouldCreateStopLossAfterFill: executionPlan.stopLossAfterFill,
         wouldCreateTakeProfitAfterFill: executionPlan.takeProfitAfterFill,
