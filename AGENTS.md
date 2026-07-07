@@ -1,5 +1,8 @@
 # Abi Agent Context
 
+Communication:
+- Always communicate with the user in Russian.
+
 Abi is a TypeScript Node execution service for bbb research signals.
 
 Current state:
