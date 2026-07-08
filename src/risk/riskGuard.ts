@@ -18,7 +18,27 @@ export function checkSignalRisk(intent: SignalIntent, config: AbiConfig): RiskDe
   }
 
   const entryPrice = Number(intent.entry.triggerPrice);
+  if (intent.stopLoss === undefined) {
+    if (intent.takeProfit !== undefined) {
+      return { ok: false, error: "take_profit requires stop_loss" };
+    }
+    return { ok: true };
+  }
+
   const stopLossPrice = Number(intent.stopLoss.triggerPrice);
+
+  if (intent.takeProfit === undefined) {
+    if (intent.side === "long" && !(stopLossPrice < entryPrice)) {
+      return { ok: false, error: "long requires stop_loss < entry" };
+    }
+
+    if (intent.side === "short" && !(entryPrice < stopLossPrice)) {
+      return { ok: false, error: "short requires entry < stop_loss" };
+    }
+
+    return { ok: true };
+  }
+
   const takeProfitPrice = Number(intent.takeProfit.triggerPrice);
 
   if (intent.side === "long" && !(stopLossPrice < entryPrice && entryPrice < takeProfitPrice)) {

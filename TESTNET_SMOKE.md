@@ -58,7 +58,7 @@ open_positions=ok
 
 ## 3. Write Smoke
 
-This creates one stop-market entry intent, queries it by `orderLinkId`, then cancels it.
+This creates one stop-market entry intent with Full market stop-loss/take-profit attached to the Bybit create request, queries it by `orderLinkId`, then cancels it.
 
 The script refuses to run unless `ABI_CONFIRM_TESTNET_WRITE=YES` and `/execution/mode` reports both:
 
@@ -114,7 +114,9 @@ npm run smoke:sandbox:amend
 
 For a long smoke, both entry prices must stay between stop and take. For a short smoke, both entry prices must stay between take and stop. Choose sandbox trigger prices that will not execute before the amend and cancel steps finish.
 
-The script prints the create, first query, update, second query, and cancel statuses. When the query responses contain trigger prices, it also prints the initial and amended values. If a step fails after creation starts, it attempts to cancel the entry order automatically.
+The update payload changes the entry trigger and the attached stop-loss/take-profit values together. The script prints the create, first query, update, second query, and cancel statuses. When the query responses contain trigger prices, it also prints the initial and amended values. If a step fails after creation starts, it attempts to cancel the entry order automatically.
+
+These smoke scripts verify the existing create/query/amend/cancel flow. They do not prove that Bybit retained or activated attached protection. Bounded query/retry, pending-order verification, after-fill watching, repair, and emergency-close policy belong to the separate `protection-verification-and-repair-v1` change.
 
 ## 5. Cleanup Check
 

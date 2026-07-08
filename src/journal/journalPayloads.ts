@@ -19,7 +19,39 @@ export function isExecutionPlan(payload: unknown): payload is ExecutionPlan {
     "orderLinkId" in payload.entryOrder &&
     typeof payload.entryOrder.orderLinkId === "string" &&
     "symbol" in payload.entryOrder &&
-    typeof payload.entryOrder.symbol === "string"
+    typeof payload.entryOrder.symbol === "string" &&
+    "protection" in payload &&
+    isProtection(payload.protection)
+  );
+}
+
+function isProtection(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null || !("mode" in payload)) {
+    return false;
+  }
+
+  if (payload.mode === "none") {
+    return true;
+  }
+
+  return (
+    payload.mode === "attached_full_position_market" &&
+    "stopLoss" in payload &&
+    isProtectionLeg(payload.stopLoss) &&
+    (!("takeProfit" in payload) || payload.takeProfit === undefined || isProtectionLeg(payload.takeProfit))
+  );
+}
+
+function isProtectionLeg(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    "triggerPrice" in payload &&
+    typeof payload.triggerPrice === "string" &&
+    "triggerBy" in payload &&
+    typeof payload.triggerBy === "string" &&
+    "orderType" in payload &&
+    payload.orderType === "Market"
   );
 }
 

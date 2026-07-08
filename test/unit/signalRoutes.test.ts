@@ -12,6 +12,35 @@ import { handleSignalRoutes } from "../../src/routes/signalRoutes.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 import { makeTestConfig } from "../fixtures/config.js";
 
+test("entry-only dry-run response exposes only the protection model", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "abi-signal-route-"));
+  const journal = new Journal(join(directory, "journal.jsonl"));
+  const config = makeTestConfig();
+  const bybit = new FakeBybitAdapter();
+
+  try {
+    const response = await postSignal("sig-entry-only", config, bybit, journal, {
+      includeStopLoss: false,
+      includeTakeProfit: false,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.status, "accepted_dry_run");
+    assert.equal(response.body.intentStatus.protection, "none");
+    assert.deepEqual(response.body.wouldUseProtection, { mode: "none" });
+    const createPayload = response.body.wouldSendToBybit as {
+      createEntryOrder: Record<string, unknown>;
+    };
+    assert.equal("stopLoss" in createPayload.createEntryOrder, false);
+    assert.equal("takeProfit" in createPayload.createEntryOrder, false);
+    assert.equal("wouldCreateStopLossAfterFill" in response.body, false);
+    assert.equal("wouldCreateTakeProfitAfterFill" in response.body, false);
+    assert.equal(bybit.createOrderCalls.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a failed Bybit entry create marks the intent failed and allows the same instance to retry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "abi-signal-route-"));
   const journal = new Journal(join(directory, "journal.jsonl"));
@@ -27,6 +56,13 @@ test("a failed Bybit entry create marks the intent failed and allows the same in
     const failedResponse = await postSignal("sig-create-fails", config, bybit, journal);
     assert.equal(failedResponse.status, 502);
     assert.equal(failedResponse.body.intentStatus.status, "failed_to_create_entry");
+    assert.deepEqual(failedResponse.body.wouldUseProtection, {
+      mode: "attached_full_position_market",
+      stopLoss: { triggerPrice: "60900.0", triggerBy: "LastPrice", orderType: "Market" },
+      takeProfit: { triggerPrice: "62100.0", triggerBy: "LastPrice", orderType: "Market" },
+    });
+    assert.equal("wouldCreateStopLossAfterFill" in failedResponse.body, false);
+    assert.equal("wouldCreateTakeProfitAfterFill" in failedResponse.body, false);
 
     const failedStatusEvent = await journal.findLastEvent({
       signalId: "sig-create-fails",
@@ -71,25 +107,34 @@ async function postSignal(
   config: ReturnType<typeof makeTestConfig>,
   bybit: FakeBybitAdapter,
   journal: Journal,
+  options: { includeStopLoss?: boolean; includeTakeProfit?: boolean } = {},
 ): Promise<{
   status: number;
-  body: { status: string; intentStatus: { status: string } };
+  body: Record<string, any> & { status: string; intentStatus: { status: string } };
 }> {
+  const payload: Record<string, unknown> = {
+    signal_id: signalId,
+    instance_id: "ema200-touch:BTCUSDT:1h",
+    strategy_id: "ema200-touch",
+    symbol: "BTCUSDT",
+    side: "long",
+    entry: {
+      type: "stop_market",
+      trigger_price: "61000.0",
+      trigger_direction: "rises_to",
+    },
+  };
+
+  if (options.includeStopLoss !== false) {
+    payload.stop_loss = { type: "stop_market", trigger_price: "60900.0" };
+  }
+
+  if (options.includeTakeProfit !== false) {
+    payload.take_profit = { type: "take_profit_market", trigger_price: "62100.0" };
+  }
+
   const request = Readable.from([
-    JSON.stringify({
-      signal_id: signalId,
-      instance_id: "ema200-touch:BTCUSDT:1h",
-      strategy_id: "ema200-touch",
-      symbol: "BTCUSDT",
-      side: "long",
-      entry: {
-        type: "stop_market",
-        trigger_price: "61000.0",
-        trigger_direction: "rises_to",
-      },
-      stop_loss: { type: "stop_market", trigger_price: "60900.0" },
-      take_profit: { type: "take_profit_market", trigger_price: "62100.0" },
-    }),
+    JSON.stringify(payload),
   ]) as IncomingMessage;
   request.method = "POST";
   request.url = "/signals";
@@ -109,6 +154,9 @@ async function postSignal(
 
   return {
     status,
-    body: JSON.parse(responseBody) as { status: string; intentStatus: { status: string } },
+    body: JSON.parse(responseBody) as Record<string, any> & {
+      status: string;
+      intentStatus: { status: string };
+    },
   };
 }

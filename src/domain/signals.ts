@@ -7,8 +7,8 @@ export type SignalIntent = {
   symbol: string;
   side: "long" | "short";
   entry: EntryIntent;
-  stopLoss: StopLossIntent;
-  takeProfit: TakeProfitIntent;
+  stopLoss?: StopLossIntent;
+  takeProfit?: TakeProfitIntent;
 };
 
 export type EntryIntent = {
@@ -72,14 +72,26 @@ export function parseSignalIntent(payload: unknown, config: AbiConfig): SignalPa
     return { ok: false, error: entry.error };
   }
 
-  const stopLoss = parseStopLoss(payload.stop_loss);
-  if (!stopLoss.ok) {
-    return { ok: false, error: stopLoss.error };
+  let stopLoss: StopLossIntent | undefined;
+  if (payload.stop_loss !== undefined) {
+    const parsedStopLoss = parseStopLoss(payload.stop_loss);
+    if (!parsedStopLoss.ok) {
+      return { ok: false, error: parsedStopLoss.error };
+    }
+    stopLoss = parsedStopLoss.value;
   }
 
-  const takeProfit = parseTakeProfit(payload.take_profit);
-  if (!takeProfit.ok) {
-    return { ok: false, error: takeProfit.error };
+  let takeProfit: TakeProfitIntent | undefined;
+  if (payload.take_profit !== undefined) {
+    if (stopLoss === undefined) {
+      return { ok: false, error: "take_profit requires stop_loss" };
+    }
+
+    const parsedTakeProfit = parseTakeProfit(payload.take_profit);
+    if (!parsedTakeProfit.ok) {
+      return { ok: false, error: parsedTakeProfit.error };
+    }
+    takeProfit = parsedTakeProfit.value;
   }
 
   return {
@@ -91,8 +103,8 @@ export function parseSignalIntent(payload: unknown, config: AbiConfig): SignalPa
       symbol,
       side,
       entry: entry.value,
-      stopLoss: stopLoss.value,
-      takeProfit: takeProfit.value,
+      ...(stopLoss === undefined ? {} : { stopLoss }),
+      ...(takeProfit === undefined ? {} : { takeProfit }),
     },
   };
 }
@@ -145,7 +157,7 @@ function parseStopLoss(value: unknown):
       error: string;
     } {
   if (!isRecord(value)) {
-    return { ok: false, error: "stop_loss is required" };
+    return { ok: false, error: "stop_loss must be an object" };
   }
 
   const type = readString(value.type).toLowerCase();
@@ -177,7 +189,7 @@ function parseTakeProfit(value: unknown):
       error: string;
     } {
   if (!isRecord(value)) {
-    return { ok: false, error: "take_profit is required" };
+    return { ok: false, error: "take_profit must be an object" };
   }
 
   const type = readString(value.type).toLowerCase();

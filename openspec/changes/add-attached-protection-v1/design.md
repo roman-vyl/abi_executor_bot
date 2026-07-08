@@ -1,102 +1,115 @@
 ## Context
 
-Abi currently builds an execution plan containing a stop-market entry plus `stopLossAfterFill` and `takeProfitAfterFill` placeholders. Only the entry is mapped into `/v5/order/create`; protection is neither submitted nor verified. The existing demo flow can create, query by deterministic `orderLinkId`, amend, cancel, and confirm cleanup. The change spans domain modeling, Bybit mapping, create/update responses, tests, smoke tooling, and documentation.
+Abi accepts a bbb signal, builds an execution plan, maps it to Bybit, and journals the intent lifecycle. The current execution plan contains `stopLossAfterFill` and `takeProfitAfterFill`, but those fields describe a future workflow that is no longer desired. Bybit V5 can attach full-position market stop-loss and take-profit directly to a conditional entry create request.
 
-bbb remains the source of absolute entry, stop-loss, and take-profit prices. Abi keeps fixed sizing (`0.001` by default), validates price ordering, and owns guarded execution and journaling. Mainnet live execution remains blocked.
-
-Official Bybit V5 documentation confirms that [Create Order](https://bybit-exchange.github.io/docs/v5/order/create-order) accepts `takeProfit`, `stopLoss`, TP/SL trigger sources, `tpslMode`, and TP/SL order types, and that Full mode supports market TP/SL. [Amend Order](https://bybit-exchange.github.io/docs/v5/order/amend-order) accepts updated `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`, and `tpslMode`; it does not require a separate position trading-stop call for this pending-entry amendment.
+Abi is new, so there is no persisted API or journal compatibility requirement for the temporary planned-after-fill model. bbb owns absolute entry, stop-loss, and take-profit prices. Abi keeps fixed sizing, validates the supplied shape and price ordering, generates the entry `orderLinkId`, and guards execution. Mainnet remains blocked.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Attach full-position market TP/SL to each Bybit conditional entry create request using bbb prices.
-- Make attached protection explicit in the execution plan, API previews, journaled Bybit request payloads, and update flow.
-- Amend pending entry, TP, and SL values together through the existing intent update use case.
-- Preserve existing response fields, order identity, create/query/amend/cancel behavior, dry-run semantics, failure states, and guards.
-- Add focused unit coverage, documentation, future protection types, and a guarded smoke script without running it.
+- Support entry-only, entry-plus-stop, and entry-plus-stop-plus-take-profit bbb signals.
+- Use one authoritative `ExecutionPlan.protection` model with no planned-after-fill representation.
+- Map optional protection fields correctly into Bybit create and pending-entry amend payloads.
+- Keep `PUT /intents/:signalId` able to update entry and desired protection together on the existing entry `orderLinkId`.
+- Make dry-run, live, failure, and journal previews reflect the same single protection model.
+- Preserve fixed sizing, order identity, guards, and existing intent flows.
 
 **Non-Goals:**
 
-- Fill watching or fill-driven state transitions.
-- Post-create verification that Bybit retained or activated protection.
+- Post-create query/retry or verification that Bybit retained protection.
+- Fill watching or fill-driven protection state.
 - Repair through `/v5/position/trading-stop`.
-- Emergency market close for missing, invalid, or breached protection.
+- Emergency close when protection is missing, invalid, or breached.
 - Partial-position or limit TP/SL.
 - Position-sizing changes, mainnet enablement, or secrets/configuration changes.
 
 ## Decisions
 
-### Add `attachedProtection` while retaining legacy plan fields
+### Accept exactly three protection shapes
 
-`ExecutionPlan` will gain an authoritative `attachedProtection` object with mode `full_position_market` and stop-loss/take-profit objects containing trigger price, trigger source, and `Market` order type. `buildExecutionPlan` will receive the configured trigger source as a narrow input rather than importing the full application config into the domain module.
+`stop_loss` and `take_profit` become optional at the signal parser boundary, with these valid combinations:
 
-The existing `stopLossAfterFill` and `takeProfitAfterFill` fields remain populated from the same intent during v1. This avoids breaking dry-run responses, journal readers, smoke output, and documentation consumers. The mapper will use `attachedProtection` for new Bybit fields; legacy fields are compatibility views, not a second source of truth.
+1. neither field: entry only;
+2. `stop_loss` only: attached stop loss;
+3. `stop_loss` and `take_profit`: attached stop loss and take profit.
 
-Alternative considered: derive all protection only inside the mapper. Rejected because the execution plan and dry-run API would still misrepresent the intended atomic create operation.
+`take_profit` without `stop_loss` is rejected in v1. Risk validation remains shape-aware: entry-only has no protection ordering check; stop-only requires the stop on the protective side of entry; stop-plus-take requires the existing complete long or short ordering.
 
-### Use Bybit Full mode with market protection only
+Alternative considered: accept any independent combination. Rejected because the requested v1 contract deliberately does not support take-profit-only positions.
 
-Create payloads will set `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`, `tpslMode: "Full"`, `tpOrderType: "Market"`, and `slOrderType: "Market"`. Full-position market protection is the smallest operationally useful mode and avoids limit-price and partial-size semantics.
+### Make `ExecutionPlan.protection` the only source of truth
 
-Alternative considered: use Partial mode to preserve future flexibility. Rejected because it introduces quantity and limit-price choices that are explicitly outside v1.
+The execution plan will contain `entryOrder` and a `protection` discriminated union:
 
-### Use the configured trigger source for entry and protection in v1
+```ts
+type Protection =
+  | { mode: "none" }
+  | {
+      mode: "attached_full_position_market";
+      stopLoss?: { triggerPrice: string; triggerBy: string; orderType: "Market" };
+      takeProfit?: { triggerPrice: string; triggerBy: string; orderType: "Market" };
+    };
+```
 
-Entry, take-profit, and stop-loss will all use `config.bybitTriggerBy`, whose current default is `LastPrice`. Keeping one configured source preserves existing behavior and avoids adding configuration surface during the first attached-protection step. Documentation will state this default explicitly.
+The attached variant must contain at least one protection leg. `stopLossAfterFill` and `takeProfitAfterFill` are removed, and no second protection representation is retained. The mapper, API previews, tests, and journaled execution plans read only `protection`.
 
-For later production hardening, entry, TP, and SL may need separate trigger-source settings; in particular, `MarkPrice` may be preferable for stop protection to reduce sensitivity to last-price wicks. That split requires an explicit contract and migration decision and is outside v1.
+Alternative considered: retain old fields as aliases. Rejected because aliases create two representations that can disagree and there is no legacy consumer to protect.
 
-### Amend entry and attached protection through the existing update flow
+### Map create fields conditionally
 
-`BybitAmendOrderPayload` will support optional `takeProfit`, `stopLoss`, `tpTriggerBy`, and `slTriggerBy`, and the mapper will populate them from the updated execution plan alongside the existing entry trigger fields. The initial order already establishes Full market mode, so v1 does not need to send `tpOrderType` or `slOrderType` on amend; those fields are not part of the official amend request contract. The mapper may include `tpslMode: "Full"` only if the implementation keeps the type aligned with the verified official amend contract.
+For `protection.mode === "none"`, `createEntryOrder` contains no `stopLoss`, `takeProfit`, TP/SL trigger source, mode, or TP/SL order-type fields.
 
-The current service order remains: parse and validate the complete bbb payload, enforce immutable `instance_id`, build a new plan, map one amend request, call guarded execution, then journal updated intent/plan/status on success. This keeps the three updated prices coherent and preserves current failure behavior.
+For attached protection, the mapper adds `tpslMode: "Full"` and only the fields required by present legs:
 
-Alternative considered: call `/v5/position/trading-stop` after amendment. Rejected because the entry is still pending and v1 is specifically attached-entry protection; position repair belongs after verification detects a filled, unprotected position.
+- stop loss: `stopLoss`, `slTriggerBy`, `slOrderType: "Market"`;
+- take profit: `takeProfit`, `tpTriggerBy`, `tpOrderType: "Market"`.
 
-### Add `wouldAttachProtection` without renaming current response fields
+Entry and both protection legs use `config.bybitTriggerBy`, currently defaulting to `LastPrice`. Separate trigger-source configuration remains future work.
 
-POST and PUT success, dry-run, and Bybit failure response bodies will add `wouldAttachProtection: executionPlan.attachedProtection`. Existing fields such as `wouldCreateStopLossAfterFill`, `wouldUseStopLossAfterFill`, and their take-profit counterparts remain unchanged for compatibility. `wouldSendToBybit` continues to expose the exact mapped payload.
+### Treat PUT as the desired complete pending-intent representation
 
-Alternative considered: rename the existing planned-after-fill fields. Rejected because it would create an unnecessary API break before consumers have migrated to the explicit field.
+`PUT /intents/:signalId` continues to parse and validate a complete signal body, preserve `instance_id`, rebuild the execution plan, and target the existing entry `orderLinkId`. The amend payload includes the updated entry trigger and every present protection leg with its trigger source.
 
-### Keep intent protection status semantics stable in v1
+When the new desired plan removes a previously attached leg, the implementation must explicitly clear that Bybit leg using the V5 amend removal value rather than omitting the field and accidentally retaining stale protection. Entry-only amendment therefore clears both legs; stop-only amendment clears take profit. This keeps Bybit state aligned with the single execution-plan source of truth.
 
-The existing intent status value `protection: "waiting_for_entry_fill"` remains unchanged. Attached TP/SL belongs to the pending order but only becomes position protection if the entry fills and Bybit activates it. Claiming `active` before verification would overstate safety. Future watcher work can introduce verified protection state transitions using the new types.
+Alternative considered: treat omitted protection as "leave unchanged." Rejected because that conflicts with PUT replacement semantics and can make the journaled plan disagree with Bybit.
 
-### Add future types with zero runtime wiring
+### Expose one response model
 
-`src/services/protection/protectionTypes.ts` will export `ProtectionState`, `ProtectionRepairAction`, and `ProtectionCheckResult`. The union values cover attached, active, missing, invalid, breached, set-trading-stop repair, and market-close repair. No route, service, adapter method, journal event, timer, or watcher will consume them in this change.
+POST and PUT dry-run, live success, and Bybit failure responses expose the execution plan's `protection` in one explicit preview field, such as `wouldUseProtection`. Existing entry and exact `wouldSendToBybit` payload previews remain. No `wouldCreateStopLossAfterFill`, `wouldCreateTakeProfitAfterFill`, `wouldUseStopLossAfterFill`, or `wouldUseTakeProfitAfterFill` fields are produced.
 
-### Build a separate guarded smoke script
+### Keep verification and repair in a separate change
 
-The attached-protection smoke will follow the established sandbox scripts: explicit `ABI_CONFIRM_TESTNET_WRITE=YES`, `/execution/mode` validation, unique timestamped identifiers, environment-supplied prices, temporary response files, expected-status checks, and best-effort cancellation on failure after confirmed creation. Because Bybit create/amend acknowledgement is asynchronous, order queries after those acknowledgements will use a bounded retry of at most five attempts with a 0.5-1 second delay. The existing amend smoke will use the same polling behavior.
+This change ends when Abi can express, create, and amend the desired optional attached protection. A subsequent `protection-verification-and-repair-v1` change will design:
 
-The smoke will print protection values when Bybit returns them, but missing `takeProfit`, `stopLoss`, or `tpslMode` fields will not fail v1. Its success criteria are accepted create, successful order query, successful cancellation, and successful cleanup with no active entry order. It will be documented but not executed automatically.
+- bounded query/retry after asynchronous create/amend acknowledgement;
+- verification of pending order protection;
+- after-fill watcher and position protection verification;
+- repair of missing protection through `/v5/position/trading-stop`;
+- emergency market close when a position exists and current price has already breached the intended stop.
+
+Keeping this separate prevents create mapping from being coupled prematurely to monitoring, recovery, and emergency policy.
 
 ## Risks / Trade-offs
 
-- [Bybit accepts the create request but protection is absent or not activated after fill] → Document that v1 has no verification guarantee; keep the status at `waiting_for_entry_fill`; prioritize watcher/check/repair as the next change.
-- [Bybit acknowledgement arrives before the order view is updated] → Poll the query briefly with a fixed attempt limit; do not use an unbounded wait.
-- [Realtime order query omits attached TP/SL fields] → Treat those fields as informational smoke output, not v1 proof; defer authoritative verification to the watcher/check phase.
-- [A fast fill occurs before the smoke script cancels] → Require distant operator-selected trigger prices, keep demo/testnet guard checks, and report final active orders; position cleanup remains a manual operator responsibility in this v1 script.
-- [Create or amend payload semantics differ across Bybit account/category modes] → Keep scope to the existing linear demo/testnet configuration and cover exact mapper payloads with unit tests.
-- [Legacy `AfterFill` names become misleading] → Mark `attachedProtection` as authoritative in docs and code usage while retaining legacy fields only for compatibility.
-- [Amend updates one price but rejects another] → Send entry and protection in one verified V5 amend request; preserve the old plan and journal state if Bybit rejects it.
-- [Responses and journal payloads grow] → Accept the small duplication during migration to avoid a breaking response change.
+- [Bybit accepts create/amend asynchronously] → Do not claim verification in this change; handle acknowledgement polling in `protection-verification-and-repair-v1`.
+- [Omitted amend fields leave stale Bybit protection] → Use explicit removal values when the PUT desired state removes a leg.
+- [Optional protection weakens current price assumptions] → Add shape-specific parser and risk tests for all three valid forms and reject take-profit-only input.
+- [A position can still become unprotected after acceptance] → Document the limitation and prioritize the separate verification/repair change.
+- [Removing temporary fields changes responses and journals] → Accept the clean break because the project is new and has no legacy compatibility requirement.
 
 ## Migration Plan
 
-1. Add domain and mapper types, then update all execution-plan builder call sites and unit fixtures.
-2. Add response previews and future-only protection types.
-3. Update tests, docs, and the guarded smoke script.
-4. Run `npm test` and `npm run build`; do not run the live smoke as part of implementation verification.
-5. Deploy first to dry-run, inspect `wouldSendToBybit`, then perform a separately authorized demo smoke.
+1. Make signal protection fields optional and add shape-aware validation.
+2. Replace the execution-plan planned-after-fill fields with the `protection` union and update all builders/readers.
+3. Map conditional create and complete desired-state amend payloads.
+4. Replace response previews and update tests and documentation.
+5. Run `npm test` and `npm run build`; do not run live smoke without separate authorization.
 
-Rollback is a normal code revert: removing the new mapped fields returns Bybit create/amend behavior to entry-only operation. Because no persistent schema migration or new journal event type is introduced, existing journal records remain readable. Journaled execution plans containing `attachedProtection` must be tolerated as additive JSON by older readers.
+No persistent migration or compatibility layer is required. Rollback is a normal code revert before production adoption.
 
 ## Open Questions
 
-- Does Bybit's realtime order query consistently echo `takeProfit`, `stopLoss`, and `tpslMode` for conditional orders in the configured demo account mode? The smoke script will print these fields when present, but their absence will neither fail the smoke nor be treated as proof that protection is missing.
-- Should the subsequent verification change inspect the conditional order first, the resulting position trading-stop state after fill, or both? That decision belongs to the fill watcher and repair design.
+- Should separate entry, stop-loss, and take-profit trigger sources be introduced after v1, with `MarkPrice` considered for stop protection?
+- What exact verification and emergency-close policy should `protection-verification-and-repair-v1` use after a fill or a breached stop?

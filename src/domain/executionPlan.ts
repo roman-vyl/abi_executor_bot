@@ -12,26 +12,31 @@ export type ExecutionPlan = {
     triggerDirection: "rises_to" | "falls_to";
     qty: string;
   };
-  stopLossAfterFill: {
-    orderLinkId: string;
-    type: "stop_market";
-    symbol: string;
-    side: "long" | "short";
-    triggerPrice: string;
-    qty: string;
-  };
-  takeProfitAfterFill: {
-    orderLinkId: string;
-    type: "take_profit_market";
-    symbol: string;
-    side: "long" | "short";
-    triggerPrice: string;
-    qty: string;
-  };
+  protection: Protection;
   sizingReason: string;
 };
 
-export function buildExecutionPlan(intent: SignalIntent, positionSize: PositionSize): ExecutionPlan {
+export type Protection =
+  | {
+      mode: "none";
+    }
+  | {
+      mode: "attached_full_position_market";
+      stopLoss: ProtectionLeg;
+      takeProfit?: ProtectionLeg;
+    };
+
+export type ProtectionLeg = {
+  triggerPrice: string;
+  triggerBy: string;
+  orderType: "Market";
+};
+
+export function buildExecutionPlan(
+  intent: SignalIntent,
+  positionSize: PositionSize,
+  protectionTriggerBy: string,
+): ExecutionPlan {
   return {
     entryOrder: {
       orderLinkId: buildOrderLinkId(intent.instanceId, "entry"),
@@ -42,26 +47,36 @@ export function buildExecutionPlan(intent: SignalIntent, positionSize: PositionS
       triggerDirection: intent.entry.triggerDirection,
       qty: positionSize.qty,
     },
-    stopLossAfterFill: {
-      orderLinkId: buildOrderLinkId(intent.instanceId, "sl"),
-      type: "stop_market",
-      symbol: intent.symbol,
-      side: oppositeSide(intent.side),
-      triggerPrice: intent.stopLoss.triggerPrice,
-      qty: positionSize.qty,
-    },
-    takeProfitAfterFill: {
-      orderLinkId: buildOrderLinkId(intent.instanceId, "tp"),
-      type: "take_profit_market",
-      symbol: intent.symbol,
-      side: oppositeSide(intent.side),
-      triggerPrice: intent.takeProfit.triggerPrice,
-      qty: positionSize.qty,
-    },
+    protection: buildProtection(intent, protectionTriggerBy),
     sizingReason: positionSize.reason,
   };
 }
 
-function oppositeSide(side: "long" | "short"): "long" | "short" {
-  return side === "long" ? "short" : "long";
+function buildProtection(intent: SignalIntent, triggerBy: string): Protection {
+  if (intent.stopLoss === undefined) {
+    return { mode: "none" };
+  }
+
+  const stopLoss: ProtectionLeg = {
+    triggerPrice: intent.stopLoss.triggerPrice,
+    triggerBy,
+    orderType: "Market",
+  };
+
+  if (intent.takeProfit === undefined) {
+    return {
+      mode: "attached_full_position_market",
+      stopLoss,
+    };
+  }
+
+  return {
+    mode: "attached_full_position_market",
+    stopLoss,
+    takeProfit: {
+      triggerPrice: intent.takeProfit.triggerPrice,
+      triggerBy,
+      orderType: "Market",
+    },
+  };
 }

@@ -1,117 +1,96 @@
 ## ADDED Requirements
 
-### Requirement: Execution plan models attached protection explicitly
-Abi SHALL represent full-position market stop-loss and take-profit protection as an explicit `attachedProtection` component of every execution plan built from a valid bbb signal. The component SHALL carry the bbb-provided absolute trigger prices, the configured Bybit trigger source, `full_position_market` mode, and market order types. Abi SHALL retain the existing `stopLossAfterFill` and `takeProfitAfterFill` plan fields during v1 for backward compatibility.
+### Requirement: Signal contract supports optional protection
+Abi SHALL accept exactly three bbb signal shapes: entry only, entry with stop loss, and entry with stop loss plus take profit. Abi SHALL reject take profit without stop loss.
 
-#### Scenario: Long plan contains attached protection
-- **WHEN** Abi builds an execution plan for a valid long signal
-- **THEN** `attachedProtection.stopLoss.triggerPrice` equals `intent.stopLoss.triggerPrice`
-- **AND** `attachedProtection.takeProfit.triggerPrice` equals `intent.takeProfit.triggerPrice`
-- **AND** both attached orders use the configured trigger source and `Market` order type
-- **AND** the legacy planned-after-fill fields remain present
+#### Scenario: Entry-only signal is accepted
+- **WHEN** bbb submits a valid signal with `entry` and without `stop_loss` or `take_profit`
+- **THEN** Abi accepts the signal as an entry-only intent
 
-#### Scenario: Short plan preserves bbb prices
-- **WHEN** Abi builds an execution plan for a valid short signal where take profit is below entry and stop loss is above entry
-- **THEN** the attached protection preserves those stop-loss and take-profit prices without swapping or deriving them
+#### Scenario: Entry plus stop signal is accepted
+- **WHEN** bbb submits a valid signal with `entry` and `stop_loss` and without `take_profit`
+- **THEN** Abi accepts the signal with stop-loss protection
 
-### Requirement: Create payload attaches full-position market TP and SL
-Abi SHALL map protection exclusively from `ExecutionPlan.attachedProtection` into the Bybit V5 entry create payload using `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`, `tpslMode: "Full"`, `tpOrderType: "Market"`, and `slOrderType: "Market"`. The compatibility fields `stopLossAfterFill` and `takeProfitAfterFill` SHALL NOT be mapper inputs. Existing entry, quantity, trigger, side, and `orderLinkId` mapping SHALL remain unchanged.
+#### Scenario: Entry plus stop plus take signal is accepted
+- **WHEN** bbb submits a valid signal with `entry`, `stop_loss`, and `take_profit`
+- **THEN** Abi accepts the signal with stop-loss and take-profit protection
 
-#### Scenario: Long entry maps to protected Buy order
-- **WHEN** Abi maps a long stop-market execution plan with `rises_to`
-- **THEN** the create payload uses side `Buy` and trigger direction `1`
-- **AND** it includes the plan's take-profit and stop-loss prices
-- **AND** it uses full-position market TP/SL with the configured trigger source
+#### Scenario: Take profit without stop is rejected
+- **WHEN** bbb submits `entry` and `take_profit` without `stop_loss`
+- **THEN** Abi rejects the signal before calling Bybit
 
-#### Scenario: Short entry maps to protected Sell order
-- **WHEN** Abi maps a short stop-market execution plan with valid short TP/SL prices
-- **THEN** the create payload uses side `Sell`
-- **AND** it passes the lower take-profit and higher stop-loss prices through unchanged
-- **AND** it uses full-position market TP/SL
+### Requirement: Execution plan has one protection source of truth
+Every execution plan SHALL contain `entryOrder` and `protection`. Protection SHALL be either `{ mode: "none" }` or an `attached_full_position_market` value containing at least one present market protection leg. The execution plan SHALL NOT produce planned-after-fill or compatibility protection fields.
 
-#### Scenario: Compatibility fields are not the source of truth
-- **WHEN** an execution plan is mapped to a Bybit create or amend payload
-- **THEN** all attached-protection fields are read from `attachedProtection`
-- **AND** the mapper does not derive them from `stopLossAfterFill` or `takeProfitAfterFill`
+#### Scenario: Entry-only plan has no protection
+- **WHEN** Abi builds an execution plan from an entry-only signal
+- **THEN** `protection.mode` is `none`
+- **AND** the plan does not contain `stopLossAfterFill` or `takeProfitAfterFill`
 
-### Requirement: Pending-entry amend updates attached protection
-Abi SHALL include the updated entry trigger price, take-profit price, stop-loss price, and TP/SL trigger sources in the Bybit V5 amend payload produced for `PUT /intents/:signalId`. The amend flow SHALL retain existing validation, identity, journaling, dry-run, and live-guard behavior.
+#### Scenario: Protected plan contains only supplied legs
+- **WHEN** Abi builds a plan from a signal with stop loss and optional take profit
+- **THEN** `protection.mode` is `attached_full_position_market`
+- **AND** its stop-loss and take-profit values exactly reflect the legs supplied by bbb
+- **AND** no planned-after-fill fields are produced
 
-#### Scenario: Update maps all three changed prices
-- **WHEN** bbb updates a pending intent with a new entry trigger, stop loss, and take profit
-- **THEN** the amend payload contains the new `triggerPrice`, `stopLoss`, and `takeProfit`
-- **AND** it includes `tpTriggerBy` and `slTriggerBy` from configuration
-- **AND** it targets the existing entry `orderLinkId`
+### Requirement: Entry-only signal maps without TP/SL fields
+Abi SHALL map an entry-only plan to a Bybit create payload containing only entry-order fields and no TP/SL fields.
 
-#### Scenario: Invalid updated price ordering is rejected
-- **WHEN** an update violates the existing long or short price-ordering rule
-- **THEN** Abi rejects the update before calling Bybit
+#### Scenario: Entry-only create payload
+- **WHEN** `protection.mode` is `none`
+- **THEN** `createEntryOrder` omits `stopLoss`, `takeProfit`, `slTriggerBy`, `tpTriggerBy`, `tpslMode`, `slOrderType`, and `tpOrderType`
 
-### Requirement: API responses expose attached protection compatibly
-Create and update responses SHALL expose the attached-protection plan in a new `wouldAttachProtection` field for dry-run, live success, and Bybit create/amend failure responses. Abi SHALL preserve the existing entry and planned-after-fill response fields during v1.
+### Requirement: Stop-only signal maps only stop loss
+Abi SHALL map stop-only protection to a Full-mode market stop loss without adding take-profit fields.
 
-#### Scenario: Dry-run create reports attached protection
-- **WHEN** a valid signal is accepted while live execution is disabled
-- **THEN** the response status remains `accepted_dry_run`
-- **AND** `wouldAttachProtection` contains the stop-loss, take-profit, mode, trigger sources, and market order types
-- **AND** `wouldSendToBybit.createEntryOrder` shows the attached TP/SL fields
-- **AND** existing `wouldCreateEntry`, `wouldCreateStopLossAfterFill`, and `wouldCreateTakeProfitAfterFill` fields remain present
+#### Scenario: Entry plus stop create payload
+- **WHEN** protection contains `stopLoss` and no `takeProfit`
+- **THEN** `createEntryOrder` includes `stopLoss`, `slTriggerBy`, `slOrderType: "Market"`, and `tpslMode: "Full"`
+- **AND** it omits `takeProfit`, `tpTriggerBy`, and `tpOrderType`
 
-#### Scenario: Dry-run update reports amended protection
-- **WHEN** a valid pending intent update is processed in dry-run mode
-- **THEN** the response status remains `updated_dry_run`
-- **AND** `wouldAttachProtection` and `wouldSendToBybit.amendEntryOrder` show the updated stop-loss and take-profit values
-- **AND** existing update response fields remain present
+### Requirement: Stop-plus-take signal maps both protection legs
+Abi SHALL map stop-loss and take-profit protection to Full-mode market TP/SL fields using bbb prices unchanged.
 
-#### Scenario: Bybit failure remains observable
-- **WHEN** Bybit rejects a protected create or amend request
-- **THEN** Abi preserves the existing failure status and journal behavior
-- **AND** the failure response shows the attached protection that Abi attempted to send
+#### Scenario: Entry plus stop plus take create payload
+- **WHEN** protection contains both `stopLoss` and `takeProfit`
+- **THEN** `createEntryOrder` includes both prices, both configured trigger sources, both `Market` order types, and `tpslMode: "Full"`
+
+### Requirement: Pending-intent PUT amends entry and desired protection
+`PUT /intents/:signalId` SHALL amend the existing pending entry by its stable entry `orderLinkId`. The amend request SHALL carry the updated entry trigger, stop loss, take profit, and corresponding trigger sources represented by the new desired execution plan, and SHALL explicitly clear protection legs removed by the PUT representation.
+
+#### Scenario: PUT updates entry stop and take together
+- **WHEN** bbb submits a valid PUT body with new entry, stop-loss, and take-profit prices
+- **THEN** the amend payload targets the existing entry `orderLinkId`
+- **AND** contains the updated `triggerPrice`, `stopLoss`, `takeProfit`, `slTriggerBy`, and `tpTriggerBy`
+
+#### Scenario: PUT removes take profit
+- **WHEN** the existing pending intent has stop loss and take profit and the new valid PUT body contains stop loss only
+- **THEN** the amend payload updates stop loss and explicitly clears take profit
+
+#### Scenario: PUT removes all protection
+- **WHEN** the new valid PUT body is entry only
+- **THEN** the amend payload updates entry and explicitly clears stop loss and take profit
+
+### Requirement: API responses expose only the current protection model
+Create and update responses SHALL expose the execution plan's single `protection` model and exact Bybit payload preview. They SHALL NOT expose planned-after-fill or compatibility fields.
+
+#### Scenario: Dry-run response reflects entry-only plan
+- **WHEN** an entry-only signal is accepted in dry-run mode
+- **THEN** the response shows `protection.mode` as `none`
+- **AND** the Bybit preview has no TP/SL fields
+- **AND** no planned-after-fill response fields are present
+
+#### Scenario: Dry-run response reflects supplied protection
+- **WHEN** a protected signal is accepted in dry-run mode
+- **THEN** the response shows only the supplied protection legs and their mapped Bybit fields
 
 ### Requirement: Existing execution safeguards remain in force
-Attached protection SHALL use the existing fixed position quantity and SHALL NOT weaken dry-run, credential, demo/testnet, or mainnet guard behavior. v1 SHALL NOT add fill watching, protection verification or repair, emergency close, partial TP, limit TP/SL, or mainnet execution.
+Optional attached protection SHALL NOT change fixed sizing, deterministic entry identity, dry-run behavior, credential checks, demo/testnet gates, or the mainnet guard. This change SHALL NOT implement verification, watcher, repair, emergency close, partial TP, limit TP/SL, or sizing changes.
 
 #### Scenario: Mainnet remains blocked
-- **WHEN** attached-protection execution is configured with `BYBIT_ENV=mainnet`
-- **THEN** the live guard prevents the create or amend request from reaching Bybit
+- **WHEN** execution is configured with `BYBIT_ENV=mainnet`
+- **THEN** the live guard prevents create and amend requests from reaching Bybit
 
-#### Scenario: Quantity remains fixed
-- **WHEN** Abi builds a protected entry plan in v1
-- **THEN** entry sizing continues to use `ABI_FIXED_SMOKE_QTY`
-
-#### Scenario: Trigger source comes from configuration
-- **WHEN** Abi builds and maps attached protection in v1
-- **THEN** entry, take-profit, and stop-loss trigger sources use `config.bybitTriggerBy`
-- **AND** the default remains `LastPrice`
-- **AND** v1 does not introduce separate entry, TP, and SL trigger-source settings
-
-### Requirement: Future protection states are typed but not executed
-Abi SHALL define non-runtime protection state, repair action, and check result types under `src/services/protection/` for future verification and recovery work. No v1 route, service, watcher, or journal flow SHALL execute a repair action.
-
-#### Scenario: Future model represents unsafe states and repairs
-- **WHEN** TypeScript consumers import the future protection model
-- **THEN** it can represent `not_checked`, `attached_to_entry`, `active_on_position`, `missing`, `invalid`, and `breached` states
-- **AND** it can represent `none`, `set_trading_stop`, and `close_position_market` repair actions
-
-### Requirement: Guarded sandbox smoke covers attached protection
-The project SHALL provide a `smoke:sandbox:attached-protection` command that refuses to run without explicit write confirmation, validates the execution mode, creates and queries a protected entry, prints available protection values, cancels the intent, and reports final active-order state. Queries following asynchronous Bybit create or amend acknowledgements SHALL use a short bounded retry. Adding this script SHALL NOT authorize or automatically run a live smoke.
-
-#### Scenario: Confirmation is absent
-- **WHEN** the smoke command runs without `ABI_CONFIRM_TESTNET_WRITE=YES`
-- **THEN** it exits before creating an order
-
-#### Scenario: Sandbox mode is valid
-- **WHEN** the smoke command runs with explicit confirmation and `/execution/mode` reports demo or testnet with `canExecuteLive: true`
-- **THEN** it performs create, query, cancel, and final active-order query in that order
-- **AND** it prints create, query, cancel, and cleanup statuses plus any available `takeProfit`, `stopLoss`, and `tpslMode`
-
-#### Scenario: Query is briefly stale after acknowledgement
-- **WHEN** Bybit acknowledges create or amend but the following order query does not yet show the accepted state
-- **THEN** the smoke flow retries the query up to five times with a delay between 0.5 and 1 second
-- **AND** it fails only after the bounded attempts are exhausted
-
-#### Scenario: Realtime query omits attached-protection fields
-- **WHEN** create is accepted, order query succeeds, cancel succeeds, and cleanup reports no active order
-- **AND** the realtime order response omits `takeProfit`, `stopLoss`, or `tpslMode`
-- **THEN** the smoke flow still succeeds
-- **AND** it prints only the protection fields that are available
+#### Scenario: Verification and repair are absent
+- **WHEN** a protected create or amend is acknowledged
+- **THEN** this change performs no post-acknowledgement polling, protection verification, watcher action, repair, or emergency close

@@ -18,7 +18,7 @@ test("cancelIntent cancels a planned intent in dry-run without calling Bybit", a
     const config = makeTestConfig();
     const bybit = new FakeBybitAdapter();
     const intent = makeIntent();
-    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" });
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
 
     await seedPlannedIntent(journal, intent, plan);
 
@@ -92,7 +92,7 @@ test("updateIntent rejects changing instance_id for an existing intent", async (
     const config = makeTestConfig();
     const bybit = new FakeBybitAdapter();
     const intent = makeIntent();
-    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" });
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
 
     await seedPlannedIntent(journal, intent, plan);
 
@@ -129,7 +129,7 @@ test("updateIntent amends a planned intent in dry-run without calling Bybit", as
     const config = makeTestConfig();
     const bybit = new FakeBybitAdapter();
     const intent = makeIntent();
-    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" });
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
 
     await seedPlannedIntent(journal, intent, plan);
 
@@ -145,11 +145,123 @@ test("updateIntent amends a planned intent in dry-run without calling Bybit", as
     assert.equal((result.body as { status: string }).status, "updated_dry_run");
     assert.equal(bybit.amendOrderCalls.length, 0);
 
+    const body = result.body as {
+      wouldUseProtection: { mode: string; stopLoss: { triggerPrice: string }; takeProfit: { triggerPrice: string } };
+      wouldSendToBybit: { amendEntryOrder: { triggerPrice: string; stopLoss: string; takeProfit: string } };
+    };
+    assert.equal(body.wouldUseProtection.mode, "attached_full_position_market");
+    assert.equal(body.wouldUseProtection.stopLoss.triggerPrice, "60900.0");
+    assert.equal(body.wouldUseProtection.takeProfit.triggerPrice, "62100.0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.triggerPrice, "61300.0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.stopLoss, "60900.0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.takeProfit, "62100.0");
+    assert.equal("wouldUseStopLossAfterFill" in (result.body as object), false);
+    assert.equal("wouldUseTakeProfitAfterFill" in (result.body as object), false);
+
     const updatedPlan = await journal.findLastEvent({
       signalId: intent.signalId,
       eventType: "execution_plan_updated",
     });
     assert.equal((updatedPlan?.payload as { entryOrder: { triggerPrice: string } }).entryOrder.triggerPrice, "61300.0");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("updateIntent clears take profit when PUT keeps stop loss only", async () => {
+  const { journal, cleanup } = await makeJournal();
+  try {
+    const config = makeTestConfig();
+    const bybit = new FakeBybitAdapter();
+    const intent = makeIntent();
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
+    await seedPlannedIntent(journal, intent, plan);
+
+    const result = await updateIntent({
+      signalId: intent.signalId,
+      payload: makeBbbPayload({ triggerPrice: "61300.0", includeTakeProfit: false }),
+      config,
+      bybit,
+      journal,
+    });
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as {
+      wouldUseProtection: { mode: string; stopLoss: { triggerPrice: string }; takeProfit?: unknown };
+      wouldSendToBybit: { amendEntryOrder: { stopLoss: string; takeProfit: string } };
+    };
+    assert.equal(body.wouldUseProtection.mode, "attached_full_position_market");
+    assert.equal(body.wouldUseProtection.stopLoss.triggerPrice, "60900.0");
+    assert.equal(body.wouldUseProtection.takeProfit, undefined);
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.stopLoss, "60900.0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.takeProfit, "0");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("updateIntent clears all protection when PUT is entry-only", async () => {
+  const { journal, cleanup } = await makeJournal();
+  try {
+    const config = makeTestConfig();
+    const bybit = new FakeBybitAdapter();
+    const intent = makeIntent();
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
+    await seedPlannedIntent(journal, intent, plan);
+
+    const result = await updateIntent({
+      signalId: intent.signalId,
+      payload: makeBbbPayload({ triggerPrice: "61300.0", includeStopLoss: false, includeTakeProfit: false }),
+      config,
+      bybit,
+      journal,
+    });
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as {
+      wouldUseProtection: { mode: string };
+      wouldSendToBybit: { amendEntryOrder: { stopLoss: string; takeProfit: string } };
+    };
+    assert.deepEqual(body.wouldUseProtection, { mode: "none" });
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.stopLoss, "0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.takeProfit, "0");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("updateIntent failure response reports the desired protection", async () => {
+  const { journal, cleanup } = await makeJournal();
+  try {
+    const config = makeTestConfig({
+      dryRun: false,
+      liveTradingEnabled: true,
+      bybitApiKey: "test-key",
+      bybitApiSecret: "test-secret",
+    });
+    const bybit = new FailingAmendBybitAdapter();
+    const intent = makeIntent();
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
+    await seedPlannedIntent(journal, intent, plan);
+
+    const result = await updateIntent({
+      signalId: intent.signalId,
+      payload: makeBbbPayload({ triggerPrice: "61300.0" }),
+      config,
+      bybit,
+      journal,
+    });
+
+    assert.equal(result.statusCode, 502);
+    const body = result.body as {
+      status: string;
+      wouldUseProtection: { mode: string };
+      wouldSendToBybit: { amendEntryOrder: { stopLoss: string; takeProfit: string } };
+    };
+    assert.equal(body.status, "bybit_entry_order_amend_failed");
+    assert.equal(body.wouldUseProtection.mode, "attached_full_position_market");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.stopLoss, "60900.0");
+    assert.equal(body.wouldSendToBybit.amendEntryOrder.takeProfit, "62100.0");
   } finally {
     await cleanup();
   }
@@ -161,7 +273,7 @@ test("getEntryOrder returns skipped_bybit_query without credentials", async () =
     const config = makeTestConfig();
     const bybit = new FakeBybitAdapter();
     const intent = makeIntent();
-    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" });
+    const plan = buildExecutionPlan(intent, { qty: config.fixedSmokeQty, reason: "test" }, config.bybitTriggerBy);
 
     await seedPlannedIntent(journal, intent, plan);
 
@@ -239,8 +351,10 @@ function makeIntent(overrides: Partial<SignalIntent> = {}): SignalIntent {
 function makeBbbPayload(input: {
   instanceId?: string;
   triggerPrice: string;
+  includeStopLoss?: boolean;
+  includeTakeProfit?: boolean;
 }): object {
-  return {
+  const payload: Record<string, unknown> = {
     signal_id: "sig-service-unit-001",
     instance_id: input.instanceId ?? "ema200-touch:BTCUSDT:1h",
     strategy_id: "ema200-touch",
@@ -251,13 +365,28 @@ function makeBbbPayload(input: {
       trigger_price: input.triggerPrice,
       trigger_direction: "rises_to",
     },
-    stop_loss: {
+  };
+
+  if (input.includeStopLoss !== false) {
+    payload.stop_loss = {
       type: "stop_market",
       trigger_price: "60900.0",
-    },
-    take_profit: {
+    };
+  }
+
+  if (input.includeTakeProfit !== false) {
+    payload.take_profit = {
       type: "take_profit_market",
       trigger_price: "62100.0",
-    },
-  };
+    };
+  }
+
+  return payload;
+}
+
+class FailingAmendBybitAdapter extends FakeBybitAdapter {
+  override async amendOrder(payload: Parameters<FakeBybitAdapter["amendOrder"]>[0]): Promise<unknown> {
+    this.amendOrderCalls.push(payload);
+    throw new Error("Bybit rejected amend");
+  }
 }

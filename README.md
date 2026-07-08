@@ -18,7 +18,7 @@ The Bybit demo smoke flow has been verified end to end:
 Current limitations:
 
 - position sizing uses the fixed `ABI_FIXED_SMOKE_QTY=0.001` quantity;
-- stop-loss and take-profit orders are only planned for creation after the entry fills; Abi does not yet watch for fills or place this protection automatically;
+- optional stop-loss and take-profit are attached to the entry request, but Abi does not yet verify or repair protection after create or fill;
 - the live-execution guard blocks mainnet, so live writes are limited to Bybit demo or testnet environments.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the next development steps and [docs/BBB_CONTRACT.md](docs/BBB_CONTRACT.md) for the current bbb-to-Abi payload contract.
@@ -50,16 +50,20 @@ bbb sends the trading intent without position size:
 }
 ```
 
+`stop_loss` and `take_profit` are optional. The supported shapes are entry only, entry with stop loss, and entry with stop loss plus take profit. Take profit without stop loss is rejected.
+
 Abi calculates the position size internally. For the first smoke version this is a fixed placeholder:
 
 ```env
 ABI_FIXED_SMOKE_QTY=0.001
 ```
 
-Abi rejects obviously inverted prices:
+When protection is present, Abi rejects inverted prices:
 
-- `long`: `stop_loss < entry < take_profit`
-- `short`: `take_profit < entry < stop_loss`
+- stop-only `long`: `stop_loss < entry`
+- stop-only `short`: `entry < stop_loss`
+- fully protected `long`: `stop_loss < entry < take_profit`
+- fully protected `short`: `take_profit < entry < stop_loss`
 
 Abi allows multiple active intents for the same symbol when they have different `instance_id` values, for example `ema200-touch:BTCUSDT:1h` and `ema500-touch:BTCUSDT:1h`. It rejects a new active intent with an already planned `instance_id`; bbb should update the existing intent instead.
 
@@ -111,7 +115,7 @@ In dry-run mode Abi returns the execution plan instead of sending orders to Bybi
     "instanceId": "ema200-touch:BTCUSDT:1h",
     "status": "planned",
     "entry": "planned",
-    "protection": "waiting_for_entry_fill",
+    "protection": "planned_attached_to_entry",
     "position": "not_open"
   },
   "wouldCreateEntry": {
@@ -123,21 +127,18 @@ In dry-run mode Abi returns the execution plan instead of sending orders to Bybi
     "triggerDirection": "rises_to",
     "qty": "0.001"
   },
-  "wouldCreateStopLossAfterFill": {
-    "orderLinkId": "abi-sl-7f244acccf67c2764391",
-    "type": "stop_market",
-    "symbol": "BTCUSDT",
-    "side": "short",
-    "triggerPrice": "60880.0",
-    "qty": "0.001"
-  },
-  "wouldCreateTakeProfitAfterFill": {
-    "orderLinkId": "abi-tp-7f244acccf67c2764391",
-    "type": "take_profit_market",
-    "symbol": "BTCUSDT",
-    "side": "short",
-    "triggerPrice": "62000.0",
-    "qty": "0.001"
+  "wouldUseProtection": {
+    "mode": "attached_full_position_market",
+    "stopLoss": {
+      "triggerPrice": "60880.0",
+      "triggerBy": "LastPrice",
+      "orderType": "Market"
+    },
+    "takeProfit": {
+      "triggerPrice": "62000.0",
+      "triggerBy": "LastPrice",
+      "orderType": "Market"
+    }
   },
   "wouldSendToBybit": {
     "createEntryOrder": {
@@ -149,7 +150,14 @@ In dry-run mode Abi returns the execution plan instead of sending orders to Bybi
       "triggerPrice": "61234.5",
       "triggerDirection": 1,
       "triggerBy": "LastPrice",
-      "orderLinkId": "abi-entry-7f244acccf67c2764391"
+      "orderLinkId": "abi-entry-7f244acccf67c2764391",
+      "stopLoss": "60880.0",
+      "takeProfit": "62000.0",
+      "slTriggerBy": "LastPrice",
+      "tpTriggerBy": "LastPrice",
+      "tpslMode": "Full",
+      "slOrderType": "Market",
+      "tpOrderType": "Market"
     }
   },
   "sizingReason": "fixed_smoke_qty_from_ABI_FIXED_SMOKE_QTY"

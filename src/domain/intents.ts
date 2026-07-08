@@ -8,7 +8,7 @@ export type PlannedIntentStatus = {
   instanceId: string;
   status: "planned";
   entry: "planned";
-  protection: "waiting_for_entry_fill";
+  protection: "none" | "planned_attached_to_entry";
   position: "not_open";
 };
 
@@ -31,14 +31,15 @@ export type FailedToCreateEntryIntentStatus = {
 };
 
 export function createPlannedIntentStatus(intent: SignalIntent, executionPlan: ExecutionPlan): IntentStatus {
-  void executionPlan;
-
   return {
     intentId: intent.signalId,
     instanceId: intent.instanceId,
     status: "planned",
     entry: "planned",
-    protection: "waiting_for_entry_fill",
+    protection:
+      executionPlan.protection.mode === "none"
+        ? "none"
+        : "planned_attached_to_entry",
     position: "not_open",
   };
 }

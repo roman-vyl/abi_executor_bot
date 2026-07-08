@@ -96,7 +96,7 @@ export async function handleSignalRoutes(input: {
     }
 
     const positionSize = calculatePositionSize(result.intent, config);
-    const executionPlan = buildExecutionPlan(result.intent, positionSize);
+    const executionPlan = buildExecutionPlan(result.intent, positionSize, config.bybitTriggerBy);
     const bybitPayloads = mapExecutionPlanToBybit(config, executionPlan);
     const intentStatus = createPlannedIntentStatus(result.intent, executionPlan);
 
@@ -164,8 +164,7 @@ export async function handleSignalRoutes(input: {
         signalId: result.intent.signalId,
         intentStatus: failedIntentStatus,
         wouldCreateEntry: executionPlan.entryOrder,
-        wouldCreateStopLossAfterFill: executionPlan.stopLossAfterFill,
-        wouldCreateTakeProfitAfterFill: executionPlan.takeProfitAfterFill,
+        wouldUseProtection: executionPlan.protection,
         wouldSendToBybit: {
           createEntryOrder: bybitPayloads.createEntryOrder,
         },
@@ -192,8 +191,7 @@ export async function handleSignalRoutes(input: {
       signalId: result.intent.signalId,
       intentStatus,
       wouldCreateEntry: executionPlan.entryOrder,
-      wouldCreateStopLossAfterFill: executionPlan.stopLossAfterFill,
-      wouldCreateTakeProfitAfterFill: executionPlan.takeProfitAfterFill,
+      wouldUseProtection: executionPlan.protection,
       wouldSendToBybit: {
         createEntryOrder: bybitPayloads.createEntryOrder,
       },

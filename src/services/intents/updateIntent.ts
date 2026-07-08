@@ -124,7 +124,7 @@ export async function updateIntent(
     }
 
     const positionSize = calculatePositionSize(result.intent, config);
-    const executionPlan = buildExecutionPlan(result.intent, positionSize);
+    const executionPlan = buildExecutionPlan(result.intent, positionSize, config.bybitTriggerBy);
     const bybitPayloads = mapExecutionPlanToBybit(config, executionPlan);
     const intentStatus = createPlannedIntentStatus(result.intent, executionPlan);
 
@@ -160,8 +160,7 @@ export async function updateIntent(
           signalId,
           intentStatus,
           wouldAmendEntry: executionPlan.entryOrder,
-          wouldUseStopLossAfterFill: executionPlan.stopLossAfterFill,
-          wouldUseTakeProfitAfterFill: executionPlan.takeProfitAfterFill,
+          wouldUseProtection: executionPlan.protection,
           wouldSendToBybit: {
             amendEntryOrder: bybitPayloads.amendEntryOrder,
           },
@@ -214,8 +213,7 @@ export async function updateIntent(
         signalId,
         intentStatus,
         wouldAmendEntry: executionPlan.entryOrder,
-        wouldUseStopLossAfterFill: executionPlan.stopLossAfterFill,
-        wouldUseTakeProfitAfterFill: executionPlan.takeProfitAfterFill,
+        wouldUseProtection: executionPlan.protection,
         wouldSendToBybit: {
           amendEntryOrder: bybitPayloads.amendEntryOrder,
         },
