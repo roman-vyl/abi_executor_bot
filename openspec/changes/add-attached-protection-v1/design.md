@@ -41,6 +41,12 @@ Create payloads will set `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`,
 
 Alternative considered: use Partial mode to preserve future flexibility. Rejected because it introduces quantity and limit-price choices that are explicitly outside v1.
 
+### Use the configured trigger source for entry and protection in v1
+
+Entry, take-profit, and stop-loss will all use `config.bybitTriggerBy`, whose current default is `LastPrice`. Keeping one configured source preserves existing behavior and avoids adding configuration surface during the first attached-protection step. Documentation will state this default explicitly.
+
+For later production hardening, entry, TP, and SL may need separate trigger-source settings; in particular, `MarkPrice` may be preferable for stop protection to reduce sensitivity to last-price wicks. That split requires an explicit contract and migration decision and is outside v1.
+
 ### Amend entry and attached protection through the existing update flow
 
 `BybitAmendOrderPayload` will support optional `takeProfit`, `stopLoss`, `tpTriggerBy`, and `slTriggerBy`, and the mapper will populate them from the updated execution plan alongside the existing entry trigger fields. The initial order already establishes Full market mode, so v1 does not need to send `tpOrderType` or `slOrderType` on amend; those fields are not part of the official amend request contract. The mapper may include `tpslMode: "Full"` only if the implementation keeps the type aligned with the verified official amend contract.
@@ -65,11 +71,15 @@ The existing intent status value `protection: "waiting_for_entry_fill"` remains 
 
 ### Build a separate guarded smoke script
 
-The attached-protection smoke will follow the established sandbox scripts: explicit `ABI_CONFIRM_TESTNET_WRITE=YES`, `/execution/mode` validation, unique timestamped identifiers, environment-supplied prices, temporary response files, expected-status checks, and best-effort cancellation on failure after confirmed creation. It will query the entry, print protection values when Bybit returns them, cancel the intent, and query final active orders. It will be documented but not executed automatically.
+The attached-protection smoke will follow the established sandbox scripts: explicit `ABI_CONFIRM_TESTNET_WRITE=YES`, `/execution/mode` validation, unique timestamped identifiers, environment-supplied prices, temporary response files, expected-status checks, and best-effort cancellation on failure after confirmed creation. Because Bybit create/amend acknowledgement is asynchronous, order queries after those acknowledgements will use a bounded retry of at most five attempts with a 0.5-1 second delay. The existing amend smoke will use the same polling behavior.
+
+The smoke will print protection values when Bybit returns them, but missing `takeProfit`, `stopLoss`, or `tpslMode` fields will not fail v1. Its success criteria are accepted create, successful order query, successful cancellation, and successful cleanup with no active entry order. It will be documented but not executed automatically.
 
 ## Risks / Trade-offs
 
 - [Bybit accepts the create request but protection is absent or not activated after fill] → Document that v1 has no verification guarantee; keep the status at `waiting_for_entry_fill`; prioritize watcher/check/repair as the next change.
+- [Bybit acknowledgement arrives before the order view is updated] → Poll the query briefly with a fixed attempt limit; do not use an unbounded wait.
+- [Realtime order query omits attached TP/SL fields] → Treat those fields as informational smoke output, not v1 proof; defer authoritative verification to the watcher/check phase.
 - [A fast fill occurs before the smoke script cancels] → Require distant operator-selected trigger prices, keep demo/testnet guard checks, and report final active orders; position cleanup remains a manual operator responsibility in this v1 script.
 - [Create or amend payload semantics differ across Bybit account/category modes] → Keep scope to the existing linear demo/testnet configuration and cover exact mapper payloads with unit tests.
 - [Legacy `AfterFill` names become misleading] → Mark `attachedProtection` as authoritative in docs and code usage while retaining legacy fields only for compatibility.
@@ -88,5 +98,5 @@ Rollback is a normal code revert: removing the new mapped fields returns Bybit c
 
 ## Open Questions
 
-- Does Bybit's realtime order query consistently echo `takeProfit`, `stopLoss`, and `tpslMode` for conditional orders in the configured demo account mode? The smoke script will print these fields when present but will not treat their absence as proof that protection is missing.
+- Does Bybit's realtime order query consistently echo `takeProfit`, `stopLoss`, and `tpslMode` for conditional orders in the configured demo account mode? The smoke script will print these fields when present, but their absence will neither fail the smoke nor be treated as proof that protection is missing.
 - Should the subsequent verification change inspect the conditional order first, the resulting position trading-stop state after fill, or both? That decision belongs to the fill watcher and repair design.

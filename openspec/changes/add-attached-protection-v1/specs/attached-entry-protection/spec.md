@@ -15,7 +15,7 @@ Abi SHALL represent full-position market stop-loss and take-profit protection as
 - **THEN** the attached protection preserves those stop-loss and take-profit prices without swapping or deriving them
 
 ### Requirement: Create payload attaches full-position market TP and SL
-Abi SHALL map attached protection into the Bybit V5 entry create payload using `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`, `tpslMode: "Full"`, `tpOrderType: "Market"`, and `slOrderType: "Market"`. Existing entry, quantity, trigger, side, and `orderLinkId` mapping SHALL remain unchanged.
+Abi SHALL map protection exclusively from `ExecutionPlan.attachedProtection` into the Bybit V5 entry create payload using `takeProfit`, `stopLoss`, `tpTriggerBy`, `slTriggerBy`, `tpslMode: "Full"`, `tpOrderType: "Market"`, and `slOrderType: "Market"`. The compatibility fields `stopLossAfterFill` and `takeProfitAfterFill` SHALL NOT be mapper inputs. Existing entry, quantity, trigger, side, and `orderLinkId` mapping SHALL remain unchanged.
 
 #### Scenario: Long entry maps to protected Buy order
 - **WHEN** Abi maps a long stop-market execution plan with `rises_to`
@@ -28,6 +28,11 @@ Abi SHALL map attached protection into the Bybit V5 entry create payload using `
 - **THEN** the create payload uses side `Sell`
 - **AND** it passes the lower take-profit and higher stop-loss prices through unchanged
 - **AND** it uses full-position market TP/SL
+
+#### Scenario: Compatibility fields are not the source of truth
+- **WHEN** an execution plan is mapped to a Bybit create or amend payload
+- **THEN** all attached-protection fields are read from `attachedProtection`
+- **AND** the mapper does not derive them from `stopLossAfterFill` or `takeProfitAfterFill`
 
 ### Requirement: Pending-entry amend updates attached protection
 Abi SHALL include the updated entry trigger price, take-profit price, stop-loss price, and TP/SL trigger sources in the Bybit V5 amend payload produced for `PUT /intents/:signalId`. The amend flow SHALL retain existing validation, identity, journaling, dry-run, and live-guard behavior.
@@ -74,6 +79,12 @@ Attached protection SHALL use the existing fixed position quantity and SHALL NOT
 - **WHEN** Abi builds a protected entry plan in v1
 - **THEN** entry sizing continues to use `ABI_FIXED_SMOKE_QTY`
 
+#### Scenario: Trigger source comes from configuration
+- **WHEN** Abi builds and maps attached protection in v1
+- **THEN** entry, take-profit, and stop-loss trigger sources use `config.bybitTriggerBy`
+- **AND** the default remains `LastPrice`
+- **AND** v1 does not introduce separate entry, TP, and SL trigger-source settings
+
 ### Requirement: Future protection states are typed but not executed
 Abi SHALL define non-runtime protection state, repair action, and check result types under `src/services/protection/` for future verification and recovery work. No v1 route, service, watcher, or journal flow SHALL execute a repair action.
 
@@ -83,7 +94,7 @@ Abi SHALL define non-runtime protection state, repair action, and check result t
 - **AND** it can represent `none`, `set_trading_stop`, and `close_position_market` repair actions
 
 ### Requirement: Guarded sandbox smoke covers attached protection
-The project SHALL provide a `smoke:sandbox:attached-protection` command that refuses to run without explicit write confirmation, validates the execution mode, creates and queries a protected entry, prints available protection values, cancels the intent, and reports final active-order state. Adding this script SHALL NOT authorize or automatically run a live smoke.
+The project SHALL provide a `smoke:sandbox:attached-protection` command that refuses to run without explicit write confirmation, validates the execution mode, creates and queries a protected entry, prints available protection values, cancels the intent, and reports final active-order state. Queries following asynchronous Bybit create or amend acknowledgements SHALL use a short bounded retry. Adding this script SHALL NOT authorize or automatically run a live smoke.
 
 #### Scenario: Confirmation is absent
 - **WHEN** the smoke command runs without `ABI_CONFIRM_TESTNET_WRITE=YES`
@@ -94,3 +105,13 @@ The project SHALL provide a `smoke:sandbox:attached-protection` command that ref
 - **THEN** it performs create, query, cancel, and final active-order query in that order
 - **AND** it prints create, query, cancel, and cleanup statuses plus any available `takeProfit`, `stopLoss`, and `tpslMode`
 
+#### Scenario: Query is briefly stale after acknowledgement
+- **WHEN** Bybit acknowledges create or amend but the following order query does not yet show the accepted state
+- **THEN** the smoke flow retries the query up to five times with a delay between 0.5 and 1 second
+- **AND** it fails only after the bounded attempts are exhausted
+
+#### Scenario: Realtime query omits attached-protection fields
+- **WHEN** create is accepted, order query succeeds, cancel succeeds, and cleanup reports no active order
+- **AND** the realtime order response omits `takeProfit`, `stopLoss`, or `tpslMode`
+- **THEN** the smoke flow still succeeds
+- **AND** it prints only the protection fields that are available

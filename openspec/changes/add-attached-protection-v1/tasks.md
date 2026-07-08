@@ -6,7 +6,7 @@
 
 ## 2. Bybit mapping and API responses
 
-- [ ] 2.1 Extend `BybitCreateOrderPayload` and `mapExecutionPlanToBybit` so create requests include bbb prices as `takeProfit`/`stopLoss`, configured TP/SL trigger sources, `tpslMode: "Full"`, and market TP/SL order types.
+- [ ] 2.1 Extend `BybitCreateOrderPayload` and `mapExecutionPlanToBybit` so create requests include bbb prices as `takeProfit`/`stopLoss`, configured TP/SL trigger sources, `tpslMode: "Full"`, and market TP/SL order types; mapper protection fields must come from `attachedProtection`, never `stopLossAfterFill` or `takeProfitAfterFill`.
 - [ ] 2.2 Extend `BybitAmendOrderPayload` with optional supported protection fields and map updated entry, take-profit, stop-loss, and trigger-source values to the existing entry `orderLinkId` without adding unsupported amend fields.
 - [ ] 2.3 Add `wouldAttachProtection` to all POST `/signals` success, dry-run, and create-failure responses while preserving existing response fields and journal behavior.
 - [ ] 2.4 Add `wouldAttachProtection` to all PUT `/intents/:signalId` success, dry-run, and amend-failure responses while preserving existing response fields, validation, and journal behavior.
@@ -22,9 +22,10 @@
 ## 4. Documentation and sandbox tooling
 
 - [ ] 4.1 Create `docs/ATTACHED_PROTECTION_V1.md` covering motivation, exact create fields, market-only rationale, safety limitations, and future verify/watcher/repair/emergency-close/partial-limit work.
-- [ ] 4.2 Update README, `docs/BBB_CONTRACT.md`, `docs/ROADMAP.md`, and `TESTNET_SMOKE.md` to state that bbb still owns absolute prices, Abi attaches market-only Full TP/SL, and the future watcher verifies and repairs rather than performing primary placement.
-- [ ] 4.3 Add guarded executable `scripts/smoke-sandbox-attached-protection.sh` and the `smoke:sandbox:attached-protection` npm command with explicit confirmation, sandbox mode validation, unique IDs, create/query/cancel flow, protection-value output, best-effort failure cleanup, and final active-order reporting.
-- [ ] 4.4 Validate the smoke script's shell syntax and refusal path without running a live sandbox order.
+- [ ] 4.2 Update README, `docs/BBB_CONTRACT.md`, `docs/ROADMAP.md`, and `TESTNET_SMOKE.md` to state that bbb still owns absolute prices, Abi attaches market-only Full TP/SL, the future watcher verifies and repairs rather than performing primary placement, and v1 uses `config.bybitTriggerBy` (default `LastPrice`) while separate entry/TP/SL sources remain future work.
+- [ ] 4.3 Add guarded executable `scripts/smoke-sandbox-attached-protection.sh` and the `smoke:sandbox:attached-protection` npm command with explicit confirmation, sandbox mode validation, unique IDs, create/query/cancel flow, optional protection-value output, best-effort failure cleanup, and final active-order reporting.
+- [ ] 4.4 Add a bounded order-query retry after create and amend acknowledgements (up to five attempts with 0.5-1 second delay) to attached-protection and amend smoke paths because Bybit acknowledgement is asynchronous; missing TP/SL fields must remain informational and must not fail an otherwise successful create/query/cancel/cleanup flow.
+- [ ] 4.5 Validate both affected smoke scripts' shell syntax, bounded retry behavior, success criteria, and refusal paths without running a live sandbox order.
 
 ## 5. Verification and handoff
 
