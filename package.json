@@ -11,6 +11,7 @@
     "smoke:sandbox:read": "bash scripts/smoke-testnet-readonly.sh",
     "smoke:sandbox:order": "bash scripts/smoke-testnet-order.sh",
     "smoke:sandbox:amend": "bash scripts/smoke-sandbox-amend.sh",
+    "smoke:sandbox:contract": "bash scripts/smoke-sandbox-contract-matrix.sh",
     "smoke:testnet:read": "bash scripts/smoke-testnet-readonly.sh",
     "smoke:testnet:order": "bash scripts/smoke-testnet-order.sh",
     "start": "node dist/app/index.js"
