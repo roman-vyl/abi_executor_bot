@@ -118,7 +118,31 @@ The update payload changes the entry trigger and the attached stop-loss/take-pro
 
 These smoke scripts verify the existing create/query/amend/cancel flow. They do not prove that Bybit retained or activated attached protection. Bounded query/retry, pending-order verification, after-fill watching, repair, and emergency-close policy belong to the separate `protection-verification-and-repair-v1` change.
 
-## 5. Cleanup Check
+## 5. Local Fake Contract Matrix Smoke
+
+This checks the contract matrix shell script against a local fake Abi HTTP server. It does not require demo credentials and does not send orders to Bybit.
+
+```bash
+npm run smoke:contract:fake
+```
+
+The fake runner starts `scripts/fake-abi-smoke-server.mjs`, sets `ABI_CONFIRM_TESTNET_WRITE=YES` only for `ABI_BASE_URL=http://127.0.0.1:<fake-port>`, and verifies the create/query/cancel and amend transition matrix plus the invalid take-profit-only rejection.
+
+Real demo/testnet smoke remains separate:
+
+```bash
+ABI_CONFIRM_TESTNET_WRITE=YES \
+ABI_BASE_URL=http://127.0.0.1:8787 \
+ABI_SMOKE_SYMBOL=BTCUSDT \
+ABI_SMOKE_SIDE=long \
+ABI_SMOKE_ENTRY_PRICE=61234.5 \
+ABI_SMOKE_STOP_PRICE=60880.0 \
+ABI_SMOKE_TAKE_PRICE=62000.0 \
+ABI_SMOKE_TRIGGER_DIRECTION=rises_to \
+npm run smoke:sandbox:contract
+```
+
+## 6. Cleanup Check
 
 After the write smoke, confirm there are no remaining active orders for the symbol:
 
