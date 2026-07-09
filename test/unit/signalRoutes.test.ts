@@ -35,7 +35,63 @@ test("entry-only dry-run response exposes only the protection model", async () =
     assert.equal("takeProfit" in createPayload.createEntryOrder, false);
     assert.equal("wouldCreateStopLossAfterFill" in response.body, false);
     assert.equal("wouldCreateTakeProfitAfterFill" in response.body, false);
+    assert.equal(response.body.protectionCheck.status, "not_run_dry_run");
+    assert.equal(bybit.getPositionCalls.length, 0);
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getMarketPriceCalls.length, 0);
     assert.equal(bybit.createOrderCalls.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pre-create position query failure blocks live create and returns protectionCheck", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "abi-signal-route-"));
+  const journal = new Journal(join(directory, "journal.jsonl"));
+  const config = makeTestConfig({
+    dryRun: false,
+    liveTradingEnabled: true,
+    bybitApiKey: "test-key",
+    bybitApiSecret: "test-secret",
+  });
+  const bybit = new PositionQueryFailingBybitAdapter();
+
+  try {
+    const response = await postSignal("sig-position-query-fails", config, bybit, journal);
+
+    assert.equal(response.status, 502);
+    assert.equal(response.body.status, "protection_check_failed");
+    assert.equal(response.body.intentStatus.status, "failed_to_create_entry");
+    assert.equal(response.body.protectionCheck.status, "exchange_query_failed");
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pre-existing position reports protectionCheck and does not emergency close", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "abi-signal-route-"));
+  const journal = new Journal(join(directory, "journal.jsonl"));
+  const config = makeTestConfig({
+    dryRun: false,
+    liveTradingEnabled: true,
+    bybitApiKey: "test-key",
+    bybitApiSecret: "test-secret",
+  });
+  const bybit = new FakeBybitAdapter();
+  bybit.position = { symbol: "BTCUSDT", side: "Buy", size: "0.002" };
+
+  try {
+    const response = await postSignal("sig-pre-existing-position", config, bybit, journal);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.status, "accepted_live_entry_order_created");
+    assert.equal(response.body.protectionCheck.status, "pre_existing_position_found");
+    assert.equal(response.body.protectionCheck.action, "none");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getMarketPriceCalls.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -56,6 +112,7 @@ test("a failed Bybit entry create marks the intent failed and allows the same in
     const failedResponse = await postSignal("sig-create-fails", config, bybit, journal);
     assert.equal(failedResponse.status, 502);
     assert.equal(failedResponse.body.intentStatus.status, "failed_to_create_entry");
+    assert.equal("protectionCheck" in failedResponse.body, false);
     assert.deepEqual(failedResponse.body.wouldUseProtection, {
       mode: "attached_full_position_market",
       stopLoss: { triggerPrice: "60900.0", triggerBy: "LastPrice", orderType: "Market" },
@@ -81,11 +138,19 @@ test("a failed Bybit entry create marks the intent failed and allows the same in
     const retryResponse = await postSignal("sig-create-retry", config, bybit, journal);
     assert.equal(retryResponse.status, 200);
     assert.equal(retryResponse.body.status, "accepted_live_entry_order_created");
+    assert.equal(retryResponse.body.protectionCheck.status, "pending_order_not_found");
     assert.equal(bybit.createOrderCalls.length, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+class PositionQueryFailingBybitAdapter extends FakeBybitAdapter {
+  override async getPosition(symbol: string): Promise<null> {
+    this.getPositionCalls.push(symbol);
+    throw new Error("position query down");
+  }
+}
 
 class FailFirstCreateBybitAdapter extends FakeBybitAdapter {
   private shouldFail = true;

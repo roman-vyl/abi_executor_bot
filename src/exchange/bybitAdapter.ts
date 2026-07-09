@@ -16,6 +16,7 @@ export type BybitPosition = {
   symbol: string;
   side: BybitOrderSide | "None";
   size: string;
+  positionIdx?: number;
 };
 
 export type PlaceMarketOrderInput = {
@@ -42,6 +43,7 @@ export interface BybitAdapter {
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
+  getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
   setTradingStop(input: SetTradingStopInput): Promise<unknown>;
 }
@@ -137,8 +139,19 @@ export class RestBybitAdapter implements BybitAdapter {
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
-    void symbol;
-    return null;
+    return readOpenPosition(await this.getOpenPositions({ symbol }));
+  }
+
+  async getMarketPrice(symbol: string): Promise<string> {
+    const response = await this.signedGet(
+      "/v5/market/tickers",
+      new URLSearchParams({
+        category: this.config.bybitCategory,
+        symbol,
+      }),
+    );
+
+    return readTickerLastPrice(response);
   }
 
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {
@@ -257,6 +270,11 @@ export class StubBybitAdapter implements BybitAdapter {
     return null;
   }
 
+  async getMarketPrice(symbol: string): Promise<string> {
+    void symbol;
+    return stub("getMarketPrice");
+  }
+
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {
     return stub("placeMarketOrder", input);
   }
@@ -278,6 +296,75 @@ function setSymbolOrSettleCoin(params: URLSearchParams, symbol: string | undefin
   }
 
   params.set("settleCoin", settleCoin);
+}
+
+function readOpenPosition(response: unknown): BybitPosition | null {
+  for (const item of readBybitList(response)) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const symbol = readRecordString(record, "symbol");
+    const side = readRecordString(record, "side");
+    const size = readRecordString(record, "size");
+    const positionIdx = readRecordNumber(record, "positionIdx");
+
+    if (symbol === "" || size === "" || Number(size) <= 0) {
+      continue;
+    }
+
+    if (side !== "Buy" && side !== "Sell" && side !== "None") {
+      continue;
+    }
+
+    return {
+      symbol,
+      side,
+      size,
+      positionIdx,
+    };
+  }
+
+  return null;
+}
+
+function readTickerLastPrice(response: unknown): string {
+  const ticker = readBybitList(response)[0];
+  if (typeof ticker !== "object" || ticker === null) {
+    throw new Error("Bybit ticker response did not include a price");
+  }
+
+  const lastPrice = readRecordString(ticker as Record<string, unknown>, "lastPrice");
+  if (lastPrice === "") {
+    throw new Error("Bybit ticker response did not include lastPrice");
+  }
+
+  return lastPrice;
+}
+
+function readBybitList(response: unknown): unknown[] {
+  if (typeof response !== "object" || response === null || !("result" in response)) {
+    return [];
+  }
+
+  const result = (response as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null || !("list" in result)) {
+    return [];
+  }
+
+  const list = (result as Record<string, unknown>).list;
+  return Array.isArray(list) ? list : [];
+}
+
+function readRecordString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === "string" ? value : "";
+}
+
+function readRecordNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" ? value : undefined;
 }
 
 async function readBybitResponse(response: Response): Promise<unknown> {

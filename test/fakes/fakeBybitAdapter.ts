@@ -22,11 +22,15 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly cancelOrderCalls: BybitCancelOrderPayload[] = [];
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
+  readonly getPositionCalls: string[] = [];
+  readonly getMarketPriceCalls: string[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponse: unknown = { retCode: 0, result: { list: [] } };
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
+  position: BybitPosition | null = null;
+  marketPrice = "61000.0";
 
   async getServerTime(): Promise<unknown> {
     return { retCode: 0, result: { timeSecond: "0" } };
@@ -73,8 +77,13 @@ export class FakeBybitAdapter implements BybitAdapter {
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
-    void symbol;
-    return null;
+    this.getPositionCalls.push(symbol);
+    return this.position;
+  }
+
+  async getMarketPrice(symbol: string): Promise<string> {
+    this.getMarketPriceCalls.push(symbol);
+    return this.marketPrice;
   }
 
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {

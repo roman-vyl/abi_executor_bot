@@ -4,6 +4,7 @@ import type {
   BybitAmendOrderPayload,
   BybitCancelOrderPayload,
   BybitCreateOrderPayload,
+  BybitMarketCloseOrderPayload,
 } from "../exchange/bybitOrderMapper.js";
 import { getLiveExecutionMode, type LiveExecutionMode } from "./liveGuard.js";
 
@@ -36,6 +37,17 @@ export type EntryOrderCancelExecutionResult =
     }
   | {
       status: "bybit_entry_order_cancel_accepted";
+      mode: LiveExecutionMode;
+      bybitResponse: unknown;
+    };
+
+export type MarketCloseOrderExecutionResult =
+  | {
+      status: "skipped_live_execution";
+      mode: LiveExecutionMode;
+    }
+  | {
+      status: "bybit_market_close_order_accepted";
       mode: LiveExecutionMode;
       bybitResponse: unknown;
     };
@@ -104,6 +116,29 @@ export async function cancelEntryOrder(input: {
 
   return {
     status: "bybit_entry_order_cancel_accepted",
+    mode,
+    bybitResponse,
+  };
+}
+
+export async function executeMarketCloseOrder(input: {
+  config: AbiConfig;
+  bybit: BybitAdapter;
+  payload: BybitMarketCloseOrderPayload;
+}): Promise<MarketCloseOrderExecutionResult> {
+  const mode = getLiveExecutionMode(input.config);
+
+  if (!mode.canExecuteLive) {
+    return {
+      status: "skipped_live_execution",
+      mode,
+    };
+  }
+
+  const bybitResponse = await input.bybit.createOrder(input.payload);
+
+  return {
+    status: "bybit_market_close_order_accepted",
     mode,
     bybitResponse,
   };

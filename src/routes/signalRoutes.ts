@@ -8,10 +8,20 @@ import type { BybitAdapter } from "../exchange/bybitAdapter.js";
 import { mapExecutionPlanToBybit } from "../exchange/bybitOrderMapper.js";
 import { readJsonBody, writeJson } from "../app/http.js";
 import { createFailedToCreateEntryIntentStatus, createPlannedIntentStatus } from "../domain/intents.js";
+import { getLiveExecutionMode } from "../execution/liveGuard.js";
 import type { Journal } from "../journal/journal.js";
 import { calculatePositionSize } from "../risk/positionSizing.js";
 import { checkSignalRisk } from "../risk/riskGuard.js";
 import { parseSignalIntent } from "../domain/signals.js";
+import {
+  appendProtectionCompletion,
+  capturePreCreateProtectionSnapshot,
+  createDryRunProtectionCheck,
+  resultForPreCreateSnapshotFailure,
+  resultForPreExistingPosition,
+  verifyPostCreateProtection,
+} from "../services/protection/verifyPostCreateProtection.js";
+import type { ProtectionCheckContext, ProtectionCheckResult, ProtectionPositionSnapshot } from "../services/protection/protectionTypes.js";
 
 export async function handleSignalRoutes(input: {
   request: IncomingMessage;
@@ -99,6 +109,15 @@ export async function handleSignalRoutes(input: {
     const executionPlan = buildExecutionPlan(result.intent, positionSize, config.bybitTriggerBy);
     const bybitPayloads = mapExecutionPlanToBybit(config, executionPlan);
     const intentStatus = createPlannedIntentStatus(result.intent, executionPlan);
+    const protectionContext: ProtectionCheckContext = {
+      signalId: result.intent.signalId,
+      instanceId: result.intent.instanceId,
+      symbol: result.intent.symbol,
+      side: result.intent.side,
+      orderLinkId: executionPlan.entryOrder.orderLinkId,
+      protection: executionPlan.protection,
+      dryRun: config.dryRun,
+    };
 
     await journal.appendEvent({
       eventType: "signal_received",
@@ -123,6 +142,49 @@ export async function handleSignalRoutes(input: {
       signalId: result.intent.signalId,
       payload: intentStatus,
     });
+
+    const liveMode = getLiveExecutionMode(config);
+    let preCreatePosition: ProtectionPositionSnapshot | undefined;
+
+    if (liveMode.canExecuteLive) {
+      preCreatePosition = await capturePreCreateProtectionSnapshot({
+        context: protectionContext,
+        bybit,
+        journal,
+      });
+
+      if (!preCreatePosition.queryOk) {
+        const failedIntentStatus = createFailedToCreateEntryIntentStatus(
+          result.intent.signalId,
+          result.intent.instanceId,
+        );
+        const protectionCheck = resultForPreCreateSnapshotFailure({
+          context: protectionContext,
+          preCreatePosition,
+        });
+
+        await appendProtectionCompletion(journal, result.intent.signalId, protectionCheck);
+        await journal.appendEvent({
+          eventType: "intent_status_changed",
+          signalId: result.intent.signalId,
+          payload: failedIntentStatus,
+        });
+
+        writeJson(response, 502, {
+          status: "protection_check_failed",
+          signalId: result.intent.signalId,
+          intentStatus: failedIntentStatus,
+          wouldCreateEntry: executionPlan.entryOrder,
+          wouldUseProtection: executionPlan.protection,
+          wouldSendToBybit: {
+            createEntryOrder: bybitPayloads.createEntryOrder,
+          },
+          protectionCheck,
+          sizingReason: executionPlan.sizingReason,
+        });
+        return true;
+      }
+    }
 
     await journal.appendEvent({
       eventType: "bybit_entry_order_create_requested",
@@ -174,6 +236,29 @@ export async function handleSignalRoutes(input: {
       return true;
     }
 
+    let protectionCheck: ProtectionCheckResult | undefined;
+    if (entryExecution.status === "skipped_live_execution" && config.dryRun) {
+      protectionCheck = createDryRunProtectionCheck(protectionContext);
+      await appendProtectionCompletion(journal, result.intent.signalId, protectionCheck);
+    } else if (entryExecution.status === "bybit_entry_order_create_accepted" && preCreatePosition !== undefined) {
+      if (isOpenPreCreatePosition(preCreatePosition)) {
+        protectionCheck = resultForPreExistingPosition({
+          context: protectionContext,
+          preCreatePosition,
+        });
+        await appendProtectionCompletion(journal, result.intent.signalId, protectionCheck);
+      } else {
+        protectionCheck = await verifyPostCreateProtection({
+          config,
+          bybit,
+          journal,
+          context: protectionContext,
+          getEntryOrderPayload: bybitPayloads.getEntryOrder,
+          preCreatePosition,
+        });
+      }
+    }
+
     await journal.appendEvent({
       eventType:
         entryExecution.status === "skipped_live_execution"
@@ -196,6 +281,7 @@ export async function handleSignalRoutes(input: {
         createEntryOrder: bybitPayloads.createEntryOrder,
       },
       entryExecution,
+      ...(protectionCheck === undefined ? {} : { protectionCheck }),
       sizingReason: executionPlan.sizingReason,
     });
   } catch (error) {
@@ -211,4 +297,8 @@ export async function handleSignalRoutes(input: {
   }
 
   return true;
+}
+
+function isOpenPreCreatePosition(snapshot: ProtectionPositionSnapshot): boolean {
+  return snapshot.found && snapshot.size !== undefined && Number(snapshot.size) > 0;
 }
