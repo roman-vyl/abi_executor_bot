@@ -23,6 +23,10 @@ Current limitations:
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the next development steps and [docs/BBB_CONTRACT.md](docs/BBB_CONTRACT.md) for the current bbb-to-Abi payload contract.
 
+## Docker
+
+Abi has a minimal Docker setup for safe local dry-run startup and explicit demo sandbox runs. See [docs/DOCKER.md](docs/DOCKER.md) for build, run, health, execution-mode, journal mount, and container smoke commands.
+
 ## Current signal contract
 
 bbb sends the trading intent without position size:

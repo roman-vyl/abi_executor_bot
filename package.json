@@ -15,7 +15,8 @@
     "smoke:contract:fake": "bash scripts/smoke-contract-matrix-fake.sh",
     "smoke:testnet:read": "bash scripts/smoke-testnet-readonly.sh",
     "smoke:testnet:order": "bash scripts/smoke-testnet-order.sh",
-    "start": "node dist/app/index.js"
+    "start": "node dist/app/index.js",
+    "start:prod": "node dist/app/index.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -1,0 +1,8 @@
+services:
+  abi:
+    env_file:
+      - .env.demo.local
+    environment:
+      ABI_DRY_RUN: "false"
+      ABI_LIVE_TRADING_ENABLED: "true"
+      BYBIT_ENV: "demo"

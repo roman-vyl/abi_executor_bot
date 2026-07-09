@@ -1,0 +1,35 @@
+services:
+  abi:
+    build:
+      context: .
+    image: abi:local
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      ABI_HOST: "0.0.0.0"
+      ABI_PORT: "8787"
+      ABI_DRY_RUN: "true"
+      ABI_LIVE_TRADING_ENABLED: "false"
+      ABI_ALLOWED_SYMBOLS: "BTCUSDT"
+      ABI_JOURNAL_PATH: "/app/var/abi_journal.jsonl"
+      ABI_FIXED_SMOKE_QTY: "0.001"
+      BYBIT_ENV: "testnet"
+      BYBIT_ACCOUNT_TYPE: "UNIFIED"
+      BYBIT_RECV_WINDOW: "5000"
+      BYBIT_CATEGORY: "linear"
+      BYBIT_SETTLE_COIN: "USDT"
+      BYBIT_TRIGGER_BY: "LastPrice"
+    volumes:
+      - ./var:/app/var
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/health').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
