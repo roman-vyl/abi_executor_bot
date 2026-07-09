@@ -10,8 +10,10 @@ context: |
   position sizing, deterministic orderLinkId generation, execution, journaling,
   and intent status.
   Position sizing is currently fixed at ABI_FIXED_SMOKE_QTY=0.001.
-  Stop-loss and take-profit orders are planned but are not automatically placed
-  after an entry fill. Mainnet live execution is blocked by the live guard.
+  Abi supports entry-only, entry+stop_loss, and entry+stop_loss+take_profit
+  signals. Protection is modeled as ExecutionPlan.protection and mapped to
+  Bybit attached TP/SL fields for pending entry create/amend when provided.
+  Mainnet live execution is blocked by the live guard.
   Preserve dry-run behavior and demo/testnet safety gates.
   Validate changes with npm test and npm run typecheck when runtime code changes.
 
