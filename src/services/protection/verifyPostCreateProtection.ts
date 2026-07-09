@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import type { AbiConfig } from "../../config/config.js";
 import type { BybitAdapter, BybitPosition } from "../../exchange/bybitAdapter.js";
 import type { BybitGetOrderByLinkIdPayload, BybitMarketCloseOrderPayload } from "../../exchange/bybitOrderMapper.js";
@@ -14,6 +16,7 @@ import {
 } from "./protectionTypes.js";
 
 const VERIFY_ATTEMPTS = 2;
+const VERIFY_RETRY_DELAY_MS = 300;
 
 export function createDryRunProtectionCheck(context: ProtectionCheckContext): ProtectionCheckResult {
   return decideProtectionCheck({
@@ -110,6 +113,10 @@ export async function verifyPostCreateProtection(input: {
 
       if (orderFound || isOpenPosition(postCreatePosition)) {
         break;
+      }
+
+      if (attempt < VERIFY_ATTEMPTS - 1) {
+        await sleep(VERIFY_RETRY_DELAY_MS);
       }
     }
   } catch (error) {
