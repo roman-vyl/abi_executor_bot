@@ -31,11 +31,11 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run `npm test`.
-- [ ] 5.2 Run `npm run build`.
-- [ ] 5.3 Run `npm run smoke:contract:fake`.
-- [ ] 5.4 Run `docker build` from the project root.
-- [ ] 5.5 Start the base Compose stack and verify `GET /health` returns ok.
-- [ ] 5.6 Verify `GET /execution/mode` reports safe default mode with live execution disabled.
-- [ ] 5.7 Verify `./var:/app/var` is mounted for journal persistence.
-- [ ] 5.8 Do not run real Bybit write smoke unless separately authorized.
+- [x] 5.1 Run `npm test`.
+- [x] 5.2 Run `npm run build`.
+- [x] 5.3 Run `npm run smoke:contract:fake`.
+- [x] 5.4 Run `docker build` from the project root.
+- [x] 5.5 Start the base Compose stack and verify `GET /health` returns ok.
+- [x] 5.6 Verify `GET /execution/mode` reports safe default mode with live execution disabled.
+- [x] 5.7 Verify `./var:/app/var` is mounted for journal persistence.
+- [x] 5.8 Do not run real Bybit write smoke unless separately authorized.

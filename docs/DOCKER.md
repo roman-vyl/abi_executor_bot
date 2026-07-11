@@ -87,16 +87,16 @@ ABI_SMOKE_SYMBOL=BTCUSDT \
 npm run smoke:sandbox:read
 ```
 
-The contract matrix smoke creates, queries, amends, and cancels sandbox orders. Only run it against an explicitly authorized demo/testnet live container:
+The contract matrix smoke creates, queries, amends, and cancels sandbox orders. Only run it against an explicitly authorized demo/testnet live container. Choose trigger prices far away from the current market so the sandbox order is not expected to execute during the smoke.
 
 ```bash
 ABI_CONFIRM_TESTNET_WRITE=YES \
 ABI_BASE_URL=http://127.0.0.1:8787 \
 ABI_SMOKE_SYMBOL=BTCUSDT \
 ABI_SMOKE_SIDE=long \
-ABI_SMOKE_ENTRY_PRICE=61234.5 \
-ABI_SMOKE_STOP_PRICE=60880.0 \
-ABI_SMOKE_TAKE_PRICE=62000.0 \
+ABI_SMOKE_ENTRY_PRICE=200000 \
+ABI_SMOKE_STOP_PRICE=190000 \
+ABI_SMOKE_TAKE_PRICE=220000 \
 ABI_SMOKE_TRIGGER_DIRECTION=rises_to \
 npm run smoke:sandbox:contract
 ```
