@@ -1,0 +1,468 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ABI Entry Package API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/entry-package": {
+      "put": {
+        "operationId": "reconcileDesiredEntryPackage",
+        "summary": "Reconcile one Runtime-owned desired entry package",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntryPackageRequest"
+              },
+              "examples": {
+                "package": {
+                  "value": {
+                    "ticker": "BTCUSDT.P",
+                    "desired_entry": {
+                      "side": "long",
+                      "source_plan_bar_open_time_ms": 1785000000000,
+                      "planned_entry_price": "100000",
+                      "initial_stop_price": "99000",
+                      "initial_take_price": "103000",
+                      "locked_exit_profile": "runner"
+                    },
+                    "risk_multiplier": "1"
+                  }
+                },
+                "absence": {
+                  "value": {
+                    "ticker": "BTCUSDT.P",
+                    "desired_entry": null,
+                    "risk_multiplier": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Complete package applied or desired package absence confirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/EntryPackageAppliedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/EntryPackageAbsentResponse"
+                    }
+                  ]
+                },
+                "examples": {
+                  "applied": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "entry_package_applied",
+                      "applied_desired_entry": {
+                        "side": "long",
+                        "source_plan_bar_open_time_ms": 1785000000000,
+                        "planned_entry_price": "100000",
+                        "initial_stop_price": "99000",
+                        "initial_take_price": "103000",
+                        "locked_exit_profile": "runner"
+                      },
+                      "accepted_risk_multiplier": "1",
+                      "calculated_quantity": "0.001"
+                    }
+                  },
+                  "absent": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "entry_package_absent"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MalformedJsonError"
+                },
+                "example": {
+                  "error": {
+                    "code": "malformed_json",
+                    "message": "request body must be valid JSON"
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedMediaTypeError"
+                },
+                "example": {
+                  "error": {
+                    "code": "unsupported_media_type",
+                    "message": "content-type must be application/json"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Transport validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                },
+                "example": {
+                  "error": {
+                    "code": "validation_failed",
+                    "message": "request validation failed",
+                    "details": [
+                      {
+                        "path": "/desired_entry/initial_take_price",
+                        "message": "field is required"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Safe unknown internal failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                },
+                "example": {
+                  "error": {
+                    "code": "internal_error",
+                    "message": "internal error"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EntryPackageRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PackagePresentRequest"
+          },
+          {
+            "$ref": "#/components/schemas/PackageAbsentRequest"
+          }
+        ]
+      },
+      "PackagePresentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ticker",
+          "desired_entry",
+          "risk_multiplier"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "desired_entry": {
+            "$ref": "#/components/schemas/DesiredEntry"
+          },
+          "risk_multiplier": {
+            "type": "string",
+            "format": "positive-exact-decimal"
+          }
+        }
+      },
+      "PackageAbsentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ticker",
+          "desired_entry",
+          "risk_multiplier"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "desired_entry": {
+            "type": "null"
+          },
+          "risk_multiplier": {
+            "type": "null"
+          }
+        }
+      },
+      "DesiredEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "side",
+          "source_plan_bar_open_time_ms",
+          "planned_entry_price",
+          "initial_stop_price",
+          "initial_take_price",
+          "locked_exit_profile"
+        ],
+        "properties": {
+          "side": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "source_plan_bar_open_time_ms": {
+            "type": "integer"
+          },
+          "planned_entry_price": {
+            "type": "string",
+            "format": "exact-decimal"
+          },
+          "initial_stop_price": {
+            "type": "string",
+            "format": "exact-decimal"
+          },
+          "initial_take_price": {
+            "type": "string",
+            "format": "positive-exact-decimal"
+          },
+          "locked_exit_profile": {
+            "type": "string"
+          }
+        }
+      },
+      "EntryPackageAppliedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "status",
+          "applied_desired_entry",
+          "accepted_risk_multiplier",
+          "calculated_quantity"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "const": "entry_package_applied"
+          },
+          "applied_desired_entry": {
+            "$ref": "#/components/schemas/DesiredEntry"
+          },
+          "accepted_risk_multiplier": {
+            "type": "string",
+            "format": "positive-exact-decimal"
+          },
+          "calculated_quantity": {
+            "type": "string",
+            "format": "exact-decimal"
+          }
+        }
+      },
+      "EntryPackageAbsentResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "status"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "const": "entry_package_absent"
+          }
+        }
+      },
+      "ValidationDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "MalformedJsonError": {
+        "$ref": "#/components/schemas/MalformedJsonErrorEnvelope"
+      },
+      "MalformedJsonErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "malformed_json"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "UnsupportedMediaTypeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "unsupported_media_type"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "code": {
+                "const": "validation_failed"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "details": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/components/schemas/ValidationDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "internal_error"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

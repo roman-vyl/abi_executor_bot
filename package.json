@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "test": "bash scripts/run-tests.sh",
+    "validate:openapi": "node scripts/validate-entry-package-openapi.mjs",
     "archive:project": "bash scripts/archive-project.sh",
     "smoke:sandbox:read": "bash scripts/smoke-testnet-readonly.sh",
     "smoke:sandbox:order": "bash scripts/smoke-testnet-order.sh",

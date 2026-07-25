@@ -1,0 +1,229 @@
+import assert from "node:assert/strict";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import test from "node:test";
+
+import {
+  handleEntryPackageRoutes,
+  matchEntryPackageRoute,
+} from "../../src/routes/entryPackageRoutes.js";
+
+test("entry-package route ignores a different method or path", async () => {
+  const request = makeRequest("GET", "/health", "", {});
+  const response = makeResponse();
+
+  assert.equal(
+    await handleEntryPackageRoutes({
+      request,
+      response: response.response,
+    }),
+    false,
+  );
+  assert.equal(response.status(), 0);
+});
+
+test("entry-package route accepts exact path and percent-decodes opaque identifiers", () => {
+  assert.deepEqual(
+    matchEntryPackageRoute(
+      "PUT",
+      "/v1/strategy-instances/instance%2Ffuture/trade-cycles/cycle%20id/entry-package",
+    ),
+    {
+      matched: true,
+      strategyInstanceId: "instance/future",
+      tradeCycleId: "cycle id",
+    },
+  );
+});
+
+test("unsupported media type maps to 415", async () => {
+  const response = await invokeRoute(makePackagePayload(), {
+    "content-type": "text/plain",
+  });
+
+  assert.equal(response.status(), 415);
+  assert.equal(response.body().error.code, "unsupported_media_type");
+  assert.equal("details" in response.body().error, false);
+});
+
+test("application/json and UTF-8 charset are supported", async () => {
+  for (const contentType of ["application/json", "Application/JSON; Charset=UTF-8"]) {
+    const response = await invokeRoute(makePackagePayload(), {
+      "content-type": contentType,
+    });
+    assert.equal(response.status(), 500);
+    assert.deepEqual(response.body(), {
+      error: {
+        code: "internal_error",
+        message: "internal error",
+      },
+    });
+  }
+});
+
+test("missing and malformed JSON map to 400", async () => {
+  for (const body of ["", "{"]) {
+    const request = makeRequest("PUT", route(), body, {
+      "content-type": "application/json",
+    });
+    const response = makeResponse();
+
+    assert.equal(
+      await handleEntryPackageRoutes({
+        request,
+        response: response.response,
+      }),
+      true,
+    );
+    assert.equal(response.status(), 400);
+    assert.equal(response.body().error.code, "malformed_json");
+  }
+});
+
+test("invalid body maps to 422 with field details", async () => {
+  const response = await invokeRoute({
+    ticker: "",
+    desired_entry: null,
+    risk_multiplier: "1",
+    extra: true,
+  });
+
+  assert.equal(response.status(), 422);
+  assert.equal(response.body().error.code, "validation_failed");
+  assert.ok(Array.isArray(response.body().error.details));
+  assert.ok(response.body().error.details.length > 0);
+});
+
+test("malformed path percent encoding maps to validation failure", async () => {
+  const request = makeRequest(
+    "PUT",
+    "/v1/strategy-instances/%ZZ/trade-cycles/cycle/entry-package",
+    JSON.stringify(makePackagePayload()),
+    {
+      "content-type": "application/json",
+    },
+  );
+  const response = makeResponse();
+
+  assert.equal(
+    await handleEntryPackageRoutes({
+      request,
+      response: response.response,
+    }),
+    true,
+  );
+  assert.equal(response.status(), 422);
+  assert.equal(response.body().error.code, "validation_failed");
+  assert.equal(response.body().error.details[0].path, "/path/strategy_instance_id");
+});
+
+test("valid absence reaches safe unconfigured boundary without fabricated success", async () => {
+  const response = await invokeRoute({
+    ticker: "BTCUSDT.P",
+    desired_entry: null,
+    risk_multiplier: null,
+  });
+
+  assert.equal(response.status(), 500);
+  assert.deepEqual(response.body(), {
+    error: {
+      code: "internal_error",
+      message: "internal error",
+    },
+  });
+});
+
+test("unknown HTTP-boundary failure maps to safe internal error", async () => {
+  const request = makeRequest("PUT", "http://[", "{}", {
+    "content-type": "application/json",
+  });
+  const response = makeResponse();
+
+  assert.equal(
+    await handleEntryPackageRoutes({
+      request,
+      response: response.response,
+    }),
+    true,
+  );
+  assert.equal(response.status(), 500);
+  assert.deepEqual(response.body(), {
+    error: {
+      code: "internal_error",
+      message: "internal error",
+    },
+  });
+});
+
+async function invokeRoute(
+  payload: unknown,
+  headers: Record<string, string> = {
+    "content-type": "application/json",
+  },
+): Promise<ReturnType<typeof makeResponse>> {
+  const request = makeRequest("PUT", route(), JSON.stringify(payload), headers);
+  const response = makeResponse();
+  assert.equal(
+    await handleEntryPackageRoutes({
+      request,
+      response: response.response,
+    }),
+    true,
+  );
+  return response;
+}
+
+function route(): string {
+  return "/v1/strategy-instances/instance/trade-cycles/cycle/entry-package";
+}
+
+function makePackagePayload(): Record<string, unknown> {
+  return {
+    ticker: "BTCUSDT.P",
+    desired_entry: {
+      side: "long",
+      source_plan_bar_open_time_ms: 1785000000000,
+      planned_entry_price: "100000",
+      initial_stop_price: "99000",
+      initial_take_price: "103000",
+      locked_exit_profile: "runner",
+    },
+    risk_multiplier: "1",
+  };
+}
+
+function makeRequest(
+  method: string,
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+): IncomingMessage {
+  const request = Readable.from([body]) as IncomingMessage;
+  request.method = method;
+  request.url = url;
+  request.headers = headers;
+  return request;
+}
+
+function makeResponse(): {
+  response: ServerResponse;
+  status: () => number;
+  body: () => Record<string, any>;
+} {
+  let status = 0;
+  let responseBody = "";
+  const response = {
+    writeHead(statusCode: number): void {
+      status = statusCode;
+    },
+    end(body: string): void {
+      responseBody = body;
+    },
+  } as ServerResponse;
+
+  return {
+    response,
+    status: () => status,
+    body: () => JSON.parse(responseBody) as Record<string, any>,
+  };
+}

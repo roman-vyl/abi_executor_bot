@@ -5,6 +5,7 @@ import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
 import { writeJson } from "./http.js";
 import { Journal } from "../journal/journal.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
+import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
 import { handleIntentRoutes } from "../routes/intentRoutes.js";
 import { handleSignalRoutes } from "../routes/signalRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
@@ -19,6 +20,10 @@ export function startServer(config: AbiConfig): void {
     }
 
     if (await handleAccountRoutes({ request, response, config, bybit })) {
+      return;
+    }
+
+    if (await handleEntryPackageRoutes({ request, response })) {
       return;
     }
 
