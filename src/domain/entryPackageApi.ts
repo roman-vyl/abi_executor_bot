@@ -265,16 +265,9 @@ export function isSupportedJsonContentType(value: string | string[] | undefined)
     return false;
   }
 
-  const parts = value
-    .split(";")
-    .map((part) => part.trim().toLowerCase())
-    .filter((part) => part.length > 0);
-
-  if (parts[0] !== "application/json") {
-    return false;
-  }
-
-  return parts.length === 1 || (parts.length === 2 && parts[1] === "charset=utf-8");
+  return /^[\t ]*application\/json(?:[\t ]*;[\t ]*charset[\t ]*=[\t ]*(?:utf-8|"utf-8"))?[\t ]*$/i.test(
+    value,
+  );
 }
 
 export function isExactDecimalText(value: string): boolean {

@@ -92,7 +92,8 @@ export function matchEntryPackageRoute(
     return { matched: false };
   }
 
-  const pathname = new URL(requestUrl, "http://abi.local").pathname;
+  const queryStart = requestUrl.indexOf("?");
+  const pathname = queryStart === -1 ? requestUrl : requestUrl.slice(0, queryStart);
   const segments = pathname.split("/");
   if (
     segments.length !== 7 ||

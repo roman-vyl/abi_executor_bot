@@ -36,18 +36,50 @@ test("entry-package route accepts exact path and percent-decodes opaque identifi
   );
 });
 
-test("unsupported media type maps to 415", async () => {
-  const response = await invokeRoute(makePackagePayload(), {
-    "content-type": "text/plain",
-  });
+test("entry-package route preserves opaque dot-segment identifiers", () => {
+  for (const [strategyInstanceId, tradeCycleId] of [
+    [".", ".."],
+    ["%2E", "%2E%2E"],
+  ]) {
+    assert.deepEqual(
+      matchEntryPackageRoute(
+        "PUT",
+        `/v1/strategy-instances/${strategyInstanceId}/trade-cycles/${tradeCycleId}/entry-package`,
+      ),
+      {
+        matched: true,
+        strategyInstanceId: ".",
+        tradeCycleId: "..",
+      },
+    );
+  }
+});
 
-  assert.equal(response.status(), 415);
-  assert.equal(response.body().error.code, "unsupported_media_type");
-  assert.equal("details" in response.body().error, false);
+test("unsupported or malformed content type maps to 415", async () => {
+  for (const contentType of [
+    "text/plain",
+    "application/json;",
+    "application/json;; charset=utf-8",
+    "application/json; charset=utf-8; charset=utf-8",
+    "application/json; charset=utf-16",
+  ]) {
+    const response = await invokeRoute(makePackagePayload(), {
+      "content-type": contentType,
+    });
+
+    assert.equal(response.status(), 415, contentType);
+    assert.equal(response.body().error.code, "unsupported_media_type", contentType);
+    assert.equal("details" in response.body().error, false, contentType);
+  }
 });
 
 test("application/json and UTF-8 charset are supported", async () => {
-  for (const contentType of ["application/json", "Application/JSON; Charset=UTF-8"]) {
+  for (const contentType of [
+    "application/json",
+    "Application/JSON; Charset=UTF-8",
+    'application/json; charset="utf-8"',
+    ' Application/JSON ; Charset = "UTF-8" ',
+  ]) {
     const response = await invokeRoute(makePackagePayload(), {
       "content-type": contentType,
     });
@@ -134,8 +166,13 @@ test("valid absence reaches safe unconfigured boundary without fabricated succes
 });
 
 test("unknown HTTP-boundary failure maps to safe internal error", async () => {
-  const request = makeRequest("PUT", "http://[", "{}", {
+  const request = makeRequest("PUT", route(), "{}", {
     "content-type": "application/json",
+  });
+  Object.defineProperty(request, "headers", {
+    get(): never {
+      throw new Error("unexpected boundary failure");
+    },
   });
   const response = makeResponse();
 
