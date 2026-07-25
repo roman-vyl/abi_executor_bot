@@ -153,7 +153,7 @@ test("valid absence reaches safe unconfigured boundary without fabricated succes
   const response = await invokeRoute({
     ticker: "BTCUSDT.P",
     desired_entry: null,
-    risk_multiplier: null,
+    risk_multiplier: "1",
   });
 
   assert.equal(response.status(), 500);
@@ -163,6 +163,24 @@ test("valid absence reaches safe unconfigured boundary without fabricated succes
       message: "internal error",
     },
   });
+});
+
+test("null risk multiplier maps to validation failure for package and absence", async () => {
+  for (const desiredEntry of [null, makePackagePayload().desired_entry]) {
+    const response = await invokeRoute({
+      ticker: "BTCUSDT.P",
+      desired_entry: desiredEntry,
+      risk_multiplier: null,
+    });
+
+    assert.equal(response.status(), 422);
+    assert.equal(response.body().error.code, "validation_failed");
+    assert.ok(
+      response
+        .body()
+        .error.details.some((detail: { path: string }) => detail.path === "/risk_multiplier"),
+    );
+  }
 });
 
 test("unknown HTTP-boundary failure maps to safe internal error", async () => {

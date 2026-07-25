@@ -1,7 +1,7 @@
 ## 1. Transport DTOs and schemas
 
 - [x] 1.1 Define closed DTOs for path values, request body, DesiredEntry, applied success, absent success, and the public error envelope.
-- [x] 1.2 Define request schemas for required fields, nullability, `long | short`, JSON integer timestamp type, exact-decimal text, positive initial take, and positive risk multiplier.
+- [x] 1.2 Define request schemas for required fields, `desired_entry` nullability, `long | short`, JSON integer timestamp type, exact-decimal text, positive initial take, and required positive risk multiplier.
 - [x] 1.3 Validate `strategy_instance_id`, `trade_cycle_id`, and ticker only as non-empty strings and preserve them unchanged.
 - [x] 1.4 Ensure transport schemas add no regex, length, normalization, price-order, timestamp-range, or extra positivity rules to Runtime-owned values.
 
@@ -27,7 +27,7 @@
 
 ## 5. Contract-level tests
 
-- [x] 5.1 Test method/path, JSON content type, malformed JSON, request structure, required fields, unknown fields, and nullability combinations.
+- [x] 5.1 Test method/path, JSON content type, malformed JSON, request structure, required fields, unknown fields, `desired_entry` nullability, and non-null risk multiplier.
 - [x] 5.2 Test opaque non-empty identifiers and ticker, including exact preservation of `BTCUSDT.P`.
 - [x] 5.3 Test DesiredEntry field types, side enum, exact-decimal strings, positive initial take, and positive risk multiplier without testing invented ABI constraints.
 - [x] 5.4 Test exact applied and absent response shapes, including the already-absent case, and decimal/string preservation.

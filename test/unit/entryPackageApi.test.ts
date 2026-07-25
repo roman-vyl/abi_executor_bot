@@ -56,7 +56,7 @@ test("valid absence representation is accepted", () => {
     {
       ticker: "BTCUSDT.P",
       desired_entry: null,
-      risk_multiplier: null,
+      risk_multiplier: "+01.00",
     },
   );
 
@@ -67,12 +67,12 @@ test("valid absence representation is accepted", () => {
       tradeCycleId: "cycle",
       ticker: "BTCUSDT.P",
       desiredEntry: null,
-      riskMultiplier: null,
+      riskMultiplier: "+01.00",
     },
   });
 });
 
-test("request rejects missing, unknown, and mismatched nullable fields", () => {
+test("request rejects missing and unknown fields", () => {
   const result = validateEntryPackageCommand(
     {
       strategyInstanceId: "instance",
@@ -89,7 +89,6 @@ test("request rejects missing, unknown, and mismatched nullable fields", () => {
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.ok(result.details.some((detail) => detail.path === "/extra"));
-    assert.ok(result.details.some((detail) => detail.path === "/desired_entry"));
   }
 
   const missing = validateEntryPackageCommand(
@@ -108,6 +107,27 @@ test("request rejects missing, unknown, and mismatched nullable fields", () => {
   }
 });
 
+test("risk multiplier is required and never nullable", () => {
+  for (const desiredEntry of [null, makePackagePayload().desired_entry]) {
+    const result = validateEntryPackageCommand(
+      {
+        strategyInstanceId: "instance",
+        tradeCycleId: "cycle",
+      },
+      {
+        ticker: "BTCUSDT.P",
+        desired_entry: desiredEntry,
+        risk_multiplier: null,
+      },
+    );
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.ok(resultHasPath(result.details, "/risk_multiplier"));
+    }
+  }
+});
+
 test("only empty ownership and ticker strings are rejected", () => {
   const result = validateEntryPackageCommand(
     {
@@ -117,7 +137,7 @@ test("only empty ownership and ticker strings are rejected", () => {
     {
       ticker: "",
       desired_entry: null,
-      risk_multiplier: null,
+      risk_multiplier: "1",
     },
   );
 

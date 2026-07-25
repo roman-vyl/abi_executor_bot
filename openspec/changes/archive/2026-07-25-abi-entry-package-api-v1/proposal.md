@@ -5,10 +5,10 @@ Strategy Runtime needs a stable public HTTP boundary for sending one desired ent
 ## What Changes
 
 - Add a standalone versioned Runtime → ABI endpoint for one ownership-scoped desired entry package.
-- Define exact request DTOs for path identifiers, ticker, `DesiredEntry | null`, and `risk_multiplier | null`.
+- Define exact request DTOs for path identifiers, ticker, `DesiredEntry | null`, and a required positive exact-decimal `risk_multiplier`.
 - Define exact success DTOs for `entry_package_applied` and `entry_package_absent`.
 - Define one public error envelope, a closed error-code set, and deterministic HTTP status mapping.
-- Define request validation for JSON structure, field types, required/nullability rules, the existing Runtime `DesiredEntry` invariants, and the desired-entry/risk-multiplier combination.
+- Define request validation for JSON structure, field types, required fields, `desired_entry` nullability, the existing Runtime `DesiredEntry` invariants, and a positive `risk_multiplier`.
 - Define safe transport-error serialization without inventing future application error classes.
 - Add future OpenAPI and contract-test work for the external API boundary.
 

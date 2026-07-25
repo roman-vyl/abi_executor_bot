@@ -1,6 +1,6 @@
 ## Context
 
-Runtime sends ABI one desired entry-package state consisting of its ownership identities, ticker, `DesiredEntry | null`, and `risk_multiplier | null`. ABI owns the HTTP representation of that command, but Runtime owns the format and meaning of the transmitted Runtime entities.
+Runtime sends ABI one desired entry-package state consisting of its ownership identities, ticker, `DesiredEntry | null`, and a required positive exact-decimal `risk_multiplier`. ABI owns the HTTP representation of that command, but Runtime owns the format and meaning of the transmitted Runtime entities.
 
 This change therefore defines only the public HTTP contract: request decoding, transport validation, success/error serialization, OpenAPI, and contract tests. Connection to executor, sizing, risk, exchange, journal, or intent workflows remains a separate change.
 
@@ -48,11 +48,11 @@ Absence of a desired package uses the same route:
 {
   "ticker": "BTCUSDT.P",
   "desired_entry": null,
-  "risk_multiplier": null
+  "risk_multiplier": "1"
 }
 ```
 
-All three body fields are required. `desired_entry` and `risk_multiplier` are nullable only as the two combinations shown above. Objects are closed; unknown fields are invalid.
+All three body fields are required. `desired_entry` is nullable; `risk_multiplier` is always a positive exact-decimal string because it belongs to strategy-instance configuration and does not depend on whether a desired entry is present. Objects are closed; unknown fields are invalid.
 
 ### Validate Runtime-owned values without redefining them
 
@@ -67,7 +67,7 @@ A non-null `DesiredEntry` has exactly these required non-null fields:
 - `initial_take_price`: positive exact-decimal text;
 - `locked_exit_profile`: string.
 
-`risk_multiplier`, when non-null, is positive exact-decimal text. Exact-decimal values are JSON strings validated without binary floating-point conversion and passed unchanged. ABI adds no price-order rule, positivity rule for entry/stop, timestamp range, string-length limit, or decimal regex.
+`risk_multiplier` is positive exact-decimal text. Exact-decimal values are JSON strings validated without binary floating-point conversion and passed unchanged. ABI adds no price-order rule, positivity rule for entry/stop, timestamp range, string-length limit, or decimal regex.
 
 ### Keep acknowledgements minimal
 

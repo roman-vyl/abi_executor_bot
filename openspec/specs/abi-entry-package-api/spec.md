@@ -16,14 +16,14 @@ ABI SHALL expose `PUT /v1/strategy-instances/{strategy_instance_id}/trade-cycles
 - **THEN** ABI returns HTTP `415`
 - **AND** `error.code` is `unsupported_media_type`
 
-### Requirement: Request body is a closed nullable union
+### Requirement: Request body is closed and keeps strategy configuration
 The body SHALL be a closed JSON object with exactly three required fields:
 
 - `ticker`: string;
 - `desired_entry`: `DesiredEntry` object or null;
-- `risk_multiplier`: exact-decimal string or null.
+- `risk_multiplier`: positive exact-decimal string.
 
-The only valid combinations SHALL be a non-null `desired_entry` with a non-null `risk_multiplier`, or null for both fields. Omitted and unknown fields SHALL be invalid.
+`risk_multiplier` SHALL be non-null regardless of whether `desired_entry` is present or null. Omitted and unknown fields SHALL be invalid.
 
 #### Scenario: Valid package request is accepted
 - **WHEN** the request contains non-null `desired_entry` and non-null `risk_multiplier`
@@ -31,14 +31,14 @@ The only valid combinations SHALL be a non-null `desired_entry` with a non-null 
 - **THEN** the HTTP boundary accepts the request
 
 #### Scenario: Valid absence request is accepted
-- **WHEN** the request contains `desired_entry: null` and `risk_multiplier: null`
+- **WHEN** the request contains `desired_entry: null` and a positive exact-decimal `risk_multiplier`
 - **THEN** the HTTP boundary accepts the request as desired package absence
 
-#### Scenario: Nullability invariant is violated
-- **WHEN** exactly one of `desired_entry` and `risk_multiplier` is null
+#### Scenario: Null risk multiplier is rejected
+- **WHEN** `risk_multiplier` is null
 - **THEN** ABI returns HTTP `422`
 - **AND** `error.code` is `validation_failed`
-- **AND** `error.details` identifies the invariant violation
+- **AND** `error.details` identifies `/risk_multiplier`
 
 #### Scenario: Request structure is invalid
 - **WHEN** the body is not an object, a required field is omitted, or an unknown field is supplied
@@ -106,7 +106,7 @@ ABI SHALL NOT add a timestamp range, profile length/format rule, price-order rul
 - **THEN** ABI transport validation does not reject it based on timestamp magnitude, profile length/content, price ordering, or entry/stop positivity
 
 ### Requirement: Exact-decimal text is preserved
-Price fields and non-null `risk_multiplier` SHALL be JSON strings representing finite decimal values and SHALL be validated without binary floating-point conversion. `initial_take_price` and `risk_multiplier` SHALL represent values greater than zero. ABI SHALL apply no decimal regex, text-length limit, or normalization and SHALL preserve accepted strings unchanged.
+Price fields and `risk_multiplier` SHALL be JSON strings representing finite decimal values and SHALL be validated without binary floating-point conversion. `initial_take_price` and `risk_multiplier` SHALL represent values greater than zero. ABI SHALL apply no decimal regex, text-length limit, or normalization and SHALL preserve accepted strings unchanged.
 
 #### Scenario: Exact-decimal strings are accepted unchanged
 - **WHEN** price and multiplier fields are valid exact-decimal strings
@@ -119,7 +119,7 @@ Price fields and non-null `risk_multiplier` SHALL be JSON strings representing f
 - **AND** `error.code` is `validation_failed`
 
 #### Scenario: Risk multiplier is invalid
-- **WHEN** non-null `risk_multiplier` is not exact-decimal text, zero, or negative
+- **WHEN** `risk_multiplier` is missing, null, not exact-decimal text, zero, or negative
 - **THEN** ABI returns HTTP `422`
 - **AND** `error.code` is `validation_failed`
 - **AND** `error.details` identifies `/risk_multiplier`

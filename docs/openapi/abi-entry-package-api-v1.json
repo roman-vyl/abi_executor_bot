@@ -55,7 +55,7 @@
                   "value": {
                     "ticker": "BTCUSDT.P",
                     "desired_entry": null,
-                    "risk_multiplier": null
+                    "risk_multiplier": "1"
                   }
                 }
               }
@@ -231,7 +231,8 @@
             "type": "null"
           },
           "risk_multiplier": {
-            "type": "null"
+            "type": "string",
+            "format": "positive-exact-decimal"
           }
         }
       },

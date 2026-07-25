@@ -10,7 +10,7 @@ export type DesiredEntryDto = {
 export type EntryPackageRequestBody = {
   ticker: string;
   desired_entry: DesiredEntryDto | null;
-  risk_multiplier: string | null;
+  risk_multiplier: string;
 };
 
 export type EntryPackageCommand = {
@@ -18,7 +18,7 @@ export type EntryPackageCommand = {
   tradeCycleId: string;
   ticker: string;
   desiredEntry: DesiredEntryDto | null;
-  riskMultiplier: string | null;
+  riskMultiplier: string;
 };
 
 export type EntryPackageAppliedResponse = {
@@ -135,12 +135,12 @@ export function validateEntryPackageCommand(
     }
   }
 
-  let riskMultiplier: string | null = null;
-  if (hasRiskMultiplier && riskMultiplierValue !== null) {
+  let riskMultiplier: string | undefined;
+  if (hasRiskMultiplier) {
     if (typeof riskMultiplierValue !== "string") {
       details.push({
         path: "/risk_multiplier",
-        message: "risk_multiplier must be an exact-decimal string or null",
+        message: "risk_multiplier must be a positive exact-decimal string",
       });
     } else if (!isPositiveExactDecimalText(riskMultiplierValue)) {
       details.push({
@@ -152,19 +152,7 @@ export function validateEntryPackageCommand(
     }
   }
 
-  if (
-    hasDesiredEntry &&
-    hasRiskMultiplier &&
-    ((desiredEntryValue === null && riskMultiplierValue !== null) ||
-      (desiredEntryValue !== null && riskMultiplierValue === null))
-  ) {
-    details.push({
-      path: "/desired_entry",
-      message: "desired_entry and risk_multiplier must both be null or both be non-null",
-    });
-  }
-
-  if (details.length > 0) {
+  if (details.length > 0 || riskMultiplier === undefined) {
     return { ok: false, details };
   }
 

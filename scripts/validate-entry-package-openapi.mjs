@@ -36,6 +36,10 @@ for (const name of ["PackagePresentRequest", "PackageAbsentRequest"]) {
   assert.equal(ticker.minLength, 1);
   assert.equal("pattern" in ticker, false);
   assert.equal("maxLength" in ticker, false);
+  assert.deepEqual(schemas[name].properties.risk_multiplier, {
+    type: "string",
+    format: "positive-exact-decimal",
+  });
 }
 
 const desiredEntry = schemas.DesiredEntry;
