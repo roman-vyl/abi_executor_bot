@@ -32,7 +32,6 @@ test("OpenAPI examples conform to runtime request and response contracts", async
       tradeCycleId: applied.trade_cycle_id,
       completePackageApplied: true,
       appliedDesiredEntry: applied.applied_desired_entry,
-      acceptedRiskMultiplier: applied.accepted_risk_multiplier,
       calculatedQuantity: applied.calculated_quantity,
     }).body,
     applied,
@@ -83,6 +82,7 @@ test("OpenAPI owns transport shape without constraining Runtime value formats", 
 
   const serialized = JSON.stringify(document);
   for (const forbidden of [
+    "accepted_risk_multiplier",
     "entry_package_conflict",
     "entry_package_processing_failed",
     "entry_package_timeout",

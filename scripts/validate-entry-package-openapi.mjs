@@ -54,7 +54,6 @@ assert.deepEqual(desiredEntry.properties.locked_exit_profile, { type: "string" }
 
 const appliedProperties = schemas.EntryPackageAppliedResponse.properties;
 assert.deepEqual(Object.keys(appliedProperties).sort(), [
-  "accepted_risk_multiplier",
   "applied_desired_entry",
   "calculated_quantity",
   "status",
@@ -77,6 +76,7 @@ assert.ok(operation.responses["500"].content["application/json"].example);
 const serialized = JSON.stringify(document);
 for (const forbidden of [
   "ReconcileEntryPackagePort",
+  "accepted_risk_multiplier",
   "entry_package_conflict",
   "entry_package_processing_failed",
   "entry_package_timeout",

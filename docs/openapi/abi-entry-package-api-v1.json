@@ -91,7 +91,6 @@
                         "initial_take_price": "103000",
                         "locked_exit_profile": "runner"
                       },
-                      "accepted_risk_multiplier": "1",
                       "calculated_quantity": "0.001"
                     }
                   },
@@ -283,7 +282,6 @@
           "trade_cycle_id",
           "status",
           "applied_desired_entry",
-          "accepted_risk_multiplier",
           "calculated_quantity"
         ],
         "properties": {
@@ -300,10 +298,6 @@
           },
           "applied_desired_entry": {
             "$ref": "#/components/schemas/DesiredEntry"
-          },
-          "accepted_risk_multiplier": {
-            "type": "string",
-            "format": "positive-exact-decimal"
           },
           "calculated_quantity": {
             "type": "string",

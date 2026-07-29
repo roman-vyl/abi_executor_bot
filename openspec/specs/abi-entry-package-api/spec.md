@@ -131,7 +131,6 @@ Successful application or replacement SHALL return HTTP `200` with a closed JSON
 - `trade_cycle_id`: exact decoded path value;
 - `status`: literal `entry_package_applied`;
 - `applied_desired_entry`: the complete accepted DesiredEntry;
-- `accepted_risk_multiplier`: the accepted positive exact-decimal string;
 - `calculated_quantity`: exact-decimal string.
 
 `entry_package_applied` SHALL mean that the indivisible package `entry + initial stop + initial take` was applied and is now the acknowledged ABI state. Partial application SHALL NOT return this DTO or any other `2xx`.

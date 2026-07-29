@@ -26,7 +26,6 @@ export type EntryPackageAppliedResponse = {
   trade_cycle_id: string;
   status: "entry_package_applied";
   applied_desired_entry: DesiredEntryDto;
-  accepted_risk_multiplier: string;
   calculated_quantity: string;
 };
 
@@ -80,7 +79,6 @@ export type AppliedAcknowledgementInput = {
   tradeCycleId: string;
   completePackageApplied: boolean;
   appliedDesiredEntry: DesiredEntryDto;
-  acceptedRiskMultiplier: string;
   calculatedQuantity: string;
 };
 
@@ -180,7 +178,6 @@ export function serializeAppliedEntryPackage(
     input.strategyInstanceId.length === 0 ||
     input.tradeCycleId.length === 0 ||
     !desiredEntryResult.ok ||
-    !isPositiveExactDecimalText(input.acceptedRiskMultiplier) ||
     !isExactDecimalText(input.calculatedQuantity)
   ) {
     return internalErrorResult();
@@ -193,7 +190,6 @@ export function serializeAppliedEntryPackage(
       trade_cycle_id: input.tradeCycleId,
       status: "entry_package_applied",
       applied_desired_entry: desiredEntryResult.value,
-      accepted_risk_multiplier: input.acceptedRiskMultiplier,
       calculated_quantity: input.calculatedQuantity,
     },
   };

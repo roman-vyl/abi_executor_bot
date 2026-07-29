@@ -222,7 +222,6 @@ test("applied serializer returns the exact closed acknowledgement", () => {
     tradeCycleId: "cycle",
     completePackageApplied: true,
     appliedDesiredEntry: makePackagePayload().desired_entry as any,
-    acceptedRiskMultiplier: "+01.00",
     calculatedQuantity: "0.00100",
   });
 
@@ -232,11 +231,9 @@ test("applied serializer returns the exact closed acknowledgement", () => {
     trade_cycle_id: "cycle",
     status: "entry_package_applied",
     applied_desired_entry: makePackagePayload().desired_entry,
-    accepted_risk_multiplier: "+01.00",
     calculated_quantity: "0.00100",
   });
   assert.deepEqual(Object.keys(result.body).sort(), [
-    "accepted_risk_multiplier",
     "applied_desired_entry",
     "calculated_quantity",
     "status",
@@ -251,7 +248,6 @@ test("partial package cannot serialize as 2xx", () => {
     tradeCycleId: "cycle",
     completePackageApplied: false,
     appliedDesiredEntry: makePackagePayload().desired_entry as any,
-    acceptedRiskMultiplier: "1",
     calculatedQuantity: "0.001",
   });
 
