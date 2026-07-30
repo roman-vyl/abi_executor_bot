@@ -1430,14 +1430,23 @@ implicit/непроверенные допущения. Единственная
 resolution, §28i) — не blocker, а explicit prerequisite/assumption, которую proposal
 обязан зафиксировать, а не решить внутри своих tasks.
 
-## Authoritative source status
+## Authoritative source status (UPDATED — reflects two-input model)
+
+`/opsx:propose abi-entry-package-execution-v1` takes **two** authoritative inputs, each
+with a distinct, non-overlapping role:
 
 ```
 ENTRY_PACKAGE_EXECUTION_AUDIT.md
-is the single authoritative exploration input
-for /opsx:propose abi-entry-package-execution-v1
+→ authoritative architecture/execution input
+
+LEGACY_SIGNAL_INTENT_DISPOSITION.md
+→ authoritative reuse/retirement input
 ```
 
-Отдельного повторного exploration не требуется. Никакой prerequisite change в
-`strategy_engine` или `strategy_runtime` не создавался и не требуется — Engine/Runtime
-изменений в рамках Stage A не затрагиваются.
+This file no longer claims to be the sole authoritative input on its own — reuse,
+forbidden-reuse, and legacy-retirement questions (including the precise scope of any
+"переиспользует X" phrasing in §16 above) are governed by
+`LEGACY_SIGNAL_INTENT_DISPOSITION.md`, not by this file's shorthand. Отдельного
+повторного exploration не требуется для architecture/execution вопросов. Никакой
+prerequisite change в `strategy_engine` или `strategy_runtime` не создавался и не
+требуется — Engine/Runtime изменений в рамках Stage A не затрагиваются.
