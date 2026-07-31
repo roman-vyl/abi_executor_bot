@@ -19,8 +19,8 @@ EntryPackageResponse`/`serializeAbsentEntryPackage` already exist in `entryPacka
 but are not yet called. No database dependency exists in `package.json`; the only existing
 durable-storage pattern is the legacy `Journal`'s append-only JSONL file. No mutex/
 concurrency primitive exists anywhere in the codebase. No Bybit WebSocket client exists.
-`bybitAdapter.ts` has no `instruments-info` method. The legacy `/signals` + `/intents/*`
-contour remains fully in place and unmodified by this change.
+`bybitAdapter.ts` has no `instruments-info` method and no order-history method. The legacy
+`/signals` + `/intents/*` contour remains fully in place and unmodified by this change.
 
 ## Goals / Non-Goals
 
@@ -37,6 +37,9 @@ contour remains fully in place and unmodified by this change.
   signal-shaped query methods.
 - Keep the new correlation store, mutex, and application service entirely additive:
   zero edits to any file the disposition marks `LEGACY_ONLY`.
+- Make this change's own boundary honest: where a real ABI-internal dependency
+  (ticker→symbol resolution) is genuinely required for production behavior, declare it
+  as a blocking prerequisite rather than half-building it here.
 
 **Non-Goals:** (see `proposal.md` for the full list; design-level additions only)
 - No feature-flagging or staged rollout mechanism — the codebase has no existing
@@ -46,6 +49,8 @@ contour remains fully in place and unmodified by this change.
   (see Decisions) because multi-process ABI is out of scope.
 - No decimal-arithmetic library evaluation beyond confirming one is needed — the exact
   library or manual implementation is a task-level choice, not a design-level one.
+- No design or implementation of `ExchangeSymbolResolver` — see Decision 9. That
+  responsibility belongs entirely to a separate prerequisite change.
 
 ## Decisions
 
@@ -61,31 +66,43 @@ src/correlation/entryPackageExecutionRecord.ts   record + status types (audit §
 src/correlation/entryPackageCorrelationRepository.ts   durable store (audit §11)
 src/concurrency/keyedMutex.ts            per-key in-process serialization (audit §25)
 src/exchange/instrumentTradingRulesProvider.ts   Bybit instruments-info-backed rules (audit §6)
-src/exchange/exchangeSymbolResolver.ts   ticker→symbol seam (see Decision 9 — prerequisite, not designed here)
 src/risk/positionSizeCalculator.ts       PositionSizeCalculator port + FixedMinimumPositionSizeCalculator (audit §6)
 src/services/entryPackage/packageConfirmation.ts        PackageConfirmationComponent (audit §10/§26)
 src/services/entryPackage/entryPackageApplicationService.ts   orchestrator (audit §16)
 ```
 
+**Not in this list:** `src/exchange/exchangeSymbolResolver.ts`. Per Decision 9, that file
+(interface **and** production implementation) is created by the prerequisite change
+`abi-exchange-instrument-identity-v1`, not by this one. This change's Decision 11 flow and
+group-5 tasks import and consume it once that prerequisite has landed in this same
+repository.
+
 Modified existing files (all already `REUSE_WITH_ADAPTATION` or explicitly extended per
 the disposition table):
 
 ```
-src/exchange/bybitAdapter.ts        + getInstrumentInfo(symbol) method on BybitAdapter,
-                                       RestBybitAdapter, StubBybitAdapter
+src/exchange/bybitAdapter.ts        + getInstrumentInfo(symbol), + getOrderHistory(payload)
+                                       methods on BybitAdapter, RestBybitAdapter, StubBybitAdapter
 src/exchange/bybitOrderMapper.ts    + a new entry-package payload builder that reuses
-                                       mapSide/mapTriggerDirection; mapExecutionPlanToBybit
-                                       itself is untouched and uncalled by new code
+                                       mapSide/mapTriggerDirection, + BybitGetOrderHistoryPayload
+                                       type; mapExecutionPlanToBybit itself is untouched and
+                                       uncalled by new code
 src/routes/entryPackageRoutes.ts    calls EntryPackageApplicationService instead of
-                                       unconditional internalErrorResult()
+                                       unconditional internalErrorResult(); checks the
+                                       entry-package readiness flag (Decision 13)
+src/routes/systemRoutes.ts          GET /health gains an entryPackageReady field
+                                       (Decision 13); no existing field changes
 src/app/server.ts                   composition root: constructs and wires the new
                                        correlation repository, rules provider, calculator,
-                                       mutex, application service; legacy route wiring
-                                       (signalRoutes/intentRoutes/accountRoutes) unchanged
+                                       mutex, application service, and readiness flag;
+                                       legacy route wiring (signalRoutes/intentRoutes/
+                                       accountRoutes) unchanged
+src/app/index.ts                    kicks off the async correlation replay alongside
+                                       server startup, per Decision 13
 src/config/config.ts                + ABI_ENTRY_PACKAGE_CORRELATION_PATH (new file path,
                                        sibling to journalPath, not reusing it),
                                        + instrument-rules cache TTL config
-test/fakes/fakeBybitAdapter.ts      + fake getInstrumentInfo
+test/fakes/fakeBybitAdapter.ts      + fake getInstrumentInfo, + fake getOrderHistory
 test/fixtures/config.ts             + new config fields' defaults
 ```
 
@@ -155,15 +172,25 @@ multi-writer concurrency ever materializes (out of scope here).
 
 ### 5. `EntryPackageExecutionRecord` schema
 
-Exactly the audit §8 shape, TypeScript types in `entryPackageExecutionRecord.ts`:
+Exactly the audit §8 shape, extended per this design with `ticker`, `exchange_symbol`,
+and `risk_multiplier` — a correlation record must durably capture the intent it acted on
+(what ticker, what resolved symbol, what sizing input) before any exchange call, not only
+the outcome. TypeScript types live in `entryPackageExecutionRecord.ts`:
 
 ```
 strategy_instance_id, trade_cycle_id: string        (immutable)
+ticker: string                                       (immutable — fixed at first
+                                                        application to this trade cycle)
+exchange_symbol: string                              (mutable — currently resolved
+                                                        Bybit symbol)
 created_at, updated_at: string (ISO)
-desired_entry: DesiredEntryDto | null
-calculated_quantity: string | null
-order_link_id: string | null
-order_id: string | null
+desired_entry: DesiredEntryDto | null                (mutable)
+risk_multiplier: string                              (mutable — sizing provenance,
+                                                        recorded as received on each
+                                                        applied request)
+calculated_quantity: string | null                   (mutable)
+order_link_id: string | null                         (mutable)
+order_id: string | null                              (mutable)
 generation: number                                   (1-based; 0 = sentinel "no order yet")
 status: "pending_create" | "applied" | "pending_replace" | "pending_cancel"
        | "absent" | "create_failed" | "unknown" | "terminal_unfilled"
@@ -179,11 +206,26 @@ binding_history: Array<{
   order_id: string | null
   generation: number
   role: "entry"
+  exchange_symbol: string
   started_at: string
   ended_at: string | null
-  end_reason: "replaced" | "cancelled" | "superseded" | null
+  end_reason: "replaced" | "cancelled" | "superseded" | "exchange_terminal" | null
 }>
 ```
+
+`ticker` is fixed the moment a trade cycle is first recorded; a later request supplying a
+different ticker for the same trade cycle is rejected before any exchange call (Decision
+11) — this is why it needs its own field rather than being read out of `desired_entry`,
+which can be null. `exchange_symbol` is stored explicitly on both the top-level record and
+each `binding_history` entry, rather than re-derived from `ticker` on every read, so that
+a query or cancellation against an old binding after a restart does not depend on the
+resolver producing the same answer today that it did when that binding was created.
+`risk_multiplier` is recorded so the correlation record captures the sizing input that
+produced `calculated_quantity`, not just the output. `binding_history` gains
+`exchange_terminal` as a fourth `end_reason`, distinct from `cancelled` (ABI-initiated)
+and `replaced`/`superseded` (part of a REPLACE) — it marks a binding the exchange
+terminated on its own, without an ABI cancel action, which is exactly the
+`terminal_unfilled` case (Decision 11).
 
 `binding_history` is append-only within the record and is never truncated (audit §13).
 
@@ -194,6 +236,9 @@ chains promises per key in a `Map`. No timeout, no external dependency, no
 distributed-lock semantics — audit §25 explicitly justifies this as sufficient because
 multi-process ABI is a non-goal. Exact timeout/cleanup policy for a stuck lock is
 deliberately left to `tasks.md`/implementation (audit §28h — non-blocking, design-level).
+The lock is released in a `finally` block regardless of whether `fn` resolves or rejects —
+this is a correctness requirement, not an optimization: a lock that leaked on a failed
+request would permanently wedge that trade cycle for every subsequent PUT.
 
 ### 7. `InstrumentTradingRulesProvider` + `bybitAdapter.ts` extension
 
@@ -228,51 +273,106 @@ discipline already established in `entryPackageApi.ts`'s `isExactDecimalText`.
 formula — a code comment marks this as the V1 placeholder boundary, matching the
 audit's explicit disclosure requirement.
 
-### 9. Ticker → Bybit symbol resolution: explicit prerequisite, not designed or implemented here
+### 9. Ticker → Bybit symbol resolution: blocking prerequisite, owned entirely by a separate change
 
-Per `proposal.md` and both audits, this is a real ABI-wide dependency this change's
+This is a real ABI-internal (non-cross-repo) dependency that
 `EntryPackageApplicationService`, `InstrumentTradingRulesProvider`, and the Bybit payload
-builder all need, but which this change does not own. Concretely: a narrow seam,
-`ExchangeSymbolResolver` (`resolve(ticker: string): string`), is defined and injected
-wherever a resolved `symbol` is needed — the same dependency-injection shape every other
-collaborator in this design already uses (`bybit`, `config`, the repository). **This
-change does not implement `ExchangeSymbolResolver`.** Implementation of tasks in this
-change assumes a resolver is available by the time task block 5 (Bybit payload/adapter
-extensions) is implemented; if no such resolver exists yet elsewhere in the codebase at
-that time, providing one is prerequisite work outside this OpenSpec change's task list,
-not a design decision this document makes. Tests use a trivial fake resolver
-(identity/no-op), which is a test double, not a production design choice.
+builder all need — none of them can make a correct real Bybit call without a resolved
+`symbol`. Earlier drafting of this design treated it as a seam this change would define
+(interface only) while leaving the implementation to "whoever." **That framing is
+rejected.** Defining the interface here without a production implementation would leave
+this change structurally unable to deliver the production execution behavior
+`proposal.md` promises — a half-built dependency is not meaningfully different from an
+undeclared one.
 
-### 10. `PackageConfirmationComponent`: new code, not a call into `verifyPostCreateProtection`
+**Decision:** a separate, prerequisite OpenSpec change — proposed name
+`abi-exchange-instrument-identity-v1` — owns `src/exchange/exchangeSymbolResolver.ts` in
+full: the `ExchangeSymbolResolver` interface (`resolve(ticker: string): string`) **and**
+its production implementation (e.g. Bybit-symbol normalization such as stripping a `.P`
+suffix, whatever that change's own design decides). This change does not create that
+file, does not define the interface, and does not implement any part of the resolution
+logic. Once the prerequisite has landed in this same repository, this change's group-5
+tasks import `ExchangeSymbolResolver` from it and inject a concrete instance at the
+composition root (`app/server.ts`), exactly like every other collaborator
+(`bybit`, `config`, the correlation repository) is already injected.
+
+**Consequence for sequencing:** tasks in groups 1-4 and 6 do not need a resolved symbol
+and may be implemented and tested independently. Tasks in group 5 (and the
+symbol-dependent parts of group 7) are blocked on the prerequisite change landing first —
+see `tasks.md` group 0. Unit tests throughout this change may still use a trivial
+test-only resolver double (identity function or a hardcoded mapping) — that is a test
+fixture, not a stand-in production design, and it does not reduce or replace the
+blocking dependency for production behavior.
+
+### 10. `PackageConfirmationComponent`: new code, two-step exchange query, not a call into `verifyPostCreateProtection`
 
 Per the disposition table, `verifyPostCreateProtection.ts` is `REUSE_WITH_ADAPTATION`,
-not `REUSE_AS_IS` — its bounded-retry *mechanics* (poll `getOrderByLinkId` +
-position/order-state a fixed number of times with a fixed delay) are the template, but
-the new component is new code because: (a) it must diff returned order fields
-(`triggerPrice`/`qty`/`stopLoss`/`takeProfit`) against the desired package, which
-`verifyPostCreateProtection` never does; (b) it classifies into the five audit §26
-outcomes (pending confirmed / full fill / partial fill / rejected-deactivated /
-ambiguous), not `verifyPostCreateProtection`'s position-breach-focused outcomes; (c) its
-journal coupling is the new `CorrelationRepository`, not `Journal`. The bounded-retry
-constants (`2` attempts, `300ms` delay) are a reasonable starting point copied from the
-existing code, not a hard requirement — tunable at the task level.
+not `REUSE_AS_IS` — its bounded-retry *mechanics* (poll a fixed number of times with a
+fixed delay) are the template, but the new component is new code because: (a) it must
+diff returned order fields (`triggerPrice`/`qty`/`stopLoss`/`takeProfit`) against the
+desired package, which `verifyPostCreateProtection` never does; (b) it classifies into
+the five audit §26 outcomes, not `verifyPostCreateProtection`'s position-breach-focused
+outcomes; (c) its journal coupling is the new `CorrelationRepository`, not `Journal`;
+(d) it queries two Bybit endpoints, not one.
+
+**Two-step query, not realtime-only.** `getOrderByLinkId` queries only
+`/v5/order/realtime`, which shows live/pending orders — it cannot see an order that has
+already fully filled and closed, been rejected, or been terminated by the exchange,
+because Bybit moves those out of the realtime set. Confirming `full fill`,
+`rejected/deactivated`, and `terminal_unfilled` outcomes correctly therefore requires a
+second query when the realtime lookup comes back empty or reports a terminal status:
+`bybitAdapter.ts` gains a new `getOrderHistory(payload)` method calling
+`GET /v5/order/history` (by `orderLinkId`, mirroring `getOrderByLinkId`'s existing
+payload shape). The confirmation flow becomes:
+
+```
+query /v5/order/realtime by orderLinkId
+if found and live/pending → diff fields against desired package → classify
+if not found, or found but reporting a terminal status →
+  query /v5/order/history by orderLinkId
+  if history shows a fill → classify as full/partial fill (audit §26)
+  if history shows rejected/cancelled/deactivated with no fill → classify as
+    rejected/deactivated before any fill
+  if neither query yields a conclusive result within the bounded retry budget →
+    classify as ambiguous
+```
+
+This stays within the existing bounded-retry envelope (same attempt count/delay pattern
+as `verifyPostCreateProtection`) — the history query is a fallback branch within one
+confirmation attempt, not an additional unbounded retry loop. Individual fills and
+execution-history reconstruction remain explicitly out of scope (audit §8/§17); the
+history query is used only to classify the aggregate outcome, never to enumerate fills.
 
 ### 11. `EntryPackageApplicationService`: orchestration, owns nothing else
 
-Exact flow (audit §16, §9, §12):
+Exact flow (audit §16, §9, §12), extended with the classification branches this
+correction pass adds:
 
 ```
-1. acquire keyed mutex for (strategy_instance_id, trade_cycle_id)
+1. acquire keyed mutex for (strategy_instance_id, trade_cycle_id); release in a
+   finally block so a failed request never leaves the lock held (Decision 6)
 2. load correlation record (or none)
-3. classify: CREATE | REPLACE (amend | cancel-and-create) | CANCEL | CONFIRM-ABSENT
-   | repeat-PUT revalidation (including terminal_unfilled fail-closed path)
+3. classify:
+   - ticker differs from the record's stored ticker → reject with a safe error,
+     no exchange call (Decision 5)
+   - only source_plan_bar_open_time_ms/locked_exit_profile differ from the
+     stored desired_entry (side/price/qty/stop/take unchanged) → durably update
+     the stored desired_entry, run bounded revalidation of the existing order,
+     no amend/create request sent
+   - otherwise: CREATE | REPLACE (amend | cancel-and-create) | CANCEL |
+     CONFIRM-ABSENT | repeat-PUT revalidation (including terminal_unfilled
+     fail-closed path)
 4. if a new/changed order is needed:
    a. call EntryOrderSemanticsMapper(side)
    b. call PositionSizeCalculator
-   c. build Bybit payload (bybitOrderMapper.ts additions)
-   d. persist provisional record (durable write, before any Bybit call)
-   e. call execution.ts's guarded create/amend/cancel (as-is)
-   f. run PackageConfirmationComponent
+   c. build Bybit payload (bybitOrderMapper.ts additions), using the resolved
+      symbol from ExchangeSymbolResolver (Decision 9)
+   d. persist provisional record — including ticker, exchange_symbol,
+      risk_multiplier — durable write, before any Bybit call
+   e. call execution.ts's guarded create/amend/cancel (as-is); if it reports
+      skipped_live_execution, treat this as a non-success and return
+      internal_error — never entry_package_applied or entry_package_absent
+   f. run PackageConfirmationComponent (Decision 10)
    g. persist confirmed/failed state (durable write)
 5. release mutex
 6. serialize result via existing serializeAppliedEntryPackage/serializeAbsentEntryPackage
@@ -288,15 +388,32 @@ change).
 Unit tests for each new pure/isolated module (mapper, identity, calculator, repository
 crash/replay behavior, confirmation classification) mirror existing test file naming
 (`test/unit/<module>.test.ts`). Integration tests exercise the full service against
-`FakeBybitAdapter` (extended per Decision 7) plus a new `FakeInstrumentTradingRulesProvider`
-(disposition explicitly names this as the pattern to follow, modeled on
-`test/fakes/fakeBybitAdapter.ts`). A new entry-package smoke script
+`FakeBybitAdapter` (extended per Decisions 7/10) plus a new
+`FakeInstrumentTradingRulesProvider` (disposition explicitly names this as the pattern to
+follow, modeled on `test/fakes/fakeBybitAdapter.ts`). A new entry-package smoke script
 (`scripts/smoke-entry-package-contract-matrix.sh` or similar, exact name a task-level
 choice) exercises apply/replace/cancel/confirm end-to-end against demo/testnet, mirroring
 `smoke-sandbox-contract-matrix.sh`'s structure without touching that file. This new smoke
 script is additive; it does not replace or modify any existing legacy smoke script (per
 disposition, that migration happens in a later, separate cleanup pass, not in this
 change).
+
+### 13. Startup readiness gating (entry-package only, not the whole server)
+
+`startServer`/`app/index.ts` starts the correlation repository's replay asynchronously at
+startup and tracks a composition-root-owned `entryPackageReady: boolean` flag (with an
+optional `reason` string), set to `true` only once replay succeeds. `server.listen(...)`
+is **not** delayed for this — legacy `/signals`, `/intents/*`, and `/account/*` routes are
+unaffected by correlation-store health and must keep working even if entry-package replay
+is slow or fails, matching the disposition's independence of the legacy contour.
+`entryPackageRoutes.ts` checks this flag before calling `EntryPackageApplicationService`:
+when not ready, it returns the existing safe `internal_error` response — no new error
+code. `systemRoutes.ts`'s `GET /health` is extended with an additional
+`entryPackageReady` field surfacing this state for operators, without altering any
+existing `/health` field. This scopes the audit's fail-closed startup requirement
+(`ready=true` with an unreadable store: no) to entry-package specifically, applying the
+same "don't take down unrelated capabilities" principle Decision 7 already applies to
+instrument-rules failures, one level up at startup.
 
 ## Risks / Trade-offs
 
@@ -305,12 +422,17 @@ change).
   acknowledge) outweighs raw throughput here, matching audit §11's own conclusion.
 - [In-process keyed mutex provides no protection if ABI ever runs multi-process] →
   Accepted: multi-process ABI is an explicit non-goal (audit §17); revisit only if that
-  changes.
-- [`ExchangeSymbolResolver` has no production implementation inside this change] → The
-  application service and rules provider cannot reach real Bybit endpoints for any
-  ticker until a resolver exists. Mitigation: the seam is explicit and injected, so a
-  resolver landing later (from prerequisite work) requires no further change to this
-  change's code — only a new implementation of one narrow interface.
+  changes. The lock is always released via `finally` (Decision 6), so a failing request
+  cannot wedge a trade cycle even within the single-process model.
+- [This change cannot send any real Bybit request for any ticker until the prerequisite
+  change `abi-exchange-instrument-identity-v1` lands, since that change owns
+  `ExchangeSymbolResolver` in full] → Not treated as a risk to mitigate within this
+  change — it is an explicit, declared blocking dependency (proposal.md, Decision 9).
+  Group-5 tasks are sequenced behind that prerequisite merging first; this change's own
+  tasks and tests do not attempt to work around its absence with a partial or placeholder
+  production implementation.
+- [Realtime-only order queries cannot observe orders that have already left the
+  open/pending set] → Mitigated by the order-history fallback query (Decision 10).
 - [`terminal_unfilled` can leave a trade cycle stuck until an explicit `CANCEL` arrives] →
   Accepted per audit §12 decision B: automatic resurrection was rejected as unvalidated
   business semantics. Whether Runtime reliably sends that `CANCEL` is outside ABI's
@@ -323,6 +445,9 @@ change).
   holding the correct `generation` before the hash is computed] → Mitigated by Decision 3
   and Decision 4's durable-write-before-external-call ordering: the record is written
   with its reserved generation before the hash is used in any Bybit call.
+- [Synchronous server startup could otherwise accept entry-package requests before
+  correlation replay completes] → Mitigated by the entry-package-scoped readiness flag
+  (Decision 13), which does not block legacy or account routes.
 
 ## Migration Plan
 
@@ -334,6 +459,13 @@ plain revert of the route-wiring and composition-root commits; the legacy `/sign
 rollback consideration. The new correlation file is created on first write; deleting it
 (only ever appropriate in a non-production environment) simply resets entry-package
 execution state with no effect on the legacy journal or legacy flows.
+
+**Deployment ordering:** this change's group-5/7 tasks that require a resolved Bybit
+symbol cannot be completed against production Bybit until the prerequisite change
+`abi-exchange-instrument-identity-v1` has merged. Groups 1-4, 6, and the non-symbol-
+dependent parts of 8-9 may still be implemented and tested (using a test-only resolver
+double) before that prerequisite lands, but this change as a whole is not deployable to
+production until it has.
 
 ## Open Questions
 
@@ -348,3 +480,5 @@ audit-documented default that implementation may proceed with:
   beyond the required explicit-`CANCEL` path (audit §28j).
 - Exact instrument-rules cache TTL value (audit §6 — a constant, not an architectural
   choice).
+- Exact `getOrderHistory` query parameters (pagination/limit) beyond looking up by
+  `orderLinkId` — a task-level REST call detail, not an architectural choice.

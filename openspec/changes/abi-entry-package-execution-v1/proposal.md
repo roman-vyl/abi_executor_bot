@@ -62,10 +62,23 @@ re-litigating architecture mid-build.
   without ever filling: a new `terminal_unfilled` status, `internal_error` on repeat
   non-null PUT, no automatic re-creation in the same trade cycle — unblocking requires an
   explicit `CANCEL` (`desired_entry: null`) first.
-- Extend `bybitAdapter.ts` with an `instruments-info` method and extend
+- Extend `bybitAdapter.ts` with `instruments-info` and order-history methods (the latter
+  needed because live-order lookup alone cannot see an order that already filled and
+  closed, was rejected, or was terminated by the exchange) and extend
   `bybitOrderMapper.ts`'s trigger-direction encoding path; extend the fake adapter and
   config test fixture to match.
-- Wire `entryPackageRoutes.ts` and `app/server.ts` composition to use the new service.
+- Extend the correlation record with the trade cycle's `ticker`, the currently resolved
+  `exchange_symbol`, and the `risk_multiplier` that produced `calculated_quantity` — not
+  just the desired entry and order binding — so intent and sizing provenance are durable,
+  not just the outcome.
+- Explicitly define REPLACE's edge cases: a `ticker` that differs from the trade cycle's
+  already-recorded ticker is rejected without any exchange call; a change limited to
+  `source_plan_bar_open_time_ms`/`locked_exit_profile` (with price/qty/side/stop/take
+  unchanged) durably updates the record and bounded-revalidates the existing order without
+  sending an amend or create request.
+- Wire `entryPackageRoutes.ts` and `app/server.ts` composition to use the new service, with
+  an entry-package-specific readiness flag gating it until correlation-store replay
+  completes (legacy and account routes are unaffected by this flag).
 
 **Non-goals (explicit, not silently deferred):**
 - Real risk-based position sizing (fixed-minimum sizing is a disclosed, deliberate V1
@@ -74,9 +87,12 @@ re-litigating architecture mid-build.
   Runtime-facing webhook (Stage A returns a truthful synchronous acknowledgement only).
 - Designing or implementing Runtime `ticker` → Bybit `symbol` resolution. This is a real,
   ABI-internal (non-cross-repo) dependency that `EntryPackageApplicationService`,
-  `InstrumentTradingRulesProvider`, and `ExchangeGateway` all need — this change fixes it
-  as an explicit prerequisite/assumption (see `design.md`) and consumes an already-resolved
-  `symbol`, without designing the resolver itself.
+  `InstrumentTradingRulesProvider`, and the Bybit payload builder all need, and this change
+  **depends on a separate prerequisite OpenSpec change** (proposed name:
+  `abi-exchange-instrument-identity-v1`, not created by this change) that owns the
+  `ExchangeSymbolResolver` interface **and** its production implementation in full. This
+  change does not define, partially define, or implement that resolver — it only imports
+  and consumes it once the prerequisite has landed.
 - Any cross-repo change to Strategy Engine or Strategy Runtime, or to the public
   `abi-entry-package-api` request/response DTOs.
 - Removing, retiring, or modifying any legacy `/signals` + `/intents/*` code, tests, or
@@ -108,8 +124,10 @@ implementation is being added. No spec-level behavior of that capability changes
   package confirmation, instrument trading rules provider, position size calculator port
   + V1 implementation, keyed mutex, the application service itself.
 - **Modified existing modules**: `src/routes/entryPackageRoutes.ts` (call the new service
-  instead of unconditional `internal_error`), `src/app/server.ts` (composition wiring),
-  `src/exchange/bybitAdapter.ts` (+ `StubBybitAdapter`) (new `instruments-info` method),
+  instead of unconditional `internal_error`; check the readiness flag), `src/routes/systemRoutes.ts`
+  (new `entryPackageReady` field on `GET /health`), `src/app/server.ts` and `src/app/index.ts`
+  (composition wiring, async startup replay), `src/exchange/bybitAdapter.ts`
+  (+ `StubBybitAdapter`) (new `instruments-info` and order-history methods),
   `src/exchange/bybitOrderMapper.ts` (reuse of trigger-direction encoding), `src/config/config.ts`
   (new correlation-store path / instrument-rules cache config), `test/fakes/fakeBybitAdapter.ts`,
   `test/fixtures/config.ts`.
@@ -128,8 +146,11 @@ implementation is being added. No spec-level behavior of that capability changes
 - **Idempotency/recovery**: same `(strategy_instance_id, trade_cycle_id)` pair remains
   the sole idempotency key; no new Runtime-owned `command_id`. Startup replay of the
   correlation store is synchronous and fail-closed on corruption, gating readiness.
-- **External dependency**: Bybit `GET /v5/market/instruments-info` (public,
-  unauthenticated) becomes a new exchange call this service makes.
-- **Explicit prerequisite/assumption**: Runtime `ticker` → Bybit `symbol` resolution must
-  be available to this change's `EntryPackageApplicationService` (see `design.md`); this
-  change consumes it but does not build it.
+- **External dependency**: Bybit `GET /v5/market/instruments-info` and
+  `GET /v5/order/history` (both public/read-only) become new exchange calls this service
+  makes.
+- **Blocking prerequisite**: this change cannot reach production Bybit for any ticker
+  until the prerequisite change `abi-exchange-instrument-identity-v1` lands and provides
+  `ExchangeSymbolResolver`'s interface and production implementation in full (see
+  `design.md` Decision 9). Tasks that don't require a resolved symbol may proceed first;
+  tasks that do are explicitly blocked on that prerequisite, not worked around.

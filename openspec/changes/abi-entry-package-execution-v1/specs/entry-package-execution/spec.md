@@ -55,6 +55,29 @@ acknowledge absence, or confirm absence directly when nothing was ever live.
 - **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
   action occurred
 
+### Requirement: A changed ticker within an existing trade cycle is rejected without contacting the exchange
+The `ticker` associated with a trade cycle is fixed at first application. ABI SHALL
+reject any request that supplies a different ticker for the same trade cycle without
+making any exchange call.
+
+#### Scenario: Ticker mismatch is rejected without an exchange call
+- **WHEN** a PUT request's ticker differs from the ticker already recorded for that
+  trade cycle
+- **THEN** ABI SHALL return a safe error and SHALL NOT send any request to the exchange
+
+### Requirement: Metadata-only changes update the record without amending or recreating the order
+When only `source_plan_bar_open_time_ms` or `locked_exit_profile` differ from the
+previously applied desired entry, with side, price, quantity, stop, and take unchanged,
+ABI SHALL durably update the stored desired entry and revalidate the existing order
+without sending an amend or create request.
+
+#### Scenario: Metadata-only change durably updates without an exchange write
+- **WHEN** a PUT request changes only `source_plan_bar_open_time_ms` or
+  `locked_exit_profile` relative to the previously applied desired entry
+- **THEN** ABI SHALL durably persist the updated desired entry and perform a bounded
+  revalidation of the existing order without sending an amend or create request to the
+  exchange
+
 ### Requirement: Trigger direction is derived deterministically from side, not from market conditions
 For the currently supported entry geometry, ABI SHALL derive the exchange trigger
 direction solely from the desired entry's `side`, without querying or comparing against
@@ -251,6 +274,12 @@ error responses, never to a success acknowledgement.
   times out, or cannot be classified
 - **THEN** ABI SHALL return one of the existing public error responses and SHALL NOT
   return `entry_package_applied` or `entry_package_absent`
+
+#### Scenario: A skipped live execution never produces a success acknowledgement
+- **WHEN** the live execution guard reports that a create, amend, or cancel command was
+  skipped rather than sent to the exchange
+- **THEN** ABI SHALL return a safe internal error and SHALL NOT return
+  `entry_package_applied` or `entry_package_absent`
 
 ### Requirement: Startup readiness depends on successful correlation recovery
 ABI SHALL NOT accept entry-package execution requests until it has successfully recovered
