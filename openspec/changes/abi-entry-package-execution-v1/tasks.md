@@ -1,6 +1,6 @@
 ## 0. Prerequisite dependency
 
-- [x] 0.1 Confirm the prerequisite OpenSpec change `abi-exchange-instrument-identity-v1`
+- [ ] 0.1 BLOCKING, confirmed not satisfied: the prerequisite OpenSpec change `abi-exchange-instrument-identity-v1`
       (owning `src/exchange/exchangeSymbolResolver.ts`'s `ExchangeSymbolResolver`
       interface and its production implementation, design.md §9) has landed in this
       repository before starting any task in group 5, or the symbol-dependent parts of
@@ -81,8 +81,8 @@
 - [x] 9.1 Run the full unit/integration suite added in groups 1-8 and confirm coverage of the acceptance-matrix categories in `docs/ENTRY_PACKAGE_EXECUTION_AUDIT.md` §18: identity/concurrency, durability, confirmation, repeated PUT, sizing, readiness boundary, pure mapping, stability, layering, V1 scope.
 - [x] 9.2 Add a new entry-package smoke script (`scripts/smoke-entry-package-contract-matrix.sh` + `scripts/fake-abi-entry-package-smoke-server.mjs`) exercising apply → replace-via-amend → replace-via-cancel-and-create → cancel → already-absent against a fake smoke server (production Bybit remains blocked on the prerequisite, so demo/testnet is not reachable yet), mirroring `smoke-sandbox-contract-matrix.sh`'s/`smoke-contract-matrix-fake.sh`'s structure without modifying either file.
 - [x] 9.3 Add the new script's `npm run` entry (`smoke:entry-package:fake`) to `package.json` alongside the existing `smoke:*` scripts, without changing any existing script.
-- [x] 9.4 Confirm the legacy smoke scripts still pass unmodified. `smoke:contract:fake` (which wraps `smoke-sandbox-contract-matrix.sh` against the fake server) was run and passes end-to-end. `smoke:sandbox:contract`, `smoke:sandbox:amend`, `smoke:sandbox:order`/`smoke:testnet:order`, `smoke:sandbox:read` require live Bybit testnet credentials and explicit `ABI_CONFIRM_TESTNET_WRITE=YES` not available in this environment — verified instead by confirming none of their files (or any file they depend on) appear in the diff.
-- [x] 9.5 Run `npm test`. 123/123 passing.
+- [ ] 9.4 PARTIALLY VERIFIED, not fully confirmed: `smoke:contract:fake` (which wraps `smoke-sandbox-contract-matrix.sh` against the fake server) was run and passes end-to-end, and no `LEGACY_ONLY` file was touched (diff-confirmed). But `smoke:sandbox:contract`, `smoke:sandbox:amend`, `smoke:sandbox:order`/`smoke:testnet:order`, `smoke:sandbox:read` require live Bybit testnet credentials and explicit `ABI_CONFIRM_TESTNET_WRITE=YES` not available in this environment and were never actually run — "still pass" is not established for those four, only "unmodified."
+- [x] 9.5 Run `npm test`. 139/139 passing.
 - [x] 9.6 Run `npm run typecheck`. Clean.
 - [x] 9.7 Run `npm run build`. Clean.
 - [x] 9.8 Review the full diff to confirm: no edits to any file `docs/LEGACY_SIGNAL_INTENT_DISPOSITION.md` marks `LEGACY_ONLY` (confirmed via `git status` against the disposition table); no new fields added to the public entry-package request/response DTOs (`src/domain/entryPackageApi.ts` has zero diff); no fabricated `2xx` on any error path (no hardcoded `statusCode` in the application service — only the existing serializers); no production implementation of `ExchangeSymbolResolver` was added to this change (`src/exchange/exchangeSymbolResolver.ts` does not exist; it must come from the prerequisite, task 0.1).

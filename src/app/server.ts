@@ -17,6 +17,19 @@ import { handleSignalRoutes } from "../routes/signalRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 export function startServer(config: AbiConfig): void {
+  // entryPackageReady only reflects correlation-store replay health
+  // (design.md §13) — it does NOT mean entry-package execution can reach a
+  // real Bybit account. Every CREATE/REPLACE will still fail closed via the
+  // throwing resolveSymbol below until abi-exchange-instrument-identity-v1
+  // lands. Logged once at startup so this gap is visible operationally, not
+  // just in code comments and docs.
+  console.warn(
+    "entry-package execution: production Bybit calls are blocked pending the " +
+      "abi-exchange-instrument-identity-v1 prerequisite (no ExchangeSymbolResolver " +
+      "yet). entryPackageReady=true only means the correlation store replayed " +
+      "successfully, not that CREATE/REPLACE requests can succeed.",
+  );
+
   const journal = new Journal(config.journalPath);
   const bybit = new RestBybitAdapter(config);
 

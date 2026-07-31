@@ -18,6 +18,7 @@ type Ctx = {
   service: EntryPackageApplicationService;
   bybit: FakeBybitAdapter;
   repo: EntryPackageCorrelationRepository;
+  rulesProvider: FakeInstrumentTradingRulesProvider;
 };
 
 test("first APPLY creates a live order and confirms application", async () => {
@@ -69,12 +70,17 @@ test("REPLACE via amend when only price/stop/take change (side unchanged)", asyn
   });
 });
 
-test("REPLACE via cancel-and-create when side changes", async () => {
+test("REPLACE via cancel-and-create when side changes: confirms the old order cancelled before creating the new one", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
     const firstOrderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(firstOrderLinkId);
 
+    // The old order must confirm cancelled (not found) before the new,
+    // opposite-side order is created; the shared default response
+    // represents the *new* order once it exists.
+    bybit.orderByLinkIdResponseByLinkId.set(firstOrderLinkId, orderList([]));
     bybit.orderByLinkIdResponse = orderList([
       liveOrder({ triggerPrice: "100000", stopLoss: "101000", takeProfit: "97000" }),
     ]);
@@ -93,6 +99,34 @@ test("REPLACE via cancel-and-create when side changes", async () => {
     assert.equal(record?.generation, 2);
     assert.equal(record?.binding_history.length, 1);
     assert.equal(record?.binding_history[0]?.end_reason, "replaced");
+  });
+});
+
+test("REPLACE via cancel-and-create: a fill discovered while confirming the cancel aborts creating a second order", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const firstOrderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(firstOrderLinkId);
+
+    bybit.orderByLinkIdResponseByLinkId.set(
+      firstOrderLinkId,
+      orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]),
+    );
+
+    const createCallsBefore = bybit.createOrderCalls.length;
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({ side: "short", initial_stop_price: "101000", initial_take_price: "97000" }),
+      }),
+    );
+
+    assertInternalError(result);
+    assert.equal(bybit.createOrderCalls.length, createCallsBefore, "no second order created while the first may be live");
+
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied");
+    assert.equal(record?.order_link_id, firstOrderLinkId, "old binding is untouched, not replaced");
   });
 });
 
@@ -134,7 +168,11 @@ test("create transport failure returns a safe error and never a fabricated succe
     const result = await service.apply(makeCommand());
 
     assertInternalError(result);
-    assert.equal(repo.get("instance-1", "cycle-1")?.status, "create_failed");
+    // A thrown exception during the exchange call means we genuinely don't
+    // know whether Bybit received it — "unknown", not a definitive
+    // "create_failed", so a later retry still resends rather than being
+    // permanently written off.
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
   });
 });
 
@@ -148,6 +186,99 @@ test("create accepted but confirmation ambiguous returns a safe error", async ()
     assertInternalError(result);
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
   });
+});
+
+test("a create genuinely never dispatched (crash before Bybit ever saw it) self-heals: a repeat PUT resends create rather than staying stuck forever", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    // Nothing exists anywhere: the exchange genuinely never received the
+    // first attempt (e.g. a crash before/during the create call, or the
+    // create response was lost). Both queries cleanly return empty.
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+
+    const first = await service.apply(makeCommand());
+    assertInternalError(first);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    const firstOrderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+
+    // Still nothing on the exchange: a repeat identical PUT must resend
+    // create (proving the system doesn't get stuck forever in "unknown")
+    // rather than only re-querying the same absent order indefinitely.
+    const second = await service.apply(makeCommand());
+
+    assertInternalError(second);
+    assert.equal(bybit.createOrderCalls.length, 2, "the repeat PUT resent create rather than only re-querying");
+    const afterResend = repo.get("instance-1", "cycle-1");
+    assert.equal(afterResend?.order_link_id, firstOrderLinkId, "the resend reused the already-reserved identity");
+    assert.equal(afterResend?.generation, 1, "still generation 1 — a resend, not a new binding");
+
+    // Once the exchange actually shows the order, confirmation succeeds
+    // without needing yet another resend.
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    const third = await service.apply(makeCommand());
+
+    assertApplied(third, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2, "no further resend once confirmation succeeds");
+    const final = repo.get("instance-1", "cycle-1");
+    assert.equal(final?.order_link_id, firstOrderLinkId);
+    assert.equal(final?.generation, 1);
+    assert.equal(final?.status, "applied");
+  });
+});
+
+test("a risk_multiplier-only change on an otherwise-identical repeat PUT is durably persisted", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand({ riskMultiplier: "1" }));
+    assert.equal(repo.get("instance-1", "cycle-1")?.risk_multiplier, "1");
+
+    const result = await service.apply(makeCommand({ riskMultiplier: "2" }));
+
+    assertApplied(result, "0.001");
+    assert.equal(repo.get("instance-1", "cycle-1")?.risk_multiplier, "2");
+  });
+});
+
+test("REPLACE via amend reuses the order's recorded exchange_symbol rather than re-resolving the ticker", async () => {
+  const resolvedSymbols: string[] = [];
+  const resolveSymbol = (ticker: string): string => {
+    // Simulates resolution drifting between calls (e.g. a contract
+    // rollover) — amend must not pick up the new value mid-flight.
+    const symbol = `${ticker.replace(/\.P$/, "")}-${resolvedSymbols.length}`;
+    resolvedSymbols.push(symbol);
+    return symbol;
+  };
+
+  await withService(
+    async ({ service, bybit, repo, rulesProvider }) => {
+      bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+      await service.apply(makeCommand());
+      const originalSymbol = repo.get("instance-1", "cycle-1")?.exchange_symbol;
+      assert.ok(originalSymbol);
+
+      rulesProvider.getRulesCalls.length = 0;
+      bybit.orderByLinkIdResponse = orderList([
+        liveOrder({ triggerPrice: "101000", stopLoss: "100000", takeProfit: "104000" }),
+      ]);
+      const result = await service.apply(
+        makeCommand({
+          desiredEntry: makeDesiredEntry({
+            planned_entry_price: "101000",
+            initial_stop_price: "100000",
+            initial_take_price: "104000",
+          }),
+        }),
+      );
+
+      assertApplied(result, "0.001");
+      assert.equal(bybit.amendOrderCalls[0]?.symbol, originalSymbol);
+      assert.deepEqual(rulesProvider.getRulesCalls, [originalSymbol]);
+      assert.equal(repo.get("instance-1", "cycle-1")?.exchange_symbol, originalSymbol);
+    },
+    {},
+    resolveSymbol,
+  );
 });
 
 test("terminal-without-fill fail-closed, then CANCEL, then a fresh CREATE gets a new generation", async () => {
@@ -367,6 +498,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 async function withService(
   fn: (ctx: Ctx) => Promise<void>,
   configOverrides: Partial<AbiConfig> = {},
+  resolveSymbol: (ticker: string) => string = (ticker) => ticker.replace(/\.P$/, ""),
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "abi-entry-package-app-service-"));
   try {
@@ -390,10 +522,10 @@ async function withService(
       correlationRepository: repo,
       positionSizeCalculator,
       mutex,
-      resolveSymbol: (ticker) => ticker.replace(/\.P$/, ""),
+      resolveSymbol,
     });
 
-    await fn({ service, bybit, repo });
+    await fn({ service, bybit, repo, rulesProvider });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

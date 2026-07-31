@@ -75,7 +75,7 @@ export class RestBybitAdapter implements BybitAdapter {
   }
 
   async getServerTime(): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/v5/market/time`);
+    const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal: this.timeoutSignal() });
     return readBybitResponse(response);
   }
 
@@ -165,7 +165,9 @@ export class RestBybitAdapter implements BybitAdapter {
       symbol,
     });
 
-    const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`);
+    const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
+      signal: this.timeoutSignal(),
+    });
     return readBybitResponse(response);
   }
 
@@ -213,9 +215,14 @@ export class RestBybitAdapter implements BybitAdapter {
         "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
         "X-BAPI-SIGN": signature,
       },
+      signal: this.timeoutSignal(),
     });
 
     return readBybitResponse(response);
+  }
+
+  private timeoutSignal(): AbortSignal {
+    return AbortSignal.timeout(this.config.bybitRequestTimeoutMs);
   }
 
   private async signedPost(path: string, payload: object): Promise<unknown> {
@@ -240,6 +247,7 @@ export class RestBybitAdapter implements BybitAdapter {
         "X-BAPI-SIGN": signature,
       },
       body,
+      signal: this.timeoutSignal(),
     });
 
     return readBybitResponse(response);

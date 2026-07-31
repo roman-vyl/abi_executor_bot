@@ -19,6 +19,7 @@ import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
 import { amendEntryOrder, cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
+import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
 import { confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
 
 export type EntryPackageApplicationServiceDeps = {
@@ -162,6 +163,14 @@ export class EntryPackageApplicationService {
     }
 
     const now = new Date().toISOString();
+    // If this is a retry of the same not-yet-confirmed binding (same
+    // generation as priorRecord), preserve the binding's real start time
+    // rather than resetting it on every retry attempt.
+    const isRetryOfSameBinding = priorRecord !== undefined && priorRecord.generation === generation;
+    const currentBindingStartedAt = isRetryOfSameBinding
+      ? priorRecord.current_binding_started_at ?? priorRecord.updated_at
+      : now;
+
     const provisional: EntryPackageExecutionRecord = {
       strategy_instance_id: command.strategyInstanceId,
       trade_cycle_id: command.tradeCycleId,
@@ -178,6 +187,8 @@ export class EntryPackageApplicationService {
       status: "pending_create",
       early_execution_observation: null,
       binding_history: priorRecord?.binding_history ?? [],
+      pending_action: "create",
+      current_binding_started_at: currentBindingStartedAt,
     };
 
     // Durable write before any exchange call (design.md §11 step 4d).
@@ -201,9 +212,13 @@ export class EntryPackageApplicationService {
         payload: payloads.createEntryOrder,
       });
     } catch {
+      // A thrown exception here means we genuinely don't know whether
+      // Bybit received and applied the command — "unknown", not a
+      // definitive "create_failed", so a later retry still resends rather
+      // than being permanently written off.
       await this.deps.correlationRepository.save({
         ...provisional,
-        status: "create_failed",
+        status: "unknown",
         updated_at: new Date().toISOString(),
       });
       return internalErrorResult();
@@ -224,7 +239,11 @@ export class EntryPackageApplicationService {
     desiredEntry: DesiredEntryDto,
     record: EntryPackageExecutionRecord,
   ): Promise<EntryPackageHttpResult> {
-    const resolvedSymbol = this.deps.resolveSymbol(command.ticker);
+    // Amend targets the SAME physical order as record.order_link_id, which
+    // was created under record.exchange_symbol — re-resolving the ticker
+    // here could target a different instrument than the live order
+    // actually lives under (e.g. if resolution changes over time).
+    const symbol = record.exchange_symbol;
 
     let calculatedQuantity: string;
     try {
@@ -233,7 +252,7 @@ export class EntryPackageApplicationService {
         desiredEntry.planned_entry_price,
         desiredEntry.initial_stop_price,
         command.riskMultiplier,
-        { resolvedSymbol },
+        { resolvedSymbol: symbol },
       );
     } catch {
       return internalErrorResult();
@@ -242,11 +261,11 @@ export class EntryPackageApplicationService {
     const now = new Date().toISOString();
     const provisional: EntryPackageExecutionRecord = {
       ...record,
-      exchange_symbol: resolvedSymbol,
       desired_entry: desiredEntry,
       risk_multiplier: command.riskMultiplier,
       calculated_quantity: calculatedQuantity,
       status: "pending_replace",
+      pending_action: "amend",
       updated_at: now,
     };
     await this.deps.correlationRepository.save(provisional);
@@ -257,7 +276,7 @@ export class EntryPackageApplicationService {
     }
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
-      symbol: resolvedSymbol,
+      symbol,
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -276,7 +295,7 @@ export class EntryPackageApplicationService {
     } catch {
       await this.deps.correlationRepository.save({
         ...provisional,
-        status: "create_failed",
+        status: "unknown",
         updated_at: new Date().toISOString(),
       });
       return internalErrorResult();
@@ -299,15 +318,13 @@ export class EntryPackageApplicationService {
       return internalErrorResult();
     }
 
-    const cancelPayload = {
-      category: this.deps.config.bybitCategory,
-      symbol: record.exchange_symbol,
-      orderLinkId,
-    };
+    const symbol = record.exchange_symbol;
+    const cancelPayload = { category: this.deps.config.bybitCategory, symbol, orderLinkId };
 
     await this.deps.correlationRepository.save({
       ...record,
       status: "pending_replace",
+      pending_action: "cancel_and_create",
       updated_at: new Date().toISOString(),
     });
 
@@ -315,6 +332,12 @@ export class EntryPackageApplicationService {
     try {
       cancelResult = await cancelEntryOrder({ config: this.deps.config, bybit: this.deps.bybit, payload: cancelPayload });
     } catch {
+      await this.deps.correlationRepository.save({
+        ...record,
+        status: "unknown",
+        pending_action: "cancel_and_create",
+        updated_at: new Date().toISOString(),
+      });
       return internalErrorResult();
     }
 
@@ -322,14 +345,48 @@ export class EntryPackageApplicationService {
       return internalErrorResult();
     }
 
-    const now = new Date().toISOString();
-    const recordAfterCancel: EntryPackageExecutionRecord = {
-      ...record,
-      binding_history: [...record.binding_history, closeBindingFrom(record, "replaced", now)],
-      updated_at: now,
-    };
+    // The old order must be confirmed gone before a new (opposite-side)
+    // order is created — a bare cancel acceptance from the REST call does
+    // not prove the old order is no longer live, and creating a second
+    // order while the first might still trigger would risk two live
+    // positions simultaneously.
+    const confirmation = await confirmEntryPackageCancelled({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
+      getEntryOrderHistoryPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
+      desiredQty: record.calculated_quantity ?? "0",
+    });
 
-    return this.createOrder(command, desiredEntry, recordAfterCancel, record.generation + 1);
+    const now = new Date().toISOString();
+
+    if (confirmation.kind === "cancelled_confirmed") {
+      const recordAfterCancel: EntryPackageExecutionRecord = {
+        ...record,
+        binding_history: [...record.binding_history, closeBindingFrom(record, "replaced", now)],
+        updated_at: now,
+      };
+      return this.createOrder(command, desiredEntry, recordAfterCancel, record.generation + 1);
+    }
+
+    if (confirmation.kind === "filled_before_cancel") {
+      // The old order actually filled despite the cancel attempt. Creating
+      // a new, opposite-side order now would risk two live positions;
+      // record the truth and fail safely instead.
+      await this.deps.correlationRepository.save({
+        ...record,
+        status: "applied",
+        pending_action: null,
+        early_execution_observation: confirmation.observation,
+        updated_at: now,
+      });
+      return internalErrorResult();
+    }
+
+    // ambiguous: cancellation not confirmed. Do not create a second order
+    // while the old one's true state is unknown; pending_action stays
+    // "cancel_and_create" so a subsequent PUT can safely retry.
+    await this.deps.correlationRepository.save({ ...record, status: "unknown", updated_at: now });
+    return internalErrorResult();
   }
 
   private async repeatPutRevalidate(
@@ -342,8 +399,6 @@ export class EntryPackageApplicationService {
     }
 
     if (record.order_link_id === null) {
-      // Nothing was ever actually dispatched — retry as a fresh create at
-      // the already-reserved generation (spec: retries reuse identity).
       return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
     }
 
@@ -357,7 +412,57 @@ export class EntryPackageApplicationService {
       orderLinkId: record.order_link_id,
     });
 
-    return this.confirmAndFinalize(command, record, payloads, desiredEntry);
+    const confirmation = await confirmEntryPackage({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload: payloads.getEntryOrder,
+      getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
+      desired: {
+        triggerPrice: desiredEntry.planned_entry_price,
+        qty: record.calculated_quantity ?? "0",
+        stopLoss: desiredEntry.initial_stop_price,
+        takeProfit: desiredEntry.initial_take_price,
+      },
+    });
+
+    if (this.shouldResendPendingAction(record, confirmation)) {
+      // The previous attempt's outcome was never durably confirmed, and
+      // the exchange genuinely has no record of it anywhere (not merely a
+      // query error) — safe to resend the in-flight action, reusing the
+      // already-reserved identity rather than generating a new one (spec:
+      // retries reuse identity).
+      return this.resendPendingAction(command, desiredEntry, record);
+    }
+
+    return this.persistConfirmationOutcome(command, record, desiredEntry, confirmation);
+  }
+
+  private shouldResendPendingAction(
+    record: EntryPackageExecutionRecord,
+    confirmation: PackageConfirmationOutcome,
+  ): boolean {
+    return confirmation.kind === "not_found" && record.status !== "applied" && record.pending_action !== null;
+  }
+
+  private async resendPendingAction(
+    command: EntryPackageCommand,
+    desiredEntry: DesiredEntryDto,
+    record: EntryPackageExecutionRecord,
+  ): Promise<EntryPackageHttpResult> {
+    switch (record.pending_action) {
+      case "amend":
+        return this.replaceAmend(command, desiredEntry, record);
+      case "cancel_and_create":
+        return this.replaceCancelAndCreate(command, desiredEntry, record);
+      case "cancel":
+      case "create":
+      default:
+        // Either a genuine create retry, or a stale "cancel" pending_action
+        // left over from an interrupted CANCEL that a subsequent non-null
+        // PUT has now superseded — in both cases the exchange confirmed
+        // nothing exists, and the current request wants an order to exist,
+        // so (re)creating at the already-reserved generation is correct.
+        return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
+    }
   }
 
   private async metadataOnlyUpdate(
@@ -374,6 +479,10 @@ export class EntryPackageApplicationService {
     };
     await this.deps.correlationRepository.save(updated);
 
+    if (updated.order_link_id === null) {
+      return this.createOrder(command, desiredEntry, updated, updated.generation > 0 ? updated.generation : 1);
+    }
+
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: updated.exchange_symbol,
       side: desiredEntry.side,
@@ -381,10 +490,26 @@ export class EntryPackageApplicationService {
       initialStopPrice: desiredEntry.initial_stop_price,
       initialTakePrice: desiredEntry.initial_take_price,
       qty: updated.calculated_quantity ?? "0",
-      orderLinkId: updated.order_link_id ?? "",
+      orderLinkId: updated.order_link_id,
     });
 
-    return this.confirmAndFinalize(command, updated, payloads, desiredEntry);
+    const confirmation = await confirmEntryPackage({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload: payloads.getEntryOrder,
+      getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
+      desired: {
+        triggerPrice: desiredEntry.planned_entry_price,
+        qty: updated.calculated_quantity ?? "0",
+        stopLoss: desiredEntry.initial_stop_price,
+        takeProfit: desiredEntry.initial_take_price,
+      },
+    });
+
+    if (this.shouldResendPendingAction(updated, confirmation)) {
+      return this.resendPendingAction(command, desiredEntry, updated);
+    }
+
+    return this.persistConfirmationOutcome(command, updated, desiredEntry, confirmation);
   }
 
   private async cancelLiveOrder(
@@ -403,6 +528,7 @@ export class EntryPackageApplicationService {
     await this.deps.correlationRepository.save({
       ...record,
       status: "pending_cancel",
+      pending_action: "cancel",
       updated_at: new Date().toISOString(),
     });
 
@@ -433,6 +559,8 @@ export class EntryPackageApplicationService {
         order_link_id: null,
         order_id: null,
         status: "absent",
+        pending_action: null,
+        current_binding_started_at: null,
         updated_at: now,
         binding_history: [...record.binding_history, closeBindingFrom(record, "cancelled", now)],
       });
@@ -446,6 +574,7 @@ export class EntryPackageApplicationService {
       await this.deps.correlationRepository.save({
         ...record,
         status: "applied",
+        pending_action: null,
         early_execution_observation: confirmation.observation,
         updated_at: now,
       });
@@ -474,17 +603,34 @@ export class EntryPackageApplicationService {
       },
     });
 
+    return this.persistConfirmationOutcome(command, record, desiredEntry, confirmation);
+  }
+
+  private async persistConfirmationOutcome(
+    command: EntryPackageCommand,
+    record: EntryPackageExecutionRecord,
+    desiredEntry: DesiredEntryDto,
+    confirmation: PackageConfirmationOutcome,
+  ): Promise<EntryPackageHttpResult> {
     const now = new Date().toISOString();
 
     if (confirmation.kind === "pending_confirmed") {
-      await this.deps.correlationRepository.save({ ...record, status: "applied", updated_at: now });
+      await this.deps.correlationRepository.save({
+        ...record,
+        risk_multiplier: command.riskMultiplier,
+        status: "applied",
+        pending_action: null,
+        updated_at: now,
+      });
       return this.appliedResult(command, desiredEntry, record.calculated_quantity ?? "");
     }
 
     if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
       await this.deps.correlationRepository.save({
         ...record,
+        risk_multiplier: command.riskMultiplier,
         status: "applied",
+        pending_action: null,
         early_execution_observation: confirmation.observation,
         updated_at: now,
       });
@@ -494,14 +640,24 @@ export class EntryPackageApplicationService {
     if (confirmation.kind === "terminal_without_fill") {
       await this.deps.correlationRepository.save({
         ...record,
+        risk_multiplier: command.riskMultiplier,
         status: "terminal_unfilled",
+        pending_action: null,
         updated_at: now,
         binding_history: [...record.binding_history, closeBindingFrom(record, "exchange_terminal", now)],
       });
       return internalErrorResult();
     }
 
-    await this.deps.correlationRepository.save({ ...record, status: "unknown", updated_at: now });
+    // "not_found" or "ambiguous": stays unresolved. pending_action is left
+    // untouched (carried via the spread) so a future repeat PUT can decide
+    // whether it's safe to resend.
+    await this.deps.correlationRepository.save({
+      ...record,
+      risk_multiplier: command.riskMultiplier,
+      status: "unknown",
+      updated_at: now,
+    });
     return internalErrorResult();
   }
 
@@ -523,6 +679,8 @@ export class EntryPackageApplicationService {
       status: "absent",
       early_execution_observation: null,
       binding_history: [],
+      pending_action: null,
+      current_binding_started_at: null,
     });
   }
 
@@ -533,6 +691,8 @@ export class EntryPackageApplicationService {
       order_link_id: null,
       order_id: null,
       status: "absent",
+      pending_action: null,
+      current_binding_started_at: null,
       updated_at: new Date().toISOString(),
     });
   }
@@ -594,10 +754,7 @@ function closeBindingFrom(
     generation: record.generation,
     role: "entry",
     exchange_symbol: record.exchange_symbol,
-    // Approximation: this schema does not track a dedicated per-binding
-    // start timestamp, so the record's last-known updated_at is used as a
-    // reasonable proxy for when the now-ending binding was last active.
-    started_at: record.updated_at,
+    started_at: record.current_binding_started_at ?? record.updated_at,
     ended_at: endedAt,
     end_reason: endReason,
   };

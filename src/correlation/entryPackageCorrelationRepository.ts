@@ -2,7 +2,7 @@ import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { EntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
-import { correlationRecordKey } from "./entryPackageExecutionRecord.js";
+import { correlationRecordKey, isValidEntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
 
 export type CorrelationReplayResult = { ok: true } | { ok: false; reason: string };
 
@@ -51,9 +51,9 @@ export class EntryPackageCorrelationRepository {
         continue;
       }
 
-      let record: EntryPackageExecutionRecord;
+      let parsed: unknown;
       try {
-        record = JSON.parse(line) as EntryPackageExecutionRecord;
+        parsed = JSON.parse(line);
       } catch {
         const isFinalLine = index === lines.length - 1;
         if (isFinalLine) {
@@ -63,7 +63,18 @@ export class EntryPackageCorrelationRepository {
         return { ok: false, reason: `corrupt correlation record at line ${index + 1}` };
       }
 
-      this.indexRecord(record);
+      // A syntactically-valid-but-wrong-shaped line (e.g. from a future
+      // schema migration bug) is corruption too, and must fail readiness
+      // the same way malformed JSON does — never be silently indexed.
+      if (!isValidEntryPackageExecutionRecord(parsed)) {
+        const isFinalLine = index === lines.length - 1;
+        if (isFinalLine) {
+          continue;
+        }
+        return { ok: false, reason: `correlation record at line ${index + 1} does not match the expected schema` };
+      }
+
+      this.indexRecord(parsed);
     }
 
     return { ok: true };

@@ -1,10 +1,12 @@
-// Exact-decimal arithmetic on plain (non-exponential) positive decimal
-// strings, backed by BigInt so no step goes through binary floating point.
-// Matches the discipline already established by entryPackageApi.ts's
-// isExactDecimalText, but restricted to the plain-digit subset that Bybit
-// instrument rules and entry-package prices/quantities actually use.
-
-const PLAIN_POSITIVE_DECIMAL = /^\d+(\.\d+)?$/;
+// Exact-decimal arithmetic backed by BigInt so no step goes through binary
+// floating point. Accepts the same grammar as entryPackageApi.ts's
+// isExactDecimalText (optional sign, optional bare-leading/trailing-dot
+// digits, optional exponent) — Runtime-supplied desired-entry fields are
+// validated against that grammar at the transport layer, so this parser
+// must not be stricter than it or a syntactically-valid request would fail
+// arithmetic it should never have reached.
+const EXACT_DECIMAL = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
+const MAX_ABS_EXPONENT = 100;
 
 type ParsedDecimal = {
   unscaled: bigint;
@@ -12,13 +14,34 @@ type ParsedDecimal = {
 };
 
 function parseDecimal(text: string): ParsedDecimal {
-  if (!PLAIN_POSITIVE_DECIMAL.test(text)) {
-    throw new Error(`not a plain positive exact-decimal string: ${text}`);
+  const match = EXACT_DECIMAL.exec(text);
+  const integerPart = match?.[2] ?? "";
+  const fractionPart = match?.[3] ?? "";
+
+  if (match === null || (integerPart === "" && fractionPart === "")) {
+    throw new Error(`not an exact-decimal string: ${text}`);
   }
 
-  const [integerPart, fractionPart = ""] = text.split(".");
-  const unscaled = BigInt(integerPart + fractionPart);
-  return { unscaled, scale: fractionPart.length };
+  const negative = match[1] === "-";
+  let unscaled = BigInt((integerPart || "0") + fractionPart);
+  let scale = fractionPart.length;
+
+  const exponentText = match[4];
+  if (exponentText !== undefined) {
+    const exponent = Number.parseInt(exponentText, 10);
+    if (Math.abs(exponent) > MAX_ABS_EXPONENT) {
+      throw new Error(`exact-decimal exponent out of supported range: ${text}`);
+    }
+
+    if (exponent >= scale) {
+      unscaled *= pow10(exponent - scale);
+      scale = 0;
+    } else {
+      scale -= exponent;
+    }
+  }
+
+  return { unscaled: negative ? -unscaled : unscaled, scale };
 }
 
 function pow10(exponent: number): bigint {
@@ -30,14 +53,18 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
 }
 
 function formatScaled(unscaled: bigint, scale: number): string {
+  const negative = unscaled < 0n;
+  const abs = negative ? -unscaled : unscaled;
+  const sign = negative ? "-" : "";
+
   if (scale === 0) {
-    return unscaled.toString();
+    return `${sign}${abs.toString()}`;
   }
 
-  const digits = unscaled.toString().padStart(scale + 1, "0");
+  const digits = abs.toString().padStart(scale + 1, "0");
   const integerPart = digits.slice(0, digits.length - scale);
   const fractionPart = digits.slice(digits.length - scale).replace(/0+$/, "");
-  return fractionPart === "" ? integerPart : `${integerPart}.${fractionPart}`;
+  return fractionPart === "" ? `${sign}${integerPart}` : `${sign}${integerPart}.${fractionPart}`;
 }
 
 // ceil((numerator / denominator) / step) * step, computed exactly with

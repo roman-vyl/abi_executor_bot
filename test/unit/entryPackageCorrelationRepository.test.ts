@@ -98,6 +98,35 @@ test("composite, order_link_id, and order_id lookups include historical bindings
   });
 });
 
+test("replay fails readiness on a syntactically-valid but wrong-shaped record", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const validRecord = makeRecord({ orderLinkId: "link-1", orderId: "order-1" });
+    const wrongShape = { ...validRecord, generation: "not-a-number" };
+    await writeFile(path, `${JSON.stringify(wrongShape)}\n${JSON.stringify(validRecord)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+test("replay tolerates a wrong-shaped final line the same way it tolerates truncated JSON", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const validRecord = makeRecord({ orderLinkId: "link-1", orderId: "order-1" });
+    const wrongShapeFinalLine = { ...validRecord, status: "not-a-real-status" };
+    await writeFile(path, `${JSON.stringify(validRecord)}\n${JSON.stringify(wrongShapeFinalLine)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), validRecord);
+  });
+});
+
 test("missing correlation file replays as ready with an empty store", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "does-not-exist.jsonl");
@@ -159,6 +188,8 @@ function makeRecord(
     status: "pending_create",
     early_execution_observation: null,
     binding_history: [],
+    pending_action: overrides.orderLinkId !== undefined ? "create" : null,
+    current_binding_started_at: overrides.orderLinkId !== undefined ? "2026-01-01T00:00:00.000Z" : null,
   };
 }
 

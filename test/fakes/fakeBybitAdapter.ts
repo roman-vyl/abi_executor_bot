@@ -34,6 +34,11 @@ export class FakeBybitAdapter implements BybitAdapter {
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
   orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
   instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
+  // Optional per-orderLinkId overrides, checked before the flat default
+  // responses above — lets a test express "this specific order looks like
+  // X while every other query still uses the shared default."
+  orderByLinkIdResponseByLinkId = new Map<string, unknown>();
+  orderHistoryResponseByLinkId = new Map<string, unknown>();
   position: BybitPosition | null = null;
   marketPrice = "61000.0";
 
@@ -78,12 +83,12 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown> {
     this.getOrderByLinkIdCalls.push(payload);
-    return this.orderByLinkIdResponse;
+    return this.orderByLinkIdResponseByLinkId.get(payload.orderLinkId) ?? this.orderByLinkIdResponse;
   }
 
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     this.getOrderHistoryCalls.push(payload);
-    return this.orderHistoryResponse;
+    return this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
   }
 
   async getInstrumentInfo(symbol: string): Promise<unknown> {

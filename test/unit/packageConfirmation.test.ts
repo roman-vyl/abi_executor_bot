@@ -80,9 +80,32 @@ test("full fill resolves only via the order-history fallback when the order has 
   assert.equal(bybit.getOrderHistoryCalls.length > 0, true);
 });
 
-test("ambiguous observation is returned when neither query resolves within the bounded budget", async () => {
+test("not_found is returned when both queries cleanly find nothing within the bounded budget", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = listResponse([]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "not_found" });
+});
+
+test("a filled order reporting a different qty or triggerPrice is not blindly trusted as our own package", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "Filled", qty: "999", triggerPrice: "1", cumExecQty: "999" },
+  ]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.equal(outcome.kind, "ambiguous");
+});
+
+test("a query exception is never treated as a not_found result: confirmation stays ambiguous, not not_found", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.getOrderByLinkId = async () => {
+    throw new Error("transient network failure");
+  };
   bybit.orderHistoryResponse = listResponse([]);
 
   const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
@@ -116,6 +139,32 @@ test("cancel confirmation: a fill observed during cancellation is never reported
   const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
 
   assert.equal(outcome.kind, "filled_before_cancel");
+});
+
+test("cancel confirmation: a REST query failure must never fabricate cancelled_confirmed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.getOrderByLinkId = async () => {
+    throw new Error("transient network failure");
+  };
+  bybit.getOrderHistory = async () => {
+    throw new Error("transient network failure");
+  };
+
+  const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("cancel confirmation: realtime failing but history cleanly confirming absence is still not confirmed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.getOrderByLinkId = async () => {
+    throw new Error("transient network failure");
+  };
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
 });
 
 function listResponse(
