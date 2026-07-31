@@ -22,6 +22,20 @@ concurrency primitive exists anywhere in the codebase. No Bybit WebSocket client
 `bybitAdapter.ts` has no `instruments-info` method and no order-history method. The legacy
 `/signals` + `/intents/*` contour remains fully in place and unmodified by this change.
 
+**Post-implementation review correction.** An independent review of the first implementation
+pass found several correctness gaps that this document did not originally anticipate:
+`confirmEntryPackageCancelled` treating a REST query failure the same as a clean "not
+found" (able to fabricate `entry_package_absent`); filled/partially-filled orders
+confirmed without checking their fields against the desired package; cancel-and-create
+building the new order before confirming the old one was actually gone; a create/amend
+that crashed before or during dispatch having no path back to a resolved state; amend
+re-resolving the ticker instead of reusing the live order's recorded symbol;
+`risk_multiplier`-only changes being silently dropped; the exact-decimal parser being
+stricter than the transport contract it feeds off; and unbounded REST calls that could
+hold the keyed mutex indefinitely. Decisions 5, 10, and 11 below are amended in place to
+reflect the fixes, each marked `(post-implementation review correction)`, rather than left describing a design
+the shipped code no longer matches.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -82,7 +96,9 @@ the disposition table):
 
 ```
 src/exchange/bybitAdapter.ts        + getInstrumentInfo(symbol), + getOrderHistory(payload)
-                                       methods on BybitAdapter, RestBybitAdapter, StubBybitAdapter
+                                       methods on BybitAdapter, RestBybitAdapter, StubBybitAdapter;
+                                       + AbortSignal.timeout(config.bybitRequestTimeoutMs) on every
+                                       request (post-implementation review correction, Decision 10)
 src/exchange/bybitOrderMapper.ts    + a new entry-package payload builder that reuses
                                        mapSide/mapTriggerDirection, + BybitGetOrderHistoryPayload
                                        type; mapExecutionPlanToBybit itself is untouched and
@@ -96,15 +112,32 @@ src/app/server.ts                   composition root: constructs and wires the n
                                        correlation repository, rules provider, calculator,
                                        mutex, application service, and readiness flag;
                                        legacy route wiring (signalRoutes/intentRoutes/
-                                       accountRoutes) unchanged
+                                       accountRoutes) unchanged; logs a startup warning that
+                                       entryPackageReady only reflects correlation-store health,
+                                       not resolver availability (post-implementation review
+                                       correction)
 src/app/index.ts                    kicks off the async correlation replay alongside
                                        server startup, per Decision 13
 src/config/config.ts                + ABI_ENTRY_PACKAGE_CORRELATION_PATH (new file path,
                                        sibling to journalPath, not reusing it),
-                                       + instrument-rules cache TTL config
+                                       + instrument-rules cache TTL config,
+                                       + ABI_BYBIT_REQUEST_TIMEOUT_MS (default 10000ms; post-
+                                       implementation review correction, Decision 10)
 test/fakes/fakeBybitAdapter.ts      + fake getInstrumentInfo, + fake getOrderHistory
 test/fixtures/config.ts             + new config fields' defaults
 ```
+
+**Correlation replay validates record shape, not just JSON syntax
+(post-implementation review correction, not in the original audit).**
+`entryPackageCorrelationRepository.ts`'s replay originally cast parsed JSON straight to
+`EntryPackageExecutionRecord` with no runtime check — a syntactically-valid-but-wrong-shaped
+line (e.g. from a future schema migration bug) would silently corrupt in-memory state
+instead of failing readiness, undermining the "fail readiness on any non-final corrupt
+line" requirement (Decision 4/13). `entryPackageExecutionRecord.ts` now also exports
+`isValidEntryPackageExecutionRecord`, a runtime shape guard checked on every replayed
+line; a line that parses as JSON but fails this guard is treated exactly like malformed
+JSON — tolerated only if it is the final line (crash-truncation), otherwise failing
+readiness.
 
 Rationale for a new `src/correlation/` and `src/concurrency/` top-level directory rather
 than nesting under `src/services/entryPackage/`: the correlation store and the mutex are
@@ -194,6 +227,10 @@ order_id: string | null                              (mutable)
 generation: number                                   (1-based; 0 = sentinel "no order yet")
 status: "pending_create" | "applied" | "pending_replace" | "pending_cancel"
        | "absent" | "create_failed" | "unknown" | "terminal_unfilled"
+       (`create_failed` is reserved for a future clean-rejection distinction and not
+       currently produced — a thrown exception during a create/amend call means ABI
+       genuinely does not know whether Bybit received it, so it is recorded as
+       `unknown`, not a definitive `create_failed`; post-implementation review correction)
 early_execution_observation: {
   order_status: string
   cumulative_filled_qty: string
@@ -211,6 +248,8 @@ binding_history: Array<{
   ended_at: string | null
   end_reason: "replaced" | "cancelled" | "superseded" | "exchange_terminal" | null
 }>
+pending_action: "create" | "amend" | "cancel_and_create" | "cancel" | null   (mutable, post-implementation review correction)
+current_binding_started_at: string | null                                    (mutable, post-implementation review correction)
 ```
 
 `ticker` is fixed the moment a trade cycle is first recorded; a later request supplying a
@@ -221,13 +260,41 @@ each `binding_history` entry, rather than re-derived from `ticker` on every read
 a query or cancellation against an old binding after a restart does not depend on the
 resolver producing the same answer today that it did when that binding was created.
 `risk_multiplier` is recorded so the correlation record captures the sizing input that
-produced `calculated_quantity`, not just the output. `binding_history` gains
-`exchange_terminal` as a fourth `end_reason`, distinct from `cancelled` (ABI-initiated)
-and `replaced`/`superseded` (part of a REPLACE) — it marks a binding the exchange
-terminated on its own, without an ABI cancel action, which is exactly the
-`terminal_unfilled` case (Decision 11).
+produced `calculated_quantity`, not just the output — it is re-persisted on every durable
+write that touches the record, including a pure repeat-PUT/metadata-only/revalidation path
+where `desired_entry` itself is unchanged, so a `risk_multiplier`-only change is never
+silently dropped (post-implementation review correction; the original implementation only refreshed it on
+create/amend). `binding_history` gains `exchange_terminal` as a fourth `end_reason`,
+distinct from `cancelled` (ABI-initiated) and `replaced`/`superseded` (part of a REPLACE)
+— it marks a binding the exchange terminated on its own, without an ABI cancel action,
+which is exactly the `terminal_unfilled` case (Decision 11).
 
 `binding_history` is append-only within the record and is never truncated (audit §13).
+
+**`pending_action` (post-implementation review correction, not in the original audit).** Records which external
+command was last dispatched (or is about to be) for the record's *current* binding: the
+generation/`order_link_id` a repeat PUT should resend if confirmation later finds nothing
+on the exchange for it. Set immediately before the corresponding exchange call
+(`"create"` before `executeEntryOrder`, `"amend"` before `amendEntryOrder`,
+`"cancel_and_create"` before the cancel half of a REPLACE, `"cancel"` before a CANCEL's
+`cancelEntryOrder`) and cleared to `null` only once the binding reaches a definitively
+known state (`applied`, `terminal_unfilled`, or `absent`). This exists because the
+original design assumed a repeat PUT could always tell "nothing was ever dispatched" from
+`order_link_id === null` — but the durable-write-before-external-call ordering (Decision
+4) means `order_link_id` is set on the *provisional* write, before the exchange is ever
+contacted, so it is never null once a create/amend attempt has begun. Without
+`pending_action`, a create that crashed before or during dispatch had no way to
+distinguish "resend the create" from "just re-query and hope," and a record could stay in
+`unknown` forever after one inconclusive confirmation. See Decision 11's revalidation flow
+for how it drives a safe resend.
+
+**`current_binding_started_at` (post-implementation review correction, not in the original audit).** When the
+record's current top-level binding (`order_link_id`/`order_id`/`generation`) was
+established, tracked separately from `updated_at` — which advances on every unrelated
+revalidation write — so that a later `binding_history` entry's `started_at` reflects the
+binding's real lifetime rather than whatever the record's most recent write happened to
+be. Reset to "now" only when a genuinely new binding starts (a fresh generation); a resend
+of the same generation after a crash preserves the original value.
 
 ### 6. Keyed mutex: `Map<string, Promise<void>>` chain, in-process only
 
@@ -330,10 +397,12 @@ query /v5/order/realtime by orderLinkId
 if found and live/pending → diff fields against desired package → classify
 if not found, or found but reporting a terminal status →
   query /v5/order/history by orderLinkId
-  if history shows a fill → classify as full/partial fill (audit §26)
+  if history shows a fill → diff plausible fields, classify as full/partial fill (audit §26)
   if history shows rejected/cancelled/deactivated with no fill → classify as
     rejected/deactivated before any fill
-  if neither query yields a conclusive result within the bounded retry budget →
+  if every query in the bounded budget answered cleanly and nothing was ever found →
+    classify as not_found (post-implementation review correction)
+  if any query failed, or something was found but never matched/classified →
     classify as ambiguous
 ```
 
@@ -342,6 +411,41 @@ as `verifyPostCreateProtection`) — the history query is a fallback branch with
 confirmation attempt, not an additional unbounded retry loop. Individual fills and
 execution-history reconstruction remain explicitly out of scope (audit §8/§17); the
 history query is used only to classify the aggregate outcome, never to enumerate fills.
+
+**Six outcomes, not five (post-implementation review correction).** The original audit named five outcomes
+(pending confirmed / full fill / partial fill / rejected-or-deactivated / ambiguous). The
+implementation review found that collapsing "genuinely not found anywhere, every query
+answering cleanly" and "a query itself failed" into the same `ambiguous` bucket made a
+transient REST failure indistinguishable from confirmed absence — for
+`confirmEntryPackageCancelled` specifically, this meant a timeout on both queries could
+return `cancelled_confirmed` and fabricate `entry_package_absent`, in direct violation of
+this capability's "No failure path returns a fabricated success acknowledgement"
+requirement. The fix threads a three-state result through every query — `found` /
+`not_found` / `query_failed` — and adds a sixth confirmation outcome, `not_found`: reached
+only when every query in the budget cleanly reported nothing, with zero exceptions along
+the way. `query_failed` is folded into the existing `ambiguous` outcome (both still map to
+a safe `internal_error`); the distinction exists so `EntryPackageApplicationService`'s
+repeat-PUT recovery (Decision 11) can tell "safe to resend" from "genuinely don't know."
+
+**Filled orders are diffed too, not merely trusted for existing (post-implementation review correction).** The
+original description above ("diff fields against desired package") only actually applied
+to the *pending* branch in the first implementation; a `Filled`/`PartiallyFilled` order
+was accepted as `entry_package_applied` on status alone. A filled order reporting a
+present-and-different `qty` or `triggerPrice` is now rejected as implausible for *our*
+desired package (`fillFieldsPlausible`) rather than trusted — this is what the capability
+requirement "field-level accuracy... not merely that an order exists" actually requires
+for the fill case too, not only the pending case. Fields the exchange omits on a fill
+(e.g. `stopLoss`/`takeProfit`, which some venues move to position-level after a fill) are
+not treated as a mismatch — only a field that is present and different fails the check.
+
+**Bounded means bounded, including each REST call (post-implementation review correction).** The retry loop
+above bounds the number of *attempts*, but until this post-implementation review correction the individual
+`fetch()` calls inside `bybitAdapter.ts` had no timeout — one hung REST call could hold
+the confirmation loop, the HTTP request, and the keyed-mutex-held trade cycle indefinitely.
+Every `bybitAdapter.ts` request now carries `AbortSignal.timeout(config.bybitRequestTimeoutMs)`,
+sourced from a new `ABI_BYBIT_REQUEST_TIMEOUT_MS` config value (default 10000ms) — see the
+modified-files list below. A timed-out call surfaces as a thrown exception, which this
+component's query wrapper treats as `query_failed` like any other REST failure.
 
 ### 11. `EntryPackageApplicationService`: orchestration, owns nothing else
 
@@ -366,14 +470,22 @@ correction pass adds:
    a. call EntryOrderSemanticsMapper(side)
    b. call PositionSizeCalculator
    c. build Bybit payload (bybitOrderMapper.ts additions), using the resolved
-      symbol from ExchangeSymbolResolver (Decision 9)
+      symbol from ExchangeSymbolResolver (Decision 9) for CREATE, or the
+      record's already-stored exchange_symbol for AMEND (see below,
+      post-implementation review correction)
    d. persist provisional record — including ticker, exchange_symbol,
-      risk_multiplier — durable write, before any Bybit call
+      risk_multiplier, and pending_action (post-implementation review
+      correction) — durable write, before any Bybit call
    e. call execution.ts's guarded create/amend/cancel (as-is); if it reports
       skipped_live_execution, treat this as a non-success and return
       internal_error — never entry_package_applied or entry_package_absent
-   f. run PackageConfirmationComponent (Decision 10)
-   g. persist confirmed/failed state (durable write)
+   f. for cancel-and-create specifically: bounded-confirm the cancel
+      actually took effect before building/sending the new create (see
+      below, post-implementation review correction) — never send the new
+      create on a bare cancel acceptance alone
+   g. run PackageConfirmationComponent (Decision 10)
+   h. persist confirmed/failed state (durable write) — on not_found/ambiguous,
+      pending_action is left as-is so a future repeat PUT can resend
 5. release mutex
 6. serialize result via existing serializeAppliedEntryPackage/serializeAbsentEntryPackage
 ```
@@ -382,6 +494,48 @@ The HTTP route (`entryPackageRoutes.ts`) calls only this service; it does not to
 correlation repository, Bybit, or the mutex directly — continuing the boundary already
 established (and already a completed task in the archived `abi-entry-package-api-v1`
 change).
+
+**Repeat-PUT resend recovery via `pending_action` (post-implementation review
+correction, not in the original audit).** A repeat PUT with a `desired_entry` identical to
+the stored one is not automatically pure revalidation. `EntryPackageApplicationService`
+re-confirms against the exchange first (as before); if that confirmation now comes back
+`not_found` (Decision 10 — every query answered cleanly, nothing found anywhere) **and**
+the record's `status` is not already `applied` **and** `pending_action` is set, the
+service resends the in-flight action instead of persisting `unknown` and giving up:
+`amend` → re-run `replaceAmend`, `cancel_and_create` → re-run the confirm-then-create
+REPLACE flow from its start, `create`/`cancel` → re-run `createOrder` at the
+already-reserved generation. This is what makes the existing spec requirement "Retrying
+an ambiguous attempt reuses the already-reserved order identity rather than generating a
+new one" actually hold for the case where the *first* attempt's own outcome was never
+durably confirmed (e.g. ABI crashed between the provisional write and the exchange call,
+or between the exchange call and its confirmation) — the original design assumed
+`order_link_id === null` could detect "nothing was ever dispatched," but the
+durable-write-before-external-call ordering (Decision 4) means that is never true once a
+create/amend attempt has begun. A confirmation outcome of plain `ambiguous` (a query
+failure, or something found but never classified) never triggers a resend — only a clean
+`not_found` does, because resending against exchange state we can't actually rule out
+risks a duplicate live order.
+
+**Cancel-and-create confirms the old order gone before creating the new one
+(post-implementation review correction).** The original flow above called `cancelEntryOrder`
+and then immediately proceeded to build and send the new (opposite-side) create — a bare
+REST acceptance of the cancel request does not prove the old order is no longer live on
+the exchange. `replaceCancelAndCreate` now runs `PackageConfirmationComponent`'s cancel
+variant between the two: `cancelled_confirmed` → close the old binding and proceed to
+create the new one under the next generation; `filled_before_cancel` → the old order
+actually filled despite the cancel attempt, so creating an opposite-side order now would
+risk two live positions — record the fill truthfully on the old binding and return a safe
+error instead; `ambiguous` → do not create a second order while the first's true state is
+unknown, leave `pending_action: "cancel_and_create"` so a later PUT can safely retry.
+
+**Amend reuses the order's recorded `exchange_symbol`, never re-resolves
+(post-implementation review correction).** `replaceAmend` targets the *same* physical
+order as the record's existing `order_link_id`, which was created under the record's
+`exchange_symbol` — re-resolving the ticker for an amend risks targeting a different
+instrument than the live order actually lives under if resolution ever changes between
+calls (e.g. a contract rollover). Only CREATE (a genuinely new binding) calls
+`ExchangeSymbolResolver`; AMEND, and the `InstrumentTradingRulesProvider` lookup it
+performs for re-sizing, both use `record.exchange_symbol` unchanged.
 
 ### 12. Test and smoke strategy
 
@@ -448,6 +602,21 @@ instrument-rules failures, one level up at startup.
 - [Synchronous server startup could otherwise accept entry-package requests before
   correlation replay completes] → Mitigated by the entry-package-scoped readiness flag
   (Decision 13), which does not block legacy or account routes.
+- [A hung REST call to Bybit could otherwise hold a confirmation attempt, the HTTP
+  request, and the keyed-mutex-held trade cycle indefinitely] → Mitigated
+  (post-implementation review correction): every `bybitAdapter.ts` request now carries
+  `AbortSignal.timeout(config.bybitRequestTimeoutMs)` (Decision 10).
+  entryPackageReady on GET /health only reflects correlation-store replay health, not
+  resolver availability — logged explicitly at startup (Decision 13) so this isn't only
+  discoverable by reading code.
+- [Resending a create/amend after an inconclusive prior attempt risks a duplicate live
+  order if the prior attempt actually succeeded] → Mitigated (post-implementation review
+  correction): a resend only fires on a `not_found` confirmation outcome — every query in
+  the bounded budget answering cleanly and finding nothing — never on `ambiguous` (a
+  query failure or an unclassifiable finding), and it always reuses the already-reserved
+  `order_link_id`/generation rather than minting a new one, so Bybit's own duplicate-
+  orderLinkId handling is the last line of defense if the prior attempt did land
+  (Decision 11).
 
 ## Migration Plan
 

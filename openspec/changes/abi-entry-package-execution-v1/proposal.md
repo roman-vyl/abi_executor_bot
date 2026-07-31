@@ -43,10 +43,11 @@ re-litigating architecture mid-build.
   `Journal`; only its low-level append/replay I/O pattern is reused.
 - Add `PackageConfirmationComponent`: bounded field-accuracy verification after
   create/amend — compares the exchange's returned order fields against the desired
-  package, classifying into five outcomes (pending confirmed / full fill before ack /
-  partial fill before ack / rejected-or-deactivated before any fill / ambiguous
-  observation). Extends the existing bounded-retry query mechanics; never returns success
-  on partial confirmation.
+  package, classifying into six outcomes (pending confirmed / full fill before ack /
+  partial fill before ack / rejected-or-deactivated before any fill / genuinely not found
+  anywhere / ambiguous observation — see design.md §10). Extends the existing
+  bounded-retry query mechanics; never returns success on partial confirmation, and never
+  treats a REST query failure as evidence of anything.
 - Add `PositionSizeCalculator` port and its V1 implementation,
   `FixedMinimumPositionSizeCalculator`, backed by a new `InstrumentTradingRulesProvider`
   (Bybit `GET /v5/market/instruments-info`: `min_order_qty`, `qty_step`,
@@ -127,9 +128,10 @@ implementation is being added. No spec-level behavior of that capability changes
   instead of unconditional `internal_error`; check the readiness flag), `src/routes/systemRoutes.ts`
   (new `entryPackageReady` field on `GET /health`), `src/app/server.ts` and `src/app/index.ts`
   (composition wiring, async startup replay), `src/exchange/bybitAdapter.ts`
-  (+ `StubBybitAdapter`) (new `instruments-info` and order-history methods),
-  `src/exchange/bybitOrderMapper.ts` (reuse of trigger-direction encoding), `src/config/config.ts`
-  (new correlation-store path / instrument-rules cache config), `test/fakes/fakeBybitAdapter.ts`,
+  (+ `StubBybitAdapter`) (new `instruments-info` and order-history methods; every request now
+  carries a configurable timeout — design.md §10), `src/exchange/bybitOrderMapper.ts` (reuse of
+  trigger-direction encoding), `src/config/config.ts` (new correlation-store path /
+  instrument-rules cache config / Bybit request timeout config), `test/fakes/fakeBybitAdapter.ts`,
   `test/fixtures/config.ts`.
 - **New durable state**: a new append-only correlation file on disk, independent of the
   existing `journalPath`.
@@ -146,7 +148,11 @@ implementation is being added. No spec-level behavior of that capability changes
 - **Idempotency/recovery**: same `(strategy_instance_id, trade_cycle_id)` pair remains
   the sole idempotency key; no new Runtime-owned `command_id`. Startup replay begins
   asynchronously. Entry-package readiness remains false until replay succeeds. Legacy
-  and account routes remain available during replay.
+  and account routes remain available during replay. The correlation record tracks a
+  `pending_action` so a repeat PUT following a crash mid-flight (before or during the
+  exchange call) can safely resend the same in-flight command at the already-reserved
+  identity, rather than dead-ending once confirmation first comes back inconclusive
+  (design.md §11).
 - **External dependency**: `GET /v5/market/instruments-info` — public, unauthenticated
   read-only. `GET /v5/order/history` — private, authenticated read-only (Bybit's
   order/history endpoint requires API authentication, unlike instruments-info). Both
