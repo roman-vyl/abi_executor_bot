@@ -55,6 +55,12 @@ acknowledge absence, or confirm absence directly when nothing was ever live.
 - **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
   action occurred
 
+#### Scenario: A query failure while confirming a cancellation never confirms absence
+- **WHEN** ABI queries the exchange to confirm a cancellation and the query fails or times
+  out, rather than cleanly reporting the order gone
+- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that failure, and
+  SHALL treat the cancellation as unconfirmed
+
 ### Requirement: A changed ticker within an existing trade cycle is rejected without contacting the exchange
 The `ticker` associated with a trade cycle is fixed at first application. ABI SHALL
 reject any request that supplies a different ticker for the same trade cycle without
@@ -124,6 +130,21 @@ that only advances when a physically new order is created.
 - **THEN** ABI SHALL reuse the already-reserved order identity rather than generating a
   new one
 
+#### Scenario: An unconfirmed attempt is recovered by resending, not just re-querying
+- **WHEN** a previous create or amend attempt's outcome was never durably confirmed (e.g.
+  ABI restarted or lost the response mid-flight), a later identical request arrives, and
+  the exchange genuinely has no record of that attempt anywhere
+- **THEN** ABI SHALL resend the same command against the exchange, reusing the
+  already-reserved order identity, rather than only re-querying indefinitely without ever
+  resending
+
+#### Scenario: An attempt is not resent while its true exchange state is merely unclear
+- **WHEN** a previous attempt's outcome could not be confirmed, but the inconclusive
+  result came from a failed or inconsistent query rather than every query cleanly
+  reporting the order absent
+- **THEN** ABI SHALL NOT resend the command, since the order may already exist on the
+  exchange, and SHALL instead return a safe internal error
+
 #### Scenario: Replacement via cancel-and-create receives a new identity
 - **WHEN** ABI replaces an order by cancelling the old one and creating a new one
 - **THEN** the new order SHALL receive an identity distinct from every previous order for
@@ -163,6 +184,13 @@ before acknowledging success, not merely that an order exists.
 - **WHEN** bounded confirmation cannot determine whether the package is pending, filled,
   terminal, or absent
 - **THEN** ABI SHALL return a safe internal error and no success acknowledgement
+
+#### Scenario: A query failure is never treated as confirming evidence
+- **WHEN** a query to the exchange during confirmation fails or times out, rather than
+  cleanly reporting a result
+- **THEN** ABI SHALL NOT treat that failure as evidence of any particular exchange state,
+  and SHALL return a safe internal error unless an independent, cleanly-answered query
+  elsewhere confirms the outcome
 
 ### Requirement: Early execution observed before acknowledgement still receives a truthful acknowledgement
 When the exchange fully or partially fills an order before ABI can respond, ABI SHALL
