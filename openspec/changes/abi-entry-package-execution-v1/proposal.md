@@ -144,11 +144,13 @@ implementation is being added. No spec-level behavior of that capability changes
   existing live-execution guard, unaffected by this change; sizing remains disclosed
   fixed-minimum, not risk-based, until a separate future change.
 - **Idempotency/recovery**: same `(strategy_instance_id, trade_cycle_id)` pair remains
-  the sole idempotency key; no new Runtime-owned `command_id`. Startup replay of the
-  correlation store is synchronous and fail-closed on corruption, gating readiness.
-- **External dependency**: Bybit `GET /v5/market/instruments-info` and
-  `GET /v5/order/history` (both public/read-only) become new exchange calls this service
-  makes.
+  the sole idempotency key; no new Runtime-owned `command_id`. Startup replay begins
+  asynchronously. Entry-package readiness remains false until replay succeeds. Legacy
+  and account routes remain available during replay.
+- **External dependency**: `GET /v5/market/instruments-info` — public, unauthenticated
+  read-only. `GET /v5/order/history` — private, authenticated read-only (Bybit's
+  order/history endpoint requires API authentication, unlike instruments-info). Both
+  become new exchange calls this service makes.
 - **Blocking prerequisite**: this change cannot reach production Bybit for any ticker
   until the prerequisite change `abi-exchange-instrument-identity-v1` lands and provides
   `ExchangeSymbolResolver`'s interface and production implementation in full (see
