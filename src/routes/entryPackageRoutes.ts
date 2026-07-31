@@ -9,7 +9,15 @@ import {
   validateEntryPackageCommand,
   validationFailedResult,
 } from "../domain/entryPackageApi.js";
-import type { EntryPackageValidationDetail } from "../domain/entryPackageApi.js";
+import type { EntryPackageCommand, EntryPackageHttpResult, EntryPackageValidationDetail } from "../domain/entryPackageApi.js";
+
+// Narrow structural port, not the concrete class: entryPackageRoutes.ts must
+// not touch correlation state, Bybit, or the mutex directly — it only knows
+// how to hand a validated command to something that can apply() it
+// (design.md §11, tasks.md 8.5).
+export type EntryPackageApplicationServicePort = {
+  apply(command: EntryPackageCommand): Promise<EntryPackageHttpResult>;
+};
 
 export type EntryPackageRouteMatch =
   | {
@@ -25,10 +33,12 @@ export type EntryPackageRouteMatch =
 export async function handleEntryPackageRoutes(input: {
   request: IncomingMessage;
   response: ServerResponse;
+  applicationService: EntryPackageApplicationServicePort;
+  isReady: () => boolean;
 }): Promise<boolean> {
-  const { request, response } = input;
+  const { request, response, applicationService, isReady } = input;
   try {
-    return await handleEntryPackageRoutesSafely(request, response);
+    return await handleEntryPackageRoutesSafely(request, response, applicationService, isReady);
   } catch {
     writeResult(response, internalErrorResult());
     return true;
@@ -38,6 +48,8 @@ export async function handleEntryPackageRoutes(input: {
 async function handleEntryPackageRoutesSafely(
   request: IncomingMessage,
   response: ServerResponse,
+  applicationService: EntryPackageApplicationServicePort,
+  isReady: () => boolean,
 ): Promise<boolean> {
   const match = matchEntryPackageRoute(request.method, request.url);
 
@@ -76,11 +88,16 @@ async function handleEntryPackageRoutesSafely(
     return true;
   }
 
-  // Execution wiring is deliberately outside abi-entry-package-api-v1.
-  // Until a later change supplies it, a valid command must fail safely rather
-  // than receive a fabricated success acknowledgement.
-  void validation.command;
-  writeResult(response, internalErrorResult());
+  if (!isReady()) {
+    // Correlation-store replay hasn't completed (or failed) yet — fail
+    // closed with the existing safe internal_error response rather than
+    // risk acting before durable state is recovered (design.md §13).
+    writeResult(response, internalErrorResult());
+    return true;
+  }
+
+  const result = await applicationService.apply(validation.command);
+  writeResult(response, result);
   return true;
 }
 

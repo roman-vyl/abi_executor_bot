@@ -3,10 +3,23 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 
+import type { EntryPackageCommand, EntryPackageHttpResult } from "../../src/domain/entryPackageApi.js";
+import { internalErrorResult } from "../../src/domain/entryPackageApi.js";
+import type { EntryPackageApplicationServicePort } from "../../src/routes/entryPackageRoutes.js";
 import {
   handleEntryPackageRoutes,
   matchEntryPackageRoute,
 } from "../../src/routes/entryPackageRoutes.js";
+
+const notReadyApplicationService: EntryPackageApplicationServicePort = {
+  apply(): Promise<EntryPackageHttpResult> {
+    throw new Error("applicationService.apply should not be called while not ready");
+  },
+};
+
+function notReady(): boolean {
+  return false;
+}
 
 test("entry-package route ignores a different method or path", async () => {
   const request = makeRequest("GET", "/health", "", {});
@@ -16,6 +29,8 @@ test("entry-package route ignores a different method or path", async () => {
     await handleEntryPackageRoutes({
       request,
       response: response.response,
+      applicationService: notReadyApplicationService,
+      isReady: notReady,
     }),
     false,
   );
@@ -104,6 +119,8 @@ test("missing and malformed JSON map to 400", async () => {
       await handleEntryPackageRoutes({
         request,
         response: response.response,
+        applicationService: notReadyApplicationService,
+        isReady: notReady,
       }),
       true,
     );
@@ -141,6 +158,8 @@ test("malformed path percent encoding maps to validation failure", async () => {
     await handleEntryPackageRoutes({
       request,
       response: response.response,
+      applicationService: notReadyApplicationService,
+      isReady: notReady,
     }),
     true,
   );
@@ -198,6 +217,8 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
     await handleEntryPackageRoutes({
       request,
       response: response.response,
+      applicationService: notReadyApplicationService,
+      isReady: notReady,
     }),
     true,
   );
@@ -210,11 +231,65 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
   });
 });
 
+test("when ready, a valid command is handed to the application service and its result is returned as-is", async () => {
+  let receivedCommand: EntryPackageCommand | undefined;
+  const applicationService: EntryPackageApplicationServicePort = {
+    async apply(command: EntryPackageCommand): Promise<EntryPackageHttpResult> {
+      receivedCommand = command;
+      return {
+        statusCode: 200,
+        body: {
+          strategy_instance_id: command.strategyInstanceId,
+          trade_cycle_id: command.tradeCycleId,
+          status: "entry_package_absent",
+        },
+      };
+    },
+  };
+
+  const request = makeRequest(
+    "PUT",
+    route(),
+    JSON.stringify({ ticker: "BTCUSDT.P", desired_entry: null, risk_multiplier: "1" }),
+    { "content-type": "application/json" },
+  );
+  const response = makeResponse();
+
+  assert.equal(
+    await handleEntryPackageRoutes({
+      request,
+      response: response.response,
+      applicationService,
+      isReady: () => true,
+    }),
+    true,
+  );
+  assert.equal(response.status(), 200);
+  assert.equal(response.body().status, "entry_package_absent");
+  assert.equal(receivedCommand?.strategyInstanceId, "instance");
+  assert.equal(receivedCommand?.tradeCycleId, "cycle");
+});
+
+test("applicationService failures still map through internalErrorResult when returned", async () => {
+  const applicationService: EntryPackageApplicationServicePort = {
+    async apply(): Promise<EntryPackageHttpResult> {
+      return internalErrorResult();
+    },
+  };
+
+  const response = await invokeRoute(makePackagePayload(), undefined, applicationService, () => true);
+
+  assert.equal(response.status(), 500);
+  assert.equal(response.body().error.code, "internal_error");
+});
+
 async function invokeRoute(
   payload: unknown,
   headers: Record<string, string> = {
     "content-type": "application/json",
   },
+  applicationService: EntryPackageApplicationServicePort = notReadyApplicationService,
+  isReady: () => boolean = notReady,
 ): Promise<ReturnType<typeof makeResponse>> {
   const request = makeRequest("PUT", route(), JSON.stringify(payload), headers);
   const response = makeResponse();
@@ -222,6 +297,8 @@ async function invokeRoute(
     await handleEntryPackageRoutes({
       request,
       response: response.response,
+      applicationService,
+      isReady,
     }),
     true,
   );

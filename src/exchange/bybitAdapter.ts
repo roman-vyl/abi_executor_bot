@@ -7,6 +7,7 @@ import type {
   BybitCancelAllOrdersPayload,
   BybitCreateOrderPayload,
   BybitGetOrderByLinkIdPayload,
+  BybitGetOrderHistoryPayload,
   BybitMarketCloseOrderPayload,
 } from "./bybitOrderMapper.js";
 
@@ -42,6 +43,8 @@ export interface BybitAdapter {
   cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown>;
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
+  getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
+  getInstrumentInfo(symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
@@ -136,6 +139,34 @@ export class RestBybitAdapter implements BybitAdapter {
         limit: payload.limit,
       }),
     );
+  }
+
+  // getOrderByLinkId's /v5/order/realtime cannot see an order that has
+  // already fully filled and closed, been rejected, or been terminated by
+  // the exchange — those leave the realtime set. This queries the durable
+  // order-history endpoint instead (design.md §10).
+  async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
+    return this.signedGet(
+      "/v5/order/history",
+      new URLSearchParams({
+        category: payload.category,
+        symbol: payload.symbol,
+        orderLinkId: payload.orderLinkId,
+        limit: payload.limit,
+      }),
+    );
+  }
+
+  // Public, unauthenticated — unlike every other bybitAdapter.ts method, this
+  // one is intentionally not signed (design.md §7).
+  async getInstrumentInfo(symbol: string): Promise<unknown> {
+    const params = new URLSearchParams({
+      category: this.config.bybitCategory,
+      symbol,
+    });
+
+    const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`);
+    return readBybitResponse(response);
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
@@ -263,6 +294,14 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown> {
     return stub("getOrderByLinkId", payload);
+  }
+
+  async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
+    return stub("getOrderHistory", payload);
+  }
+
+  async getInstrumentInfo(symbol: string): Promise<unknown> {
+    return stub("getInstrumentInfo", { symbol });
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {

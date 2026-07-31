@@ -13,6 +13,7 @@ import type {
   BybitCancelOrderPayload,
   BybitCreateOrderPayload,
   BybitGetOrderByLinkIdPayload,
+  BybitGetOrderHistoryPayload,
   BybitMarketCloseOrderPayload,
 } from "../../src/exchange/bybitOrderMapper.js";
 
@@ -22,6 +23,8 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly cancelOrderCalls: BybitCancelOrderPayload[] = [];
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
+  readonly getOrderHistoryCalls: BybitGetOrderHistoryPayload[] = [];
+  readonly getInstrumentInfoCalls: string[] = [];
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
 
@@ -29,6 +32,8 @@ export class FakeBybitAdapter implements BybitAdapter {
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponse: unknown = { retCode: 0, result: { list: [] } };
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
+  orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
+  instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
   position: BybitPosition | null = null;
   marketPrice = "61000.0";
 
@@ -74,6 +79,16 @@ export class FakeBybitAdapter implements BybitAdapter {
   async getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown> {
     this.getOrderByLinkIdCalls.push(payload);
     return this.orderByLinkIdResponse;
+  }
+
+  async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
+    this.getOrderHistoryCalls.push(payload);
+    return this.orderHistoryResponse;
+  }
+
+  async getInstrumentInfo(symbol: string): Promise<unknown> {
+    this.getInstrumentInfoCalls.push(symbol);
+    return this.instrumentInfoResponse;
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {

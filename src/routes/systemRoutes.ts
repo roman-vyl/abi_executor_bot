@@ -8,8 +8,9 @@ export async function handleSystemRoutes(input: {
   request: IncomingMessage;
   response: ServerResponse;
   config: AbiConfig;
+  entryPackageReady: boolean;
 }): Promise<boolean> {
-  const { request, response, config } = input;
+  const { request, response, config, entryPackageReady } = input;
 
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, 200, {
@@ -29,6 +30,7 @@ export async function handleSystemRoutes(input: {
       bybitSettleCoin: config.bybitSettleCoin,
       bybitTriggerBy: config.bybitTriggerBy,
       bybitApiKeyConfigured: config.bybitApiKey !== "",
+      entryPackageReady,
     });
     return true;
   }

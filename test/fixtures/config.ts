@@ -8,6 +8,8 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     liveTradingEnabled: false,
     allowedSymbols: ["BTCUSDT"],
     journalPath: "/tmp/abi-test-journal.jsonl",
+    entryPackageCorrelationPath: "/tmp/abi-test-entry-package-correlation.jsonl",
+    instrumentRulesCacheTtlMs: 300_000,
     fixedSmokeQty: "0.001",
     bybitEnvironment: "testnet",
     bybitTestnet: true,

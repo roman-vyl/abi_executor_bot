@@ -5,6 +5,8 @@ export type AbiConfig = {
   liveTradingEnabled: boolean;
   allowedSymbols: string[];
   journalPath: string;
+  entryPackageCorrelationPath: string;
+  instrumentRulesCacheTtlMs: number;
   fixedSmokeQty: string;
   bybitEnvironment: "demo" | "testnet" | "mainnet";
   bybitTestnet: boolean;
@@ -25,6 +27,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     liveTradingEnabled: readBool(env.ABI_LIVE_TRADING_ENABLED, false),
     allowedSymbols: readCsv(env.ABI_ALLOWED_SYMBOLS, ["BTCUSDT"]),
     journalPath: env.ABI_JOURNAL_PATH ?? "./var/abi_journal.jsonl",
+    entryPackageCorrelationPath:
+      env.ABI_ENTRY_PACKAGE_CORRELATION_PATH ?? "./var/abi_entry_package_correlation.jsonl",
+    instrumentRulesCacheTtlMs: readInt(env.ABI_INSTRUMENT_RULES_CACHE_TTL_MS, 300_000),
     fixedSmokeQty: readPositiveNumberString(env.ABI_FIXED_SMOKE_QTY, "0.001"),
     bybitEnvironment: readBybitEnvironment(env),
     bybitTestnet: readBybitEnvironment(env) === "testnet",
