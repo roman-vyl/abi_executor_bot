@@ -84,18 +84,21 @@ ABI SHALL query Bybit's position endpoint using the explicit `category` and `sym
 - **AND** the deployment's globally configured category is not used for this query
 
 ### Requirement: The raw Bybit position response is strictly validated before being trusted
-ABI SHALL validate Bybit's documented response envelope — `result` as an object containing `list` as an array — not a bare top-level list. ABI SHALL treat the following conditions as query failures, mapped to `internal_error`, and SHALL NOT derive `position_open: false` from any of them:
+ABI SHALL validate Bybit's documented response envelope — `result` as an object containing `category` as a string and `list` as an array — not a bare top-level list. ABI SHALL treat the following conditions as query failures, mapped to `internal_error`, and SHALL NOT derive `position_open: false` from any of them:
 
 - `result` is missing or not an object, or `result.list` is missing or not an array;
-- a list item is not an object;
-- an item's `symbol` is missing, is not a string, or does not equal the exact symbol the query was issued for;
-- an item's `positionIdx` is missing, is not an integer, or is not exactly `0` — checked on every item **regardless of `size`**, since `positionIdx` is Bybit's position-mode discriminator (one-way vs. hedge mode), not a size-dependent fact: a hedge-mode account reports non-zero `positionIdx` even on a flat, zero-size row;
-- an item's `size` is missing, is not valid exact-decimal text, is non-finite, or parses to a negative value;
+- `result.category` is missing, is not a string, or does not equal the exact category the query was issued for;
+- `result.list` does not contain exactly one item — a symbol-scoped, one-way-mode V1 query is expected to return exactly one row for the queried instrument (Bybit's flat-position placeholder row when there is no exposure, or the single live row when there is); an **empty list is not evidence of a closed position** and more than one item is never resolved by filtering, so both cardinalities fail closed before any per-item field is read;
+- the single item is not an object;
+- the item's `symbol` is missing, is not a string, or does not equal the exact symbol the query was issued for;
+- the item's `positionIdx` is missing, is not an integer, or is not exactly `0` — checked **regardless of `size`**, since `positionIdx` is Bybit's position-mode discriminator (one-way vs. hedge mode), not a size-dependent fact: a hedge-mode account reports non-zero `positionIdx` even on a flat, zero-size row;
+- the item's `size` is missing, is not valid exact-decimal text, is non-finite, or parses to a negative value;
 - for an item whose `size` parses to a value greater than zero: `side` is not exactly `Buy` or `Sell`, `avgPrice` is missing, is not valid exact-decimal text, or is zero or negative, or `openTime` is missing or is not a positive integer;
-- more than one item has `size` parsing to a value greater than zero;
 - the underlying request times out or fails at the transport level.
 
 An item whose `size` parses to exactly zero, and whose `positionIdx` has already been confirmed present, an integer, and exactly `0`, is excluded from consideration as an open position and is not, by itself, a failure. ABI SHALL NOT require `side`, `avgPrice`, or `openTime` to be present or valid on such an item — Bybit's documented flat-position row carries empty or default values (`side` as an empty string, default/empty price fields, `openTime` as `0`) for a genuinely closed symbol, and those defaults SHALL NOT be treated as a validation failure. `positionIdx` is never exempted by a zero `size`.
+
+ABI's sign/zero classification of `size` SHALL be total: it SHALL NOT throw for any input, including exact-decimal text with an exponent magnitude larger than any arithmetic bound ABI applies elsewhere. A typed adapter boundary that could throw on an adversarial or malformed field value would defeat the purpose of returning a discriminated result.
 
 #### Scenario: Exchange timeout fails closed
 - **WHEN** the Bybit position query times out or fails at the transport level
@@ -107,40 +110,55 @@ An item whose `size` parses to exactly zero, and whose `positionIdx` has already
 - **THEN** ABI does not return `position_open: false`
 - **AND** ABI returns `internal_error`
 
+#### Scenario: A mismatched result.category fails closed
+- **WHEN** `result.category` is missing, is not a string, or does not equal the exact category the query was issued for
+- **THEN** ABI does not return `position_open: false`
+- **AND** ABI returns `internal_error`
+
+#### Scenario: An empty list is never trusted as a closed position
+- **WHEN** `result.list` contains zero items
+- **THEN** ABI does not return `position_open: false`
+- **AND** ABI returns `internal_error`
+
+#### Scenario: More than one row fails closed regardless of size
+- **WHEN** `result.list` contains more than one item, whether or not any of them has `size` greater than zero
+- **THEN** ABI does not select any item as authoritative
+- **AND** ABI returns `internal_error`
+
 #### Scenario: Malformed response fails closed
-- **WHEN** a list item is not an object, or an item whose `size` parses greater than zero is missing a required field or has an invalid decimal or timestamp value
+- **WHEN** the single list item is not an object, or it has `size` parsing greater than zero and is missing a required field or has an invalid decimal or timestamp value
 - **THEN** ABI does not return `position_open: false`
 - **AND** ABI returns `internal_error`
 
 #### Scenario: Symbol mismatch fails closed
-- **WHEN** a list item's `symbol` is missing, is not a string, or does not match the exact symbol the query was issued for
+- **WHEN** the single list item's `symbol` is missing, is not a string, or does not match the exact symbol the query was issued for
 - **THEN** ABI does not return `position_open: false`
 - **AND** ABI returns `internal_error`
 
 #### Scenario: Missing or invalid size fails closed
-- **WHEN** a list item's `size` field is missing, is not valid exact-decimal text, or parses to a negative value
+- **WHEN** the single list item's `size` field is missing, is not valid exact-decimal text, or parses to a negative value
 - **THEN** ABI does not treat the item as evidence of a closed position
 - **AND** ABI returns `internal_error`
 
 #### Scenario: A valid zero-size row is not a failure
-- **WHEN** a list item's `size` parses to exactly zero, its `positionIdx` is present, an integer, and exactly `0`, and it carries an empty or default `side`, `avgPrice`, or `openTime`
+- **WHEN** `result.list` contains exactly one item whose `size` parses to exactly zero, whose `positionIdx` is present, an integer, and exactly `0`, and which carries an empty or default `side`, `avgPrice`, or `openTime`
 - **THEN** ABI excludes that item from consideration without requiring those latter three fields to be valid
 - **AND** ABI does not return `internal_error` on account of that item
 
-#### Scenario: Ambiguous multiple rows fail closed
-- **WHEN** more than one item for the queried symbol has `size` parsing to a value greater than zero
-- **THEN** ABI does not select either item as authoritative
-- **AND** ABI returns `internal_error`
-
 #### Scenario: Hedge-mode or unexpected positionIdx fails closed
-- **WHEN** any item, regardless of its `size`, has a `positionIdx` that is missing, is not an integer, or is not exactly `0`
+- **WHEN** the single list item has a `positionIdx` that is missing, is not an integer, or is not exactly `0`, regardless of its `size`
 - **THEN** ABI does not treat it as a valid one-way position
 - **AND** ABI returns `internal_error`
 
 #### Scenario: Zero-size row with a non-zero positionIdx fails closed
-- **WHEN** an item's `size` parses to exactly zero but its `positionIdx` is missing, is not an integer, or is not exactly `0`
+- **WHEN** the single list item's `size` parses to exactly zero but its `positionIdx` is missing, is not an integer, or is not exactly `0`
 - **THEN** ABI does not exclude that item as a harmless zero-size row
 - **AND** ABI returns `internal_error`
+
+#### Scenario: Extreme exponents never raise an exception
+- **WHEN** the single list item's `size` is valid exact-decimal text with an exponent magnitude beyond any arithmetic bound ABI applies elsewhere
+- **THEN** ABI classifies its sign and zero-ness without throwing
+- **AND** ABI resolves the request to one of the documented responses, never an unhandled exception
 
 ### Requirement: Live position side must match the record's desired entry side
 For a structurally valid position row, ABI SHALL require the row's `side` to match `record.desired_entry.side` (`Buy` ↔ `long`, `Sell` ↔ `short`) before reporting an open position. This check validates the resolved record's own declared intent against the live row; it is not, and cannot be, a cross-check against any Bybit order or execution identity, since Bybit's position response carries none (see "V1 position attribution" below).

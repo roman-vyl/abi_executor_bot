@@ -60,7 +60,7 @@ for (const status of UNRESOLVED) {
 for (const status of LIVE_QUERY_ADMISSIBLE) {
   test(`status '${status}' proceeds to a live query using the record's own category/symbol`, async () => {
     await withResolutionService(async ({ service, bybit, repo }) => {
-      bybit.openPositionsResponse = noPositionResponse();
+      bybit.openPositionsResponse = closedResponse("ETHUSDT");
       await repo.save(makeRecord({ status, exchangeSymbol: "ETHUSDT" }));
 
       const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
@@ -90,7 +90,7 @@ test("non-linear exchange_category fails closed as unsupported_exchange_scope wi
 
 test("linear category proceeds to the live query", async () => {
   await withResolutionService(async ({ service, bybit, repo }) => {
-    bybit.openPositionsResponse = noPositionResponse();
+    bybit.openPositionsResponse = closedResponse();
     await repo.save(makeRecord({ status: "applied" }));
 
     await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
@@ -152,9 +152,9 @@ test("full fill reports position_open: true", async () => {
   });
 });
 
-test("no live row is reported as closed", async () => {
+test("a single flat (size-zero) row is reported as closed", async () => {
   await withResolutionService(async ({ service, bybit, repo }) => {
-    bybit.openPositionsResponse = noPositionResponse();
+    bybit.openPositionsResponse = closedResponse();
     await repo.save(makeRecord({ status: "applied" }));
 
     const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
@@ -166,20 +166,48 @@ test("no live row is reported as closed", async () => {
   });
 });
 
-test("all-size-zero rows are reported as closed", async () => {
+test("an empty Bybit list is never trusted as closed and fails closed to internal_error", async () => {
+  await withResolutionService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = { retCode: 0, result: { category: "linear", list: [] } };
+    await repo.save(makeRecord({ status: "applied" }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("more than one row for the queried symbol fails closed to internal_error, never filtered down to a single position", async () => {
   await withResolutionService(async ({ service, bybit, repo }) => {
     bybit.openPositionsResponse = {
       retCode: 0,
-      result: { list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }] },
+      result: {
+        category: "linear",
+        list: [
+          { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 },
+          { symbol: "BTCUSDT", side: "Buy", size: "0.001", positionIdx: 0, avgPrice: "100000", openTime: 111 },
+        ],
+      },
     };
     await repo.save(makeRecord({ status: "applied" }));
 
     const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
 
-    assert.deepEqual(result, {
-      statusCode: 200,
-      body: { position_open: false, first_fill_at_ms: null, average_entry_price: null },
-    });
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("a result.category mismatch fails closed to internal_error", async () => {
+  await withResolutionService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = {
+      retCode: 0,
+      result: { category: "spot", list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }] },
+    };
+    await repo.save(makeRecord({ status: "applied" }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
   });
 });
 
@@ -194,14 +222,21 @@ test("any adapter-layer query failure maps to internal_error, never position_ope
   });
 });
 
-function noPositionResponse(): unknown {
-  return { retCode: 0, result: { list: [] } };
+// A symbol-scoped, one-way-mode query returns exactly one row: Bybit's flat
+// placeholder row when there is no exposure. An empty list is a separate,
+// non-closed failure case (design.md Decision 4) exercised by its own test.
+function closedResponse(symbol = "BTCUSDT", category = "linear"): unknown {
+  return {
+    retCode: 0,
+    result: { category, list: [{ symbol, side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }] },
+  };
 }
 
 function positionResponse(input: { side: "Buy" | "Sell"; size: string; avgPrice: string; openTime: number }): unknown {
   return {
     retCode: 0,
     result: {
+      category: "linear",
       list: [
         {
           symbol: "BTCUSDT",

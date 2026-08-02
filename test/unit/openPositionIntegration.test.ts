@@ -52,10 +52,12 @@ for (const status of ["absent", "terminal_unfilled"] as const) {
 }
 
 for (const status of ["applied", "pending_replace", "pending_cancel"] as const) {
-  test(`9.3 live-query-admissible status '${status}' resolves closed when the fake backend reports no open row`, async () => {
+  test(`9.3 live-query-admissible status '${status}' resolves closed when the fake backend reports a flat row`, async () => {
     await withStack(async ({ service, bybit, repo }) => {
       await repo.save(makeRecord({ status }));
-      bybit.openPositionsResponse = envelope([]);
+      bybit.openPositionsResponse = envelope([
+        { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 },
+      ]);
 
       const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
 
@@ -199,6 +201,45 @@ test("9.6 a valid zero-size, positionIdx==0 row with empty/default fields resolv
   });
 });
 
+test("9.6 an empty list from the fake backend is never trusted as closed and returns internal_error", async () => {
+  await withStack(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "applied" }));
+    bybit.openPositionsResponse = envelope([]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("9.6 more than one row from the fake backend returns internal_error, never filtered by size", async () => {
+  await withStack(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "applied", side: "long" }));
+    bybit.openPositionsResponse = envelope([
+      { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 },
+      row({ side: "Buy", size: "0.001" }),
+    ]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("9.6 a result.category mismatch from the fake backend returns internal_error", async () => {
+  await withStack(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "applied" }));
+    bybit.openPositionsResponse = envelope(
+      [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }],
+      "spot",
+    );
+
+    const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
 test("9.7 missing-record case end-to-end returns unknown_trade_cycle_binding without invoking the fake Bybit backend", async () => {
   await withStack(async ({ service, bybit }) => {
     const result = await service.resolve({ strategyInstanceId: "no-such-instance", tradeCycleId: "no-such-cycle" });
@@ -211,8 +252,8 @@ test("9.7 missing-record case end-to-end returns unknown_trade_cycle_binding wit
   });
 });
 
-function envelope(list: unknown[]): unknown {
-  return { retCode: 0, result: { list } };
+function envelope(list: unknown[], category = "linear"): unknown {
+  return { retCode: 0, result: { category, list } };
 }
 
 function row(overrides: Record<string, unknown>): Record<string, unknown> {

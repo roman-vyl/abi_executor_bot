@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyExactDecimalText,
   internalErrorResult,
   isExactDecimalText,
+  isNonNegativeExactDecimalText,
   isPositiveExactDecimalText,
   malformedJsonResult,
   serializeAbsentEntryPackage,
@@ -190,6 +192,33 @@ test("exact-decimal validation avoids binary floating point and adds no canonica
   }
   for (const value of ["0", "-0", "-1", "-1e-3"]) {
     assert.equal(isPositiveExactDecimalText(value), false, value);
+  }
+});
+
+test("sign/zero classification is total: extreme exponents never throw, unlike exactDecimal.ts's arithmetic parser", () => {
+  for (const value of ["1e+200", "1e-200", "-1e200", "0e200", "-0e200", "1e+1000000"]) {
+    assert.doesNotThrow(() => classifyExactDecimalText(value), value);
+    assert.doesNotThrow(() => isPositiveExactDecimalText(value), value);
+    assert.doesNotThrow(() => isNonNegativeExactDecimalText(value), value);
+  }
+
+  assert.deepEqual(classifyExactDecimalText("1e+200"), { valid: true, negative: false, zero: false });
+  assert.deepEqual(classifyExactDecimalText("-1e200"), { valid: true, negative: true, zero: false });
+  assert.deepEqual(classifyExactDecimalText("0e200"), { valid: true, negative: false, zero: true });
+  assert.deepEqual(classifyExactDecimalText("-0e200"), { valid: true, negative: true, zero: true });
+
+  assert.equal(isNonNegativeExactDecimalText("-0e200"), true);
+  assert.equal(isNonNegativeExactDecimalText("-1e200"), false);
+  assert.equal(isNonNegativeExactDecimalText("0e200"), true);
+  assert.equal(isNonNegativeExactDecimalText("1e+200"), true);
+});
+
+test("isNonNegativeExactDecimalText accepts zero and positive text, rejects negative and invalid text", () => {
+  for (const value of ["0", "-0", "+0", "0.0", "1", "001.2300", "1e+1000000"]) {
+    assert.equal(isNonNegativeExactDecimalText(value), true, value);
+  }
+  for (const value of ["-1", "-0.001", "-1e-3", "", "abc", "Infinity"]) {
+    assert.equal(isNonNegativeExactDecimalText(value), false, value);
   }
 });
 

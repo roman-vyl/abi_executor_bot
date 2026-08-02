@@ -1,8 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import type { AbiConfig } from "../config/config.js";
-import { compareDecimal } from "../domain/exactDecimal.js";
-import { isNonNegativeExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
+import { classifyExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
 import type {
   BybitAmendOrderPayload,
   BybitCancelOrderPayload,
@@ -41,14 +40,16 @@ export type ValidatedOpenPositionRow = {
 export type PositionQueryFailureReason =
   | "transport_error"
   | "malformed_envelope"
+  | "category_mismatch"
+  | "no_row_returned"
+  | "multiple_rows_returned"
   | "malformed_item"
   | "symbol_mismatch"
   | "invalid_position_idx"
   | "invalid_size"
   | "invalid_side"
   | "invalid_avg_price"
-  | "invalid_open_time"
-  | "ambiguous_rows";
+  | "invalid_open_time";
 
 export type PositionQueryResult =
   | { kind: "no_position" }
@@ -162,7 +163,7 @@ export class RestBybitAdapter implements BybitAdapter {
       return { kind: "failure", reason: "transport_error" };
     }
 
-    return evaluatePositionQueryResponse(response, input.symbol);
+    return evaluatePositionQueryResponse(response, input);
   }
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
@@ -441,7 +442,19 @@ function readOpenPosition(response: unknown): BybitPosition | null {
 // reuse readBybitList()'s lenient fallback-to-[] behavior, which would let a
 // genuinely malformed response silently masquerade as "no position" — the
 // exact failure mode this function exists to prevent.
-export function evaluatePositionQueryResponse(response: unknown, symbol: string): PositionQueryResult {
+//
+// A symbol-scoped, one-way-mode V1 query is expected to return exactly one
+// row for the queried instrument (Bybit's flat-position placeholder row when
+// there is no exposure, or the single live row when there is). Zero rows is
+// not trusted as "no position" — an empty list could equally mean the
+// symbol was never queried correctly, a wrong/stale filter was applied, or a
+// partial/truncated response — and more than one row is never a valid
+// one-way-mode shape either; both fail closed rather than being filtered
+// down to "no position" by size alone. Every branch here is total (no
+// exceptions): sign/zero classification of `size` never does arithmetic
+// that could throw on an out-of-range exponent (see
+// classifyExactDecimalText).
+export function evaluatePositionQueryResponse(response: unknown, input: PositionQueryInput): PositionQueryResult {
   if (typeof response !== "object" || response === null || !("result" in response)) {
     return { kind: "failure", reason: "malformed_envelope" };
   }
@@ -451,65 +464,77 @@ export function evaluatePositionQueryResponse(response: unknown, symbol: string)
     return { kind: "failure", reason: "malformed_envelope" };
   }
 
-  const list = (result as Record<string, unknown>).list;
+  const resultRecord = result as Record<string, unknown>;
+  const list = resultRecord.list;
   if (!Array.isArray(list)) {
     return { kind: "failure", reason: "malformed_envelope" };
   }
 
-  let candidate: ValidatedOpenPositionRow | undefined;
-
-  for (const item of list) {
-    if (typeof item !== "object" || item === null) {
-      return { kind: "failure", reason: "malformed_item" };
-    }
-
-    const record = item as Record<string, unknown>;
-
-    const itemSymbol = record.symbol;
-    if (typeof itemSymbol !== "string" || itemSymbol !== symbol) {
-      return { kind: "failure", reason: "symbol_mismatch" };
-    }
-
-    const positionIdx = record.positionIdx;
-    if (typeof positionIdx !== "number" || !Number.isInteger(positionIdx) || positionIdx !== 0) {
-      return { kind: "failure", reason: "invalid_position_idx" };
-    }
-
-    const size = record.size;
-    if (typeof size !== "string" || !isNonNegativeExactDecimalText(size)) {
-      return { kind: "failure", reason: "invalid_size" };
-    }
-
-    // Exactly-zero size, with positionIdx already confirmed 0: a flat row.
-    // side/avgPrice/openTime are Bybit's documented empty/default values on
-    // such a row and are not read or validated here.
-    if (compareDecimal(size, "0") === 0) {
-      continue;
-    }
-
-    const side = record.side;
-    if (side !== "Buy" && side !== "Sell") {
-      return { kind: "failure", reason: "invalid_side" };
-    }
-
-    const avgPrice = record.avgPrice;
-    if (typeof avgPrice !== "string" || !isPositiveExactDecimalText(avgPrice)) {
-      return { kind: "failure", reason: "invalid_avg_price" };
-    }
-
-    const openTime = record.openTime;
-    if (typeof openTime !== "number" || !Number.isInteger(openTime) || openTime <= 0) {
-      return { kind: "failure", reason: "invalid_open_time" };
-    }
-
-    if (candidate !== undefined) {
-      return { kind: "failure", reason: "ambiguous_rows" };
-    }
-
-    candidate = { symbol: itemSymbol, side, size, positionIdx: 0, avgPrice, openTime };
+  const responseCategory = resultRecord.category;
+  if (typeof responseCategory !== "string" || responseCategory !== input.category) {
+    return { kind: "failure", reason: "category_mismatch" };
   }
 
-  return candidate !== undefined ? { kind: "position", row: candidate } : { kind: "no_position" };
+  if (list.length === 0) {
+    return { kind: "failure", reason: "no_row_returned" };
+  }
+  if (list.length > 1) {
+    return { kind: "failure", reason: "multiple_rows_returned" };
+  }
+
+  const item = list[0];
+  if (typeof item !== "object" || item === null) {
+    return { kind: "failure", reason: "malformed_item" };
+  }
+
+  const record = item as Record<string, unknown>;
+
+  const itemSymbol = record.symbol;
+  if (typeof itemSymbol !== "string" || itemSymbol !== input.symbol) {
+    return { kind: "failure", reason: "symbol_mismatch" };
+  }
+
+  const positionIdx = record.positionIdx;
+  if (typeof positionIdx !== "number" || !Number.isInteger(positionIdx) || positionIdx !== 0) {
+    return { kind: "failure", reason: "invalid_position_idx" };
+  }
+
+  const size = record.size;
+  const sizeClassification = typeof size === "string" ? classifyExactDecimalText(size) : undefined;
+  if (
+    sizeClassification === undefined ||
+    !sizeClassification.valid ||
+    (sizeClassification.negative && !sizeClassification.zero)
+  ) {
+    return { kind: "failure", reason: "invalid_size" };
+  }
+
+  // Exactly-zero size, with positionIdx already confirmed 0: a flat row.
+  // side/avgPrice/openTime are Bybit's documented empty/default values on
+  // such a row and are not read or validated here.
+  if (sizeClassification.zero) {
+    return { kind: "no_position" };
+  }
+
+  const side = record.side;
+  if (side !== "Buy" && side !== "Sell") {
+    return { kind: "failure", reason: "invalid_side" };
+  }
+
+  const avgPrice = record.avgPrice;
+  if (typeof avgPrice !== "string" || !isPositiveExactDecimalText(avgPrice)) {
+    return { kind: "failure", reason: "invalid_avg_price" };
+  }
+
+  const openTime = record.openTime;
+  if (typeof openTime !== "number" || !Number.isInteger(openTime) || openTime <= 0) {
+    return { kind: "failure", reason: "invalid_open_time" };
+  }
+
+  return {
+    kind: "position",
+    row: { symbol: itemSymbol, side, size: size as string, positionIdx: 0, avgPrice, openTime },
+  };
 }
 
 function readTickerLastPrice(response: unknown): string {

@@ -186,61 +186,70 @@ Two adapter-level additions, both additive and non-breaking to existing callers:
   returns `[]` for any malformed shape at all) — that fallback is appropriate for
   `readOpenPosition()`'s existing lenient legacy use, but reusing it here would let a
   genuinely malformed response silently masquerade as "no position," exactly the failure
-  mode this method exists to prevent. Validation, in order:
+  mode this method exists to prevent. This method is **total**: no branch of it may throw
+  (see the exact-decimal classification note below) — a typed adapter boundary that could
+  throw would defeat the whole point of returning a discriminated result. Validation, in
+  order:
   - `result` SHALL be present and be an object, and `result.list` SHALL be present and be
     an array — Bybit's documented `/v5/position/list` envelope shape, not a bare
     top-level list. A missing/non-object `result`, or a missing/non-array `result.list`,
     is a malformed-envelope failure.
-  - Each item in `result.list` SHALL be a non-null object — otherwise a malformed-item
-    failure.
-  - Each item's `symbol` SHALL be a string equal to the exact `symbol` this method was
-    called with — a missing, wrong-typed, or mismatched `symbol` is a failure. (A
-    symbol-scoped query is expected to only ever return rows for that symbol; a mismatch
-    means the response cannot be safely trusted, not that a different row should be
-    tried.)
-  - Each item's `positionIdx` SHALL be present, be an integer, and equal exactly `0` —
-    checked **on every item, regardless of `size`**. `positionIdx` is Bybit's position-mode
-    discriminator (one-way vs. hedge mode), not a size-dependent fact: a hedge-mode
-    account reports non-zero `positionIdx` values (`1`/`2`) on its per-side rows even when
-    those rows are flat (`size == 0`), so this check is never skipped merely because
-    `size` is zero. A missing `positionIdx`, a non-integer `positionIdx`, or any value
-    other than `0` (`1`, `2`, or anything else) is a hedge-row/unexpected-`positionIdx`
-    failure — on a zero-size item exactly as much as on a `size > 0` item.
-  - Each item's `size` SHALL be present and parse as valid, non-negative exact-decimal
-    text (reusing the existing exact-decimal parser from `src/domain/entryPackageApi.ts`,
-    extended to accept an exact-zero value, not only strictly-positive text as its
-    existing `isPositiveExactDecimalText` helper does). A missing `size` field, a `size`
-    that fails exact-decimal parsing (including non-finite text), or a `size` that parses
-    to a negative value is a failure — **never** treated as "no position." This is the
-    one rule that removes the earlier contradiction between "missing size is a failure"
-    and "size is excluded": those are disjoint outcomes of the *same* check — `size`
-    absent or unparseable always fails; `size` present and valid is then classified by
-    its parsed value.
-  - Only an item whose `size` parses to **exactly zero**, and whose `positionIdx` has
-    already passed the check above, excludes that item from further consideration as an
-    open position, and is not itself a failure. Bybit's documented flat-position row
-    carries empty/default values for a genuinely closed symbol (`side: ""`, default/empty
-    price fields, `openTime: 0`) — this method does **not** read or validate `side`,
-    `avgPrice`, or `openTime` on a valid zero-size row. `positionIdx` is the one exception
-    to that exemption: it is validated regardless of size (per above), while the three
-    remaining defaults are expected on a zero-size row and never cause a failure.
-  - For an item whose `size` parses to a value **greater than zero**, this method
-    additionally requires: `side` is exactly `"Buy"` or `"Sell"`; `avgPrice` is present
-    and parses as positive exact-decimal text; `openTime` is present and is a positive
-    integer (`positionIdx` was already required to be exactly `0` above, for every item).
-    Any violation here is a failure (missing-field, invalid-decimal, invalid-timestamp, or
-    zero/negative-price, as applicable) — this is the **only** place these three fields
-    are read or required; they are never required on a valid zero-size row.
-  - Among items whose `size` parses greater than zero (each already confirmed
-    `positionIdx == 0` by the check above): more than one such item is a
-    multiple-plausible-rows/ambiguous failure; exactly one is the candidate row.
+  - `result.category` SHALL be present, be a string, and equal exactly the `category` this
+    method was called with — a missing, wrong-typed, or mismatched `result.category` is a
+    category-mismatch failure. Bybit's `/v5/position/list` response echoes the queried
+    category at the `result` level; trusting a response whose echoed category disagrees
+    with the one actually requested would let a misrouted or stale response masquerade as
+    an answer for the intended instrument.
+  - **The list SHALL contain exactly one item.** A symbol-scoped, one-way-mode V1 query is
+    expected to return exactly one row for the queried instrument: Bybit's flat-position
+    placeholder row when there is no exposure, or the single live row when there is. An
+    **empty list is not trusted as "no position"** — it is a no-row-returned failure,
+    since an empty list is equally consistent with the symbol never having been queried
+    correctly, a wrong or stale filter having been applied, or a partial/truncated
+    response, and none of those may be silently read as a confirmed closed position.
+    **More than one item is a multiple-rows-returned failure**, checked before any
+    per-item validation — this is a cardinality failure, not something resolved by
+    filtering out zero-size rows first, so a flat row alongside a genuine live row, or two
+    flat rows, fails closed exactly like two live rows would.
+  - The single item SHALL be a non-null object — otherwise a malformed-item failure.
+  - The item's `symbol` SHALL be a string equal to the exact `symbol` this method was
+    called with — a missing, wrong-typed, or mismatched `symbol` is a failure.
+  - The item's `positionIdx` SHALL be present, be an integer, and equal exactly `0` —
+    checked **regardless of `size`**. `positionIdx` is Bybit's position-mode discriminator
+    (one-way vs. hedge mode), not a size-dependent fact: a hedge-mode account reports
+    non-zero `positionIdx` values (`1`/`2`) on its per-side rows even when those rows are
+    flat (`size == 0`), so this check is never skipped merely because `size` is zero. A
+    missing `positionIdx`, a non-integer `positionIdx`, or any value other than `0` (`1`,
+    `2`, or anything else) is a hedge-row/unexpected-`positionIdx` failure — on a zero-size
+    item exactly as much as on a `size > 0` item.
+  - The item's `size` SHALL be present and parse as valid, non-negative exact-decimal text.
+    Sign/zero classification of `size` is **total** (never throws): it is derived purely
+    from the text's sign character and digit content, not from the arithmetic,
+    exponent-range-bounded parser `src/domain/exactDecimal.ts` uses elsewhere — an
+    out-of-range exponent on an adversarial or malformed `size` value must fail this check
+    cleanly, not throw out of the adapter boundary. A missing `size` field, a `size` that
+    fails exact-decimal parsing (including non-finite text), or a `size` that parses to a
+    negative value is a failure — **never** treated as "no position."
+  - Only a `size` that parses to **exactly zero**, with `positionIdx` already confirmed
+    `0`, excludes the item from further consideration as an open position, and is not
+    itself a failure. Bybit's documented flat-position row carries empty/default values
+    for a genuinely closed symbol (`side: ""`, default/empty price fields, `openTime: 0`)
+    — this method does **not** read or validate `side`, `avgPrice`, or `openTime` on a
+    valid zero-size row. `positionIdx` is the one exception to that exemption: it is
+    validated regardless of size (per above), while the three remaining defaults are
+    expected on a zero-size row and never cause a failure. This is the resolved "no
+    position" outcome.
+  - For a `size` that parses to a value **greater than zero**, this method additionally
+    requires: `side` is exactly `"Buy"` or `"Sell"`; `avgPrice` is present and parses as
+    positive exact-decimal text; `openTime` is present and is a positive integer
+    (`positionIdx` was already required to be exactly `0` above). Any violation here is a
+    failure (missing-field, invalid-decimal, invalid-timestamp, or zero/negative-price, as
+    applicable) — this is the **only** place these three fields are read or required; they
+    are never required on a valid zero-size row. On success, this is the resolved single
+    structurally valid row (`symbol`, `side`, `size`, `positionIdx: 0`, `avgPrice`,
+    `openTime`).
   - Any transport error or timeout from the underlying `getOpenPositions` call is a
     transport failure.
-  - On success with no disqualifying condition: zero `size > 0` items (whether from an
-    empty `result.list` or from a `result.list` containing only valid zero-size items,
-    each already confirmed `positionIdx == 0`) returns "no position"; exactly one valid
-    `size > 0` item returns that single structurally valid row (`symbol`, `side`, `size`,
-    `positionIdx: 0`, `avgPrice`, `openTime`).
 
   This method does **not** know or check `record.desired_entry.side` — that is
   Runtime-trade-specific context the adapter boundary has no business holding.
@@ -255,11 +264,12 @@ Two adapter-level additions, both additive and non-breaking to existing callers:
 For a Bucket B record whose category gate passed:
 1. Call the Decision-4 adapter method with `{ category: record.exchange_category, symbol:
    record.exchange_symbol }`.
-2. Any typed adapter failure (transport, malformed envelope, malformed item, symbol
-   mismatch, missing/invalid/negative size, hedge row/unexpected `positionIdx` on any
-   item regardless of size, missing `side`/`avgPrice`/`openTime` on a size-positive row,
-   invalid decimal, invalid timestamp, zero/negative price, ambiguous rows) →
-   fail closed, `internal_error`, HTTP `500`. Never `position_open: false` on a query
+2. Any typed adapter failure (transport, malformed envelope, category mismatch,
+   no-row-returned, multiple-rows-returned, malformed item, symbol mismatch,
+   missing/invalid/negative size, hedge row/unexpected `positionIdx` regardless of size,
+   missing `side`/`avgPrice`/`openTime` on a size-positive row, invalid decimal, invalid
+   timestamp, zero/negative price) → fail closed, `internal_error`, HTTP `500`. Never
+   `position_open: false` on a query
    failure — mirrors `entry-package-execution`'s existing "a query failure is never
    treated as confirming evidence" discipline.
 3. "No position" result → `200 { position_open: false, first_fill_at_ms: null,
@@ -292,7 +302,7 @@ this route's actually-reachable codes (no request body, so `malformed_json` and
 | 422 | `validation_failed` | Path parameter invalid (reused as-is, identical to the entry-package PUT route) | Empty or malformed-percent-encoded `strategy_instance_id`/`trade_cycle_id` |
 | 422 | `unknown_trade_cycle_binding` **(new)** | No correlation record exists for the supplied pair | Decision 1 |
 | 422 | `unsupported_exchange_scope` **(new)** | Record's `exchange_category` is not `linear` | Decision 3 |
-| 500 | `internal_error` | Reused as-is: every state or exchange condition that cannot be safely resolved | Bucket C (`pending_create`, `create_failed`, `unknown`); any Decision-4 adapter failure (transport, malformed envelope, malformed item, symbol mismatch, missing/invalid/negative size, hedge row/unexpected `positionIdx` on any item regardless of size, missing `side`/`avgPrice`/`openTime` on a size-positive row, invalid decimal, invalid timestamp, zero/negative price, ambiguous rows); Decision-5 side mismatch |
+| 500 | `internal_error` | Reused as-is: every state or exchange condition that cannot be safely resolved | Bucket C (`pending_create`, `create_failed`, `unknown`); any Decision-4 adapter failure (transport, malformed envelope, category mismatch, no-row-returned, multiple-rows-returned, malformed item, symbol mismatch, missing/invalid/negative size, hedge row/unexpected `positionIdx` regardless of size, missing `side`/`avgPrice`/`openTime` on a size-positive row, invalid decimal, invalid timestamp, zero/negative price); Decision-5 side mismatch |
 
 Rationale for exactly two new codes, not more: `unknown_trade_cycle_binding` and
 `unsupported_exchange_scope` are both deterministically knowable **before** any exchange
@@ -396,8 +406,8 @@ Bybit answer for that binding's symbol actually proves once asked, and what it d
   Accepted: unlike category (known purely from the record, before any exchange call), the
   side mismatch can only be observed via the live query, so it shares the same
   "live-exchange-state-derived uncertainty" character as the other `internal_error`
-  branches (hedge row, ambiguous rows) rather than the "known in advance from the record"
-  character of `unsupported_exchange_scope`.
+  branches (hedge row, no-row-returned, multiple-rows-returned) rather than the "known in
+  advance from the record" character of `unsupported_exchange_scope`.
 - [V1 attribution (Decision 9) depends on an external, ABI-unenforced operating
   precondition — no overlapping manual/other-strategy exposure on the same
   `exchange_symbol` under the configured credentials] → Accepted as a documented V1

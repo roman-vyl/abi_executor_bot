@@ -123,6 +123,7 @@ function positionResponse(): unknown {
   return {
     retCode: 0,
     result: {
+      category: "linear",
       list: [{ symbol: "BTCUSDT", side: "Buy", size: "0.001", positionIdx: 0, avgPrice: "100000", openTime: 111 }],
     },
   };

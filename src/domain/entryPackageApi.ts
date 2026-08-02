@@ -1,5 +1,3 @@
-import { compareDecimal } from "./exactDecimal.js";
-
 export type DesiredEntryDto = {
   side: "long" | "short";
   source_plan_bar_open_time_ms: number;
@@ -256,23 +254,43 @@ export function isSupportedJsonContentType(value: string | string[] | undefined)
   );
 }
 
+export type ExactDecimalClassification = {
+  valid: boolean;
+  negative: boolean;
+  zero: boolean;
+};
+
+// Total classification (never throws, unlike exactDecimal.ts's arithmetic
+// parser) used wherever a caller needs sign/zero facts about exact-decimal
+// text without doing arithmetic on it — notably bybitAdapter.ts's typed
+// query boundary, which must never throw on adversarial or malformed field
+// values (design.md Decision 4).
+export function classifyExactDecimalText(value: string): ExactDecimalClassification {
+  const result = analyzeExactDecimalText(value);
+  return {
+    valid: result.valid,
+    negative: result.negative,
+    zero: result.valid && !result.hasNonZeroDigit,
+  };
+}
+
 export function isExactDecimalText(value: string): boolean {
-  return analyzeExactDecimalText(value).valid;
+  return classifyExactDecimalText(value).valid;
 }
 
 export function isPositiveExactDecimalText(value: string): boolean {
-  const result = analyzeExactDecimalText(value);
-  return result.valid && result.positive;
+  const result = classifyExactDecimalText(value);
+  return result.valid && !result.negative && !result.zero;
 }
 
 // Same grammar as isExactDecimalText, additionally rejecting a negative
 // value while still accepting exact zero (e.g. "0", "-0") — used by the
 // Bybit position-size check, which must treat a missing/unparseable/negative
 // size as a failure but a genuine zero as a valid flat row (design.md
-// Decision 4). Reuses the existing parser/comparator rather than adding a
-// second decimal grammar.
+// Decision 4).
 export function isNonNegativeExactDecimalText(value: string): boolean {
-  return isExactDecimalText(value) && compareDecimal(value, "0") >= 0;
+  const result = classifyExactDecimalText(value);
+  return result.valid && (!result.negative || result.zero);
 }
 
 function validateDesiredEntry(
@@ -450,12 +468,22 @@ function joinJsonPointer(base: string, key: string): string {
   return base === "/" ? `/${escaped}` : `${base}/${escaped}`;
 }
 
+// Total (never throws) sign/magnitude classification of the transport
+// exact-decimal grammar. Deliberately does not use exactDecimal.ts's
+// BigInt-backed parser here: that parser enforces a MAX_ABS_EXPONENT bound
+// for arithmetic and throws outside it, but sign/zero classification needs
+// no arithmetic — whether the coefficient digits are all zero, and whether
+// a leading '-' is present, is knowable from the text alone regardless of
+// how large the exponent is. A typed adapter boundary (bybitAdapter.ts's
+// evaluatePositionQueryResponse) must never throw, so this classification
+// must be total too.
 function analyzeExactDecimalText(value: string): {
   valid: boolean;
-  positive: boolean;
+  negative: boolean;
+  hasNonZeroDigit: boolean;
 } {
   if (value.length === 0) {
-    return { valid: false, positive: false };
+    return { valid: false, negative: false, hasNonZeroDigit: false };
   }
 
   let index = 0;
@@ -466,10 +494,10 @@ function analyzeExactDecimalText(value: string): {
   }
 
   let digitCount = 0;
-  let coefficientHasNonZeroDigit = false;
+  let hasNonZeroDigit = false;
 
   while (index < value.length && isDigit(value[index])) {
-    coefficientHasNonZeroDigit ||= value[index] !== "0";
+    hasNonZeroDigit ||= value[index] !== "0";
     digitCount += 1;
     index += 1;
   }
@@ -477,14 +505,14 @@ function analyzeExactDecimalText(value: string): {
   if (value[index] === ".") {
     index += 1;
     while (index < value.length && isDigit(value[index])) {
-      coefficientHasNonZeroDigit ||= value[index] !== "0";
+      hasNonZeroDigit ||= value[index] !== "0";
       digitCount += 1;
       index += 1;
     }
   }
 
   if (digitCount === 0) {
-    return { valid: false, positive: false };
+    return { valid: false, negative: false, hasNonZeroDigit: false };
   }
 
   if (value[index] === "e" || value[index] === "E") {
@@ -498,18 +526,15 @@ function analyzeExactDecimalText(value: string): {
       index += 1;
     }
     if (index === exponentStart) {
-      return { valid: false, positive: false };
+      return { valid: false, negative: false, hasNonZeroDigit: false };
     }
   }
 
   if (index !== value.length) {
-    return { valid: false, positive: false };
+    return { valid: false, negative: false, hasNonZeroDigit: false };
   }
 
-  return {
-    valid: true,
-    positive: !negative && coefficientHasNonZeroDigit,
-  };
+  return { valid: true, negative, hasNonZeroDigit };
 }
 
 function isDigit(value: string | undefined): boolean {

@@ -81,7 +81,7 @@ export class FakeBybitAdapter implements BybitAdapter {
     } catch {
       return { kind: "failure", reason: "transport_error" };
     }
-    return evaluatePositionQueryResponse(response, input.symbol);
+    return evaluatePositionQueryResponse(response, input);
   }
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
