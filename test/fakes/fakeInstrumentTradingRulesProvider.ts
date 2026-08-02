@@ -4,6 +4,8 @@ import type {
 } from "../../src/exchange/instrumentTradingRulesProvider.js";
 
 export class FakeInstrumentTradingRulesProvider implements InstrumentTradingRulesProvider {
+  // Recorded as "category:symbol", mirroring the production cache key, so
+  // tests can assert both which symbol and which category a lookup used.
   readonly getRulesCalls: string[] = [];
   rulesBySymbol = new Map<string, InstrumentTradingRules>();
   defaultRules: InstrumentTradingRules = {
@@ -13,8 +15,8 @@ export class FakeInstrumentTradingRulesProvider implements InstrumentTradingRule
   };
   failure: Error | undefined;
 
-  async getRules(symbol: string): Promise<InstrumentTradingRules> {
-    this.getRulesCalls.push(symbol);
+  async getRules(symbol: string, category: "linear" | "spot"): Promise<InstrumentTradingRules> {
+    this.getRulesCalls.push(`${category}:${symbol}`);
 
     if (this.failure !== undefined) {
       throw this.failure;

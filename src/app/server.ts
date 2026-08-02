@@ -4,6 +4,7 @@ import { KeyedMutex } from "../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../config/config.js";
 import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCorrelationRepository.js";
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
+import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
@@ -17,19 +18,6 @@ import { handleSignalRoutes } from "../routes/signalRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 export function startServer(config: AbiConfig): void {
-  // entryPackageReady only reflects correlation-store replay health
-  // (design.md §13) — it does NOT mean entry-package execution can reach a
-  // real Bybit account. Every CREATE/REPLACE will still fail closed via the
-  // throwing resolveSymbol below until abi-exchange-instrument-identity-v1
-  // lands. Logged once at startup so this gap is visible operationally, not
-  // just in code comments and docs.
-  console.warn(
-    "entry-package execution: production Bybit calls are blocked pending the " +
-      "abi-exchange-instrument-identity-v1 prerequisite (no ExchangeSymbolResolver " +
-      "yet). entryPackageReady=true only means the correlation store replayed " +
-      "successfully, not that CREATE/REPLACE requests can succeed.",
-  );
-
   const journal = new Journal(config.journalPath);
   const bybit = new RestBybitAdapter(config);
 
@@ -38,6 +26,7 @@ export function startServer(config: AbiConfig): void {
   const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
   const mutex = new KeyedMutex();
   const readiness = new EntryPackageReadiness();
+  const exchangeInstrumentResolver = new BybitExchangeInstrumentResolver();
 
   const applicationService = new EntryPackageApplicationService({
     config,
@@ -45,16 +34,7 @@ export function startServer(config: AbiConfig): void {
     correlationRepository,
     positionSizeCalculator,
     mutex,
-    // Blocked on the prerequisite change abi-exchange-instrument-identity-v1
-    // (design.md Decision 9; tasks.md 0.1/5.3): no production
-    // ExchangeSymbolResolver exists yet in this repository, so this change
-    // cannot make a real Bybit call for any ticker yet. Failing closed here
-    // keeps that boundary honest rather than guessing a normalization rule.
-    resolveSymbol: () => {
-      throw new Error(
-        "entry-package symbol resolution is blocked on the abi-exchange-instrument-identity-v1 prerequisite",
-      );
-    },
+    exchangeInstrumentResolver,
   });
 
   // Correlation-store replay runs asynchronously and must not delay

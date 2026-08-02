@@ -13,6 +13,7 @@ test("min-qty-only case: min order qty already satisfies notional", async () => 
 
   const qty = await calculator.calculate("BTCUSDT.P", "61000", "60000", "1", {
     resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "linear",
   });
 
   assert.equal(qty, "0.01");
@@ -25,6 +26,7 @@ test("min-notional-driven case: notional requirement exceeds min order qty", asy
 
   const qty = await calculator.calculate("BTCUSDT.P", "61000", "60000", "1", {
     resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "linear",
   });
 
   // ceil(100/61000 / 0.001) * 0.001 = ceil(1.639...) * 0.001 = 0.002
@@ -40,6 +42,7 @@ test("exact-decimal division correctness avoids binary floating point", async ()
   // and rounded up to the step, not silently truncated by float imprecision.
   const qty = await calculator.calculate("BTCUSDT.P", "3", "2.9", "1", {
     resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "linear",
   });
 
   // ceil((5/3) / 0.001) * 0.001 = ceil(1666.67) * 0.001 = 1.667
@@ -52,7 +55,10 @@ test("rules-unavailable failure propagates and fails only the current calculatio
   const calculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
 
   await assert.rejects(
-    calculator.calculate("BTCUSDT.P", "61000", "60000", "1", { resolvedSymbol: "BTCUSDT" }),
+    calculator.calculate("BTCUSDT.P", "61000", "60000", "1", {
+      resolvedSymbol: "BTCUSDT",
+      resolvedCategory: "linear",
+    }),
     /instruments-info unavailable/,
   );
 });
@@ -64,12 +70,26 @@ test("risk_multiplier is accepted and threaded through without affecting the V1 
 
   const withRiskOne = await calculator.calculate("BTCUSDT.P", "61000", "60000", "1", {
     resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "linear",
   });
   const withRiskFive = await calculator.calculate("BTCUSDT.P", "61000", "60000", "5", {
     resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "linear",
   });
 
   assert.equal(withRiskOne, withRiskFive);
+});
+
+test("resolvedCategory is passed through to the trading-rules lookup", async () => {
+  const rulesProvider = new FakeInstrumentTradingRulesProvider();
+  const calculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
+
+  await calculator.calculate("BTCUSDT", "61000", "60000", "1", {
+    resolvedSymbol: "BTCUSDT",
+    resolvedCategory: "spot",
+  });
+
+  assert.deepEqual(rulesProvider.getRulesCalls, ["spot:BTCUSDT"]);
 });
 
 test("no hardcoded quantity literal appears in the application service source", () => {

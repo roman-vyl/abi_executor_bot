@@ -6,6 +6,10 @@ export type PositionSizeContext = {
   // ticker (below) is the raw Runtime ticker, kept for port/provenance
   // parity — instrument-rules lookups always use the resolved symbol.
   resolvedSymbol: string;
+  // The resolved (or, for an existing binding, stored) exchange instrument
+  // identity's category — required so the trading-rules lookup queries the
+  // correct Bybit category instead of a global default.
+  resolvedCategory: "linear" | "spot";
 };
 
 export interface PositionSizeCalculator {
@@ -42,7 +46,7 @@ export class FixedMinimumPositionSizeCalculator implements PositionSizeCalculato
     // through the port but does not yet vary this formula (design.md §8).
     void riskMultiplier;
 
-    const rules = await this.rulesProvider.getRules(context.resolvedSymbol);
+    const rules = await this.rulesProvider.getRules(context.resolvedSymbol, context.resolvedCategory);
 
     const qtyByMin = ceilToStep(rules.minOrderQty, rules.qtyStep);
     const qtyByNotional = ceilRatioToStep(rules.minNotionalValue, plannedEntryPrice, rules.qtyStep);

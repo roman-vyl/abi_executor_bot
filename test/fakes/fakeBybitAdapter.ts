@@ -24,6 +24,8 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
   readonly getOrderHistoryCalls: BybitGetOrderHistoryPayload[] = [];
+  // Recorded as "category:symbol" so tests can assert the exact category a
+  // call used, not just the symbol.
   readonly getInstrumentInfoCalls: string[] = [];
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
@@ -91,8 +93,8 @@ export class FakeBybitAdapter implements BybitAdapter {
     return this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
   }
 
-  async getInstrumentInfo(symbol: string): Promise<unknown> {
-    this.getInstrumentInfoCalls.push(symbol);
+  async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
+    this.getInstrumentInfoCalls.push(`${category}:${symbol}`);
     return this.instrumentInfoResponse;
   }
 

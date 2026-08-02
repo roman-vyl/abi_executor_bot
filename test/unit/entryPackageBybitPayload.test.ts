@@ -9,6 +9,7 @@ test("long package produces Buy side, falls_to trigger, and always includes take
   const config = makeTestConfig();
   const payloads = mapEntryPackageToBybit(config, {
     symbol: "BTCUSDT",
+    category: "linear",
     side: "long",
     plannedEntryPrice: "100000",
     initialStopPrice: "99000",
@@ -34,6 +35,7 @@ test("short package produces Sell side and rises_to trigger", () => {
   const config = makeTestConfig();
   const payloads = mapEntryPackageToBybit(config, {
     symbol: "BTCUSDT",
+    category: "linear",
     side: "short",
     plannedEntryPrice: "100000",
     initialStopPrice: "101000",
@@ -45,6 +47,26 @@ test("short package produces Sell side and rises_to trigger", () => {
   assert.equal(payloads.createEntryOrder.side, "Sell");
   assert.equal(payloads.createEntryOrder.triggerDirection, 1);
   assert.equal(payloads.createEntryOrder.takeProfit, "97000");
+});
+
+test("category comes from the input identity, not global config, across all five payloads", () => {
+  const config = makeTestConfig({ bybitCategory: "linear" });
+  const payloads = mapEntryPackageToBybit(config, {
+    symbol: "BTCUSDT",
+    category: "spot",
+    side: "long",
+    plannedEntryPrice: "100000",
+    initialStopPrice: "99000",
+    initialTakePrice: "103000",
+    qty: "0.001",
+    orderLinkId: "abi-ep-0000000000000000abcd",
+  });
+
+  assert.equal(payloads.createEntryOrder.category, "spot");
+  assert.equal(payloads.amendEntryOrder.category, "spot");
+  assert.equal(payloads.cancelEntryOrder.category, "spot");
+  assert.equal(payloads.getEntryOrder.category, "spot");
+  assert.equal(payloads.getEntryOrderHistory.category, "spot");
 });
 
 test("mapExecutionPlanToBybit is not referenced by the entry-package payload builder module", () => {

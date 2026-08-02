@@ -17,6 +17,7 @@ import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIden
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
+import type { ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { amendEntryOrder, cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
@@ -28,14 +29,11 @@ export type EntryPackageApplicationServiceDeps = {
   correlationRepository: EntryPackageCorrelationRepository;
   positionSizeCalculator: PositionSizeCalculator;
   mutex: KeyedMutex;
-  // Resolves a Runtime ticker to a Bybit symbol. Structurally identical to
-  // the prerequisite change's ExchangeSymbolResolver.resolve(ticker), but
-  // this change does not define or implement that resolver in production
-  // (design.md Decision 9, non-goal). The composition root must supply a
-  // real implementation once abi-exchange-instrument-identity-v1 lands;
-  // until then this dependency is the one remaining piece blocking real
-  // Bybit calls for any ticker (tasks.md 0.1 / 5.3).
-  resolveSymbol: (ticker: string) => string;
+  // Resolves a Runtime ticker into its Bybit exchange instrument identity
+  // (symbol, category, product). Only ever called for a new generation
+  // (createOrder) — every other branch reuses the identity already stored
+  // on the correlation record instead of re-resolving.
+  exchangeInstrumentResolver: ExchangeInstrumentResolver;
 };
 
 // Orchestrates APPLY / REPLACE / CANCEL / confirm-absent for a validated
@@ -141,7 +139,7 @@ export class EntryPackageApplicationService {
     priorRecord: EntryPackageExecutionRecord | undefined,
     generation: number,
   ): Promise<EntryPackageHttpResult> {
-    const resolvedSymbol = this.deps.resolveSymbol(command.ticker);
+    const identity = this.deps.exchangeInstrumentResolver.resolve(command.ticker);
     const orderLinkId = buildEntryPackageOrderLinkId(
       command.strategyInstanceId,
       command.tradeCycleId,
@@ -156,7 +154,7 @@ export class EntryPackageApplicationService {
         desiredEntry.planned_entry_price,
         desiredEntry.initial_stop_price,
         command.riskMultiplier,
-        { resolvedSymbol },
+        { resolvedSymbol: identity.symbol, resolvedCategory: identity.category },
       );
     } catch {
       return internalErrorResult();
@@ -175,7 +173,8 @@ export class EntryPackageApplicationService {
       strategy_instance_id: command.strategyInstanceId,
       trade_cycle_id: command.tradeCycleId,
       ticker: command.ticker,
-      exchange_symbol: resolvedSymbol,
+      exchange_symbol: identity.symbol,
+      exchange_category: identity.category,
       created_at: priorRecord?.created_at ?? now,
       updated_at: now,
       desired_entry: desiredEntry,
@@ -195,7 +194,8 @@ export class EntryPackageApplicationService {
     await this.deps.correlationRepository.save(provisional);
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
-      symbol: resolvedSymbol,
+      symbol: identity.symbol,
+      category: identity.category,
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -240,10 +240,12 @@ export class EntryPackageApplicationService {
     record: EntryPackageExecutionRecord,
   ): Promise<EntryPackageHttpResult> {
     // Amend targets the SAME physical order as record.order_link_id, which
-    // was created under record.exchange_symbol — re-resolving the ticker
-    // here could target a different instrument than the live order
-    // actually lives under (e.g. if resolution changes over time).
+    // was created under record.exchange_symbol/exchange_category —
+    // re-resolving the ticker here could target a different instrument than
+    // the live order actually lives under (e.g. if resolution changes over
+    // time).
     const symbol = record.exchange_symbol;
+    const category = record.exchange_category;
 
     let calculatedQuantity: string;
     try {
@@ -252,7 +254,7 @@ export class EntryPackageApplicationService {
         desiredEntry.planned_entry_price,
         desiredEntry.initial_stop_price,
         command.riskMultiplier,
-        { resolvedSymbol: symbol },
+        { resolvedSymbol: symbol, resolvedCategory: asCategory(category) },
       );
     } catch {
       return internalErrorResult();
@@ -277,6 +279,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol,
+      category: asCategory(category),
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -319,7 +322,8 @@ export class EntryPackageApplicationService {
     }
 
     const symbol = record.exchange_symbol;
-    const cancelPayload = { category: this.deps.config.bybitCategory, symbol, orderLinkId };
+    const category = record.exchange_category;
+    const cancelPayload = { category, symbol, orderLinkId };
 
     await this.deps.correlationRepository.save({
       ...record,
@@ -352,8 +356,8 @@ export class EntryPackageApplicationService {
     // positions simultaneously.
     const confirmation = await confirmEntryPackageCancelled({
       bybit: this.deps.bybit,
-      getEntryOrderPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
-      getEntryOrderHistoryPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
+      getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" },
+      getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" },
       desiredQty: record.calculated_quantity ?? "0",
     });
 
@@ -404,6 +408,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: record.exchange_symbol,
+      category: asCategory(record.exchange_category),
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -485,6 +490,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: updated.exchange_symbol,
+      category: asCategory(updated.exchange_category),
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -523,7 +529,8 @@ export class EntryPackageApplicationService {
     }
 
     const symbol = record.exchange_symbol;
-    const cancelPayload = { category: this.deps.config.bybitCategory, symbol, orderLinkId };
+    const category = record.exchange_category;
+    const cancelPayload = { category, symbol, orderLinkId };
 
     await this.deps.correlationRepository.save({
       ...record,
@@ -545,8 +552,8 @@ export class EntryPackageApplicationService {
 
     const confirmation = await confirmEntryPackageCancelled({
       bybit: this.deps.bybit,
-      getEntryOrderPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
-      getEntryOrderHistoryPayload: { category: this.deps.config.bybitCategory, symbol, orderLinkId, limit: "1" },
+      getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" },
+      getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" },
       desiredQty: record.calculated_quantity ?? "0",
     });
 
@@ -668,6 +675,7 @@ export class EntryPackageApplicationService {
       trade_cycle_id: command.tradeCycleId,
       ticker: command.ticker,
       exchange_symbol: "",
+      exchange_category: "",
       created_at: now,
       updated_at: now,
       desired_entry: null,
@@ -754,10 +762,19 @@ function closeBindingFrom(
     generation: record.generation,
     role: "entry",
     exchange_symbol: record.exchange_symbol,
+    exchange_category: record.exchange_category,
     started_at: record.current_binding_started_at ?? record.updated_at,
     ended_at: endedAt,
     end_reason: endReason,
   };
+}
+
+// record.exchange_category is stored as a plain string (matching
+// record.exchange_symbol's shape) but is only ever written from a resolved
+// ExchangeInstrumentIdentity's category, so it is always "linear" or
+// "spot" for any binding that has actually gone through createOrder.
+function asCategory(value: string): "linear" | "spot" {
+  return value === "spot" ? "spot" : "linear";
 }
 
 function readBybitOrderId(response: unknown): string | null {

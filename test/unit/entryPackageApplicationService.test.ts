@@ -8,6 +8,8 @@ import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../src/config/config.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../src/domain/entryPackageApi.js";
+import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
+import type { ExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
 import { EntryPackageApplicationService } from "../../src/services/entryPackage/entryPackageApplicationService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
@@ -149,6 +151,35 @@ test("successful CANCEL returns absent after durable confirmation", async () => 
   });
 });
 
+test("a spot ticker (no .P suffix) uses category=spot end-to-end, never the global bybitCategory default", async () => {
+  await withService(async ({ service, bybit, repo, rulesProvider }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand({ ticker: "BTCUSDT" }));
+
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.exchange_symbol, "BTCUSDT");
+    assert.equal(record?.exchange_category, "spot");
+    assert.equal(bybit.createOrderCalls[0]?.category, "spot");
+    assert.deepEqual(rulesProvider.getRulesCalls, ["spot:BTCUSDT"]);
+    for (const call of bybit.getOrderByLinkIdCalls) {
+      assert.equal(call.category, "spot");
+    }
+
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    const cancelResult = await service.apply(makeCommand({ ticker: "BTCUSDT", desiredEntry: null }));
+
+    assertAbsent(cancelResult);
+    assert.equal(bybit.cancelOrderCalls[0]?.category, "spot");
+    for (const call of bybit.getOrderByLinkIdCalls) {
+      assert.equal(call.category, "spot");
+    }
+    for (const call of bybit.getOrderHistoryCalls) {
+      assert.equal(call.category, "spot");
+    }
+  });
+});
+
 test("already-absent CANCEL makes no exchange call", async () => {
   await withService(async ({ service, bybit }) => {
     const result = await service.apply(makeCommand({ desiredEntry: null }));
@@ -240,14 +271,18 @@ test("a risk_multiplier-only change on an otherwise-identical repeat PUT is dura
   });
 });
 
-test("REPLACE via amend reuses the order's recorded exchange_symbol rather than re-resolving the ticker", async () => {
-  const resolvedSymbols: string[] = [];
-  const resolveSymbol = (ticker: string): string => {
-    // Simulates resolution drifting between calls (e.g. a contract
-    // rollover) — amend must not pick up the new value mid-flight.
-    const symbol = `${ticker.replace(/\.P$/, "")}-${resolvedSymbols.length}`;
-    resolvedSymbols.push(symbol);
-    return symbol;
+test("REPLACE via amend reuses the order's recorded exchange_symbol/exchange_category rather than re-resolving the ticker", async () => {
+  let resolveCount = 0;
+  const driftingResolver: ExchangeInstrumentResolver = {
+    resolve(ticker: string) {
+      // Simulates resolution drifting between calls (e.g. a contract
+      // rollover, or a category reclassification) — amend must not pick up
+      // a new value mid-flight.
+      const symbol = `${ticker.replace(/\.P$/, "")}-${resolveCount}`;
+      const category = resolveCount === 0 ? "linear" : "spot";
+      resolveCount += 1;
+      return { ticker, symbol, category, product: category === "linear" ? "perpetual" : "spot" };
+    },
   };
 
   await withService(
@@ -255,7 +290,9 @@ test("REPLACE via amend reuses the order's recorded exchange_symbol rather than 
       bybit.orderByLinkIdResponse = orderList([liveOrder()]);
       await service.apply(makeCommand());
       const originalSymbol = repo.get("instance-1", "cycle-1")?.exchange_symbol;
+      const originalCategory = repo.get("instance-1", "cycle-1")?.exchange_category;
       assert.ok(originalSymbol);
+      assert.equal(originalCategory, "linear");
 
       rulesProvider.getRulesCalls.length = 0;
       bybit.orderByLinkIdResponse = orderList([
@@ -273,11 +310,13 @@ test("REPLACE via amend reuses the order's recorded exchange_symbol rather than 
 
       assertApplied(result, "0.001");
       assert.equal(bybit.amendOrderCalls[0]?.symbol, originalSymbol);
-      assert.deepEqual(rulesProvider.getRulesCalls, [originalSymbol]);
+      assert.equal(bybit.amendOrderCalls[0]?.category, originalCategory);
+      assert.deepEqual(rulesProvider.getRulesCalls, [`${originalCategory}:${originalSymbol}`]);
       assert.equal(repo.get("instance-1", "cycle-1")?.exchange_symbol, originalSymbol);
+      assert.equal(repo.get("instance-1", "cycle-1")?.exchange_category, originalCategory);
     },
     {},
-    resolveSymbol,
+    driftingResolver,
   );
 });
 
@@ -498,7 +537,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 async function withService(
   fn: (ctx: Ctx) => Promise<void>,
   configOverrides: Partial<AbiConfig> = {},
-  resolveSymbol: (ticker: string) => string = (ticker) => ticker.replace(/\.P$/, ""),
+  exchangeInstrumentResolver: ExchangeInstrumentResolver = new BybitExchangeInstrumentResolver(),
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "abi-entry-package-app-service-"));
   try {
@@ -522,7 +561,7 @@ async function withService(
       correlationRepository: repo,
       positionSizeCalculator,
       mutex,
-      resolveSymbol,
+      exchangeInstrumentResolver,
     });
 
     await fn({ service, bybit, repo, rulesProvider });

@@ -44,7 +44,7 @@ export interface BybitAdapter {
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
-  getInstrumentInfo(symbol: string): Promise<unknown>;
+  getInstrumentInfo(category: string, symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
@@ -159,9 +159,9 @@ export class RestBybitAdapter implements BybitAdapter {
 
   // Public, unauthenticated — unlike every other bybitAdapter.ts method, this
   // one is intentionally not signed (design.md §7).
-  async getInstrumentInfo(symbol: string): Promise<unknown> {
+  async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
     const params = new URLSearchParams({
-      category: this.config.bybitCategory,
+      category,
       symbol,
     });
 
@@ -308,8 +308,8 @@ export class StubBybitAdapter implements BybitAdapter {
     return stub("getOrderHistory", payload);
   }
 
-  async getInstrumentInfo(symbol: string): Promise<unknown> {
-    return stub("getInstrumentInfo", { symbol });
+  async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
+    return stub("getInstrumentInfo", { category, symbol });
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {

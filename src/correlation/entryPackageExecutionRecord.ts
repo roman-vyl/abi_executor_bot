@@ -33,6 +33,7 @@ export type BindingHistoryEntry = {
   generation: number;
   role: "entry";
   exchange_symbol: string;
+  exchange_category: string;
   started_at: string;
   ended_at: string | null;
   end_reason: BindingHistoryEndReason;
@@ -43,6 +44,7 @@ export type EntryPackageExecutionRecord = {
   trade_cycle_id: string;
   ticker: string;
   exchange_symbol: string;
+  exchange_category: string;
   created_at: string;
   updated_at: string;
   desired_entry: DesiredEntryDto | null;
@@ -112,6 +114,7 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     isNonEmptyString(record.trade_cycle_id) &&
     isNonEmptyString(record.ticker) &&
     typeof record.exchange_symbol === "string" &&
+    typeof record.exchange_category === "string" &&
     isNonEmptyString(record.created_at) &&
     isNonEmptyString(record.updated_at) &&
     (record.desired_entry === null || isValidDesiredEntry(record.desired_entry)) &&
@@ -175,6 +178,7 @@ function isValidBindingHistoryEntry(value: unknown): value is BindingHistoryEntr
     typeof entry.generation === "number" &&
     entry.role === "entry" &&
     typeof entry.exchange_symbol === "string" &&
+    typeof entry.exchange_category === "string" &&
     typeof entry.started_at === "string" &&
     (entry.ended_at === null || typeof entry.ended_at === "string") &&
     (entry.end_reason === null ||

@@ -149,6 +149,9 @@ function mapSide(side: "long" | "short"): BybitOrderSide {
 export type EntryPackageOrderInput = {
   // Already-resolved Bybit symbol — never a raw Runtime ticker.
   symbol: string;
+  // The resolved (or, for an existing binding, stored) exchange instrument
+  // identity's category — never the global Bybit category configuration.
+  category: "linear" | "spot";
   side: "long" | "short";
   plannedEntryPrice: string;
   initialStopPrice: string;
@@ -181,7 +184,7 @@ export function mapEntryPackageToBybit(
   const triggerDirection = mapTriggerDirection(semantics.triggerDirection);
 
   const createEntryOrder: BybitCreateOrderPayload = {
-    category: config.bybitCategory,
+    category: input.category,
     symbol: input.symbol,
     side: semantics.exchangeSide,
     orderType: "Market",
@@ -200,7 +203,7 @@ export function mapEntryPackageToBybit(
   };
 
   const amendEntryOrder: BybitAmendOrderPayload = {
-    category: config.bybitCategory,
+    category: input.category,
     symbol: input.symbol,
     orderLinkId: input.orderLinkId,
     triggerPrice: input.plannedEntryPrice,
@@ -217,18 +220,18 @@ export function mapEntryPackageToBybit(
     createEntryOrder,
     amendEntryOrder,
     cancelEntryOrder: {
-      category: config.bybitCategory,
+      category: input.category,
       symbol: input.symbol,
       orderLinkId: input.orderLinkId,
     },
     getEntryOrder: {
-      category: config.bybitCategory,
+      category: input.category,
       symbol: input.symbol,
       orderLinkId: input.orderLinkId,
       limit: "1",
     },
     getEntryOrderHistory: {
-      category: config.bybitCategory,
+      category: input.category,
       symbol: input.symbol,
       orderLinkId: input.orderLinkId,
       limit: "1",

@@ -8,7 +8,7 @@ export type InstrumentTradingRules = {
 };
 
 export interface InstrumentTradingRulesProvider {
-  getRules(symbol: string): Promise<InstrumentTradingRules>;
+  getRules(symbol: string, category: "linear" | "spot"): Promise<InstrumentTradingRules>;
 }
 
 type CacheEntry = {
@@ -30,16 +30,17 @@ export class BybitInstrumentTradingRulesProvider implements InstrumentTradingRul
     this.ttlMs = config.instrumentRulesCacheTtlMs;
   }
 
-  async getRules(symbol: string): Promise<InstrumentTradingRules> {
+  async getRules(symbol: string, category: "linear" | "spot"): Promise<InstrumentTradingRules> {
+    const cacheKey = `${category}:${symbol}`;
     const now = Date.now();
-    const cached = this.cache.get(symbol);
+    const cached = this.cache.get(cacheKey);
     if (cached !== undefined && cached.expiresAt > now) {
       return cached.rules;
     }
 
-    const response = await this.bybit.getInstrumentInfo(symbol);
+    const response = await this.bybit.getInstrumentInfo(category, symbol);
     const rules = parseInstrumentTradingRules(response, symbol);
-    this.cache.set(symbol, { rules, expiresAt: now + this.ttlMs });
+    this.cache.set(cacheKey, { rules, expiresAt: now + this.ttlMs });
     return rules;
   }
 }
