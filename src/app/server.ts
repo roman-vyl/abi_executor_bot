@@ -8,12 +8,14 @@ import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentR
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
+import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import { writeJson } from "./http.js";
 import { Journal } from "../journal/journal.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
 import { handleIntentRoutes } from "../routes/intentRoutes.js";
+import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
 import { handleSignalRoutes } from "../routes/signalRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
@@ -35,6 +37,11 @@ export function startServer(config: AbiConfig): void {
     positionSizeCalculator,
     mutex,
     exchangeInstrumentResolver,
+  });
+
+  const openPositionResolutionService = new OpenPositionResolutionService({
+    correlationRepository,
+    bybit,
   });
 
   // Correlation-store replay runs asynchronously and must not delay
@@ -66,6 +73,17 @@ export function startServer(config: AbiConfig): void {
         request,
         response,
         applicationService,
+        isReady: () => readiness.isReady,
+      })
+    ) {
+      return;
+    }
+
+    if (
+      await handleOpenPositionRoutes({
+        request,
+        response,
+        resolutionService: openPositionResolutionService,
         isReady: () => readiness.isReady,
       })
     ) {

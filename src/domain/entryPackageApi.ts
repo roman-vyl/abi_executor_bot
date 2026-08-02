@@ -1,3 +1,5 @@
+import { compareDecimal } from "./exactDecimal.js";
+
 export type DesiredEntryDto = {
   side: "long" | "short";
   source_plan_bar_open_time_ms: number;
@@ -261,6 +263,16 @@ export function isExactDecimalText(value: string): boolean {
 export function isPositiveExactDecimalText(value: string): boolean {
   const result = analyzeExactDecimalText(value);
   return result.valid && result.positive;
+}
+
+// Same grammar as isExactDecimalText, additionally rejecting a negative
+// value while still accepting exact zero (e.g. "0", "-0") — used by the
+// Bybit position-size check, which must treat a missing/unparseable/negative
+// size as a failure but a genuine zero as a valid flat row (design.md
+// Decision 4). Reuses the existing parser/comparator rather than adding a
+// second decimal grammar.
+export function isNonNegativeExactDecimalText(value: string): boolean {
+  return isExactDecimalText(value) && compareDecimal(value, "0") >= 0;
 }
 
 function validateDesiredEntry(

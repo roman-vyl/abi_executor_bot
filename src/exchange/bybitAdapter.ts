@@ -1,6 +1,8 @@
 import { createHmac } from "node:crypto";
 
 import type { AbiConfig } from "../config/config.js";
+import { compareDecimal } from "../domain/exactDecimal.js";
+import { isNonNegativeExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
 import type {
   BybitAmendOrderPayload,
   BybitCancelOrderPayload,
@@ -18,7 +20,40 @@ export type BybitPosition = {
   side: BybitOrderSide | "None";
   size: string;
   positionIdx?: number;
+  avgPrice?: string;
+  openTime?: number;
 };
+
+export type PositionQueryInput = {
+  category: string;
+  symbol: string;
+};
+
+export type ValidatedOpenPositionRow = {
+  symbol: string;
+  side: BybitOrderSide;
+  size: string;
+  positionIdx: 0;
+  avgPrice: string;
+  openTime: number;
+};
+
+export type PositionQueryFailureReason =
+  | "transport_error"
+  | "malformed_envelope"
+  | "malformed_item"
+  | "symbol_mismatch"
+  | "invalid_position_idx"
+  | "invalid_size"
+  | "invalid_side"
+  | "invalid_avg_price"
+  | "invalid_open_time"
+  | "ambiguous_rows";
+
+export type PositionQueryResult =
+  | { kind: "no_position" }
+  | { kind: "position"; row: ValidatedOpenPositionRow }
+  | { kind: "failure"; reason: PositionQueryFailureReason };
 
 export type PlaceMarketOrderInput = {
   symbol: string;
@@ -38,6 +73,7 @@ export interface BybitAdapter {
   getWalletBalance(input?: GetWalletBalanceInput): Promise<unknown>;
   getActiveOrders(input?: GetActiveOrdersInput): Promise<unknown>;
   getOpenPositions(input?: GetOpenPositionsInput): Promise<unknown>;
+  queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult>;
   createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown>;
   amendOrder(payload: BybitAmendOrderPayload): Promise<unknown>;
   cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown>;
@@ -61,6 +97,7 @@ export type GetActiveOrdersInput = {
 };
 
 export type GetOpenPositionsInput = {
+  category?: string;
   symbol?: string;
   settleCoin?: string;
 };
@@ -105,12 +142,27 @@ export class RestBybitAdapter implements BybitAdapter {
 
   async getOpenPositions(input: GetOpenPositionsInput = {}): Promise<unknown> {
     const params = new URLSearchParams({
-      category: this.config.bybitCategory,
+      category: input.category ?? this.config.bybitCategory,
     });
 
     setSymbolOrSettleCoin(params, input.symbol, input.settleCoin ?? this.config.bybitSettleCoin);
 
     return this.signedGet("/v5/position/list", params);
+  }
+
+  // Explicit { category, symbol } in, a structurally valid one-way row, "no
+  // position", or a typed failure out — never `position_open: false` on a
+  // query failure. Does not know or check any trade-specific desired side;
+  // that plausibility check belongs to the caller (design.md Decision 4/5).
+  async queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult> {
+    let response: unknown;
+    try {
+      response = await this.getOpenPositions({ category: input.category, symbol: input.symbol });
+    } catch {
+      return { kind: "failure", reason: "transport_error" };
+    }
+
+    return evaluatePositionQueryResponse(response, input.symbol);
   }
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
@@ -284,6 +336,10 @@ export class StubBybitAdapter implements BybitAdapter {
     return stub("getOpenPositions", input);
   }
 
+  async queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult> {
+    return stub("queryPositionForInstrument", input);
+  }
+
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
     return stub("createOrder", payload);
   }
@@ -356,6 +412,8 @@ function readOpenPosition(response: unknown): BybitPosition | null {
     const side = readRecordString(record, "side");
     const size = readRecordString(record, "size");
     const positionIdx = readRecordNumber(record, "positionIdx");
+    const avgPrice = readRecordString(record, "avgPrice");
+    const openTime = readRecordNumber(record, "openTime");
 
     if (symbol === "" || size === "" || Number(size) <= 0) {
       continue;
@@ -370,10 +428,88 @@ function readOpenPosition(response: unknown): BybitPosition | null {
       side,
       size,
       positionIdx,
+      avgPrice: avgPrice === "" ? undefined : avgPrice,
+      openTime,
     };
   }
 
   return null;
+}
+
+// Strictly validates Bybit's documented /v5/position/list envelope for
+// queryPositionForInstrument (design.md Decision 4). Deliberately does not
+// reuse readBybitList()'s lenient fallback-to-[] behavior, which would let a
+// genuinely malformed response silently masquerade as "no position" — the
+// exact failure mode this function exists to prevent.
+export function evaluatePositionQueryResponse(response: unknown, symbol: string): PositionQueryResult {
+  if (typeof response !== "object" || response === null || !("result" in response)) {
+    return { kind: "failure", reason: "malformed_envelope" };
+  }
+
+  const result = (response as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null || !("list" in result)) {
+    return { kind: "failure", reason: "malformed_envelope" };
+  }
+
+  const list = (result as Record<string, unknown>).list;
+  if (!Array.isArray(list)) {
+    return { kind: "failure", reason: "malformed_envelope" };
+  }
+
+  let candidate: ValidatedOpenPositionRow | undefined;
+
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) {
+      return { kind: "failure", reason: "malformed_item" };
+    }
+
+    const record = item as Record<string, unknown>;
+
+    const itemSymbol = record.symbol;
+    if (typeof itemSymbol !== "string" || itemSymbol !== symbol) {
+      return { kind: "failure", reason: "symbol_mismatch" };
+    }
+
+    const positionIdx = record.positionIdx;
+    if (typeof positionIdx !== "number" || !Number.isInteger(positionIdx) || positionIdx !== 0) {
+      return { kind: "failure", reason: "invalid_position_idx" };
+    }
+
+    const size = record.size;
+    if (typeof size !== "string" || !isNonNegativeExactDecimalText(size)) {
+      return { kind: "failure", reason: "invalid_size" };
+    }
+
+    // Exactly-zero size, with positionIdx already confirmed 0: a flat row.
+    // side/avgPrice/openTime are Bybit's documented empty/default values on
+    // such a row and are not read or validated here.
+    if (compareDecimal(size, "0") === 0) {
+      continue;
+    }
+
+    const side = record.side;
+    if (side !== "Buy" && side !== "Sell") {
+      return { kind: "failure", reason: "invalid_side" };
+    }
+
+    const avgPrice = record.avgPrice;
+    if (typeof avgPrice !== "string" || !isPositiveExactDecimalText(avgPrice)) {
+      return { kind: "failure", reason: "invalid_avg_price" };
+    }
+
+    const openTime = record.openTime;
+    if (typeof openTime !== "number" || !Number.isInteger(openTime) || openTime <= 0) {
+      return { kind: "failure", reason: "invalid_open_time" };
+    }
+
+    if (candidate !== undefined) {
+      return { kind: "failure", reason: "ambiguous_rows" };
+    }
+
+    candidate = { symbol: itemSymbol, side, size, positionIdx: 0, avgPrice, openTime };
+  }
+
+  return candidate !== undefined ? { kind: "position", row: candidate } : { kind: "no_position" };
 }
 
 function readTickerLastPrice(response: unknown): string {

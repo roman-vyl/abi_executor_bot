@@ -5,8 +5,11 @@ import type {
   GetOpenPositionsInput,
   GetWalletBalanceInput,
   PlaceMarketOrderInput,
+  PositionQueryInput,
+  PositionQueryResult,
   SetTradingStopInput,
 } from "../../src/exchange/bybitAdapter.js";
+import { evaluatePositionQueryResponse } from "../../src/exchange/bybitAdapter.js";
 import type {
   BybitAmendOrderPayload,
   BybitCancelAllOrdersPayload,
@@ -29,10 +32,15 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly getInstrumentInfoCalls: string[] = [];
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
+  readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponse: unknown = { retCode: 0, result: { list: [] } };
+  // When set, getOpenPositions (and therefore queryPositionForInstrument)
+  // throws this instead of returning openPositionsResponse, simulating a
+  // transport failure or timeout.
+  openPositionsError: Error | null = null;
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
   orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
   instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
@@ -59,8 +67,21 @@ export class FakeBybitAdapter implements BybitAdapter {
   }
 
   async getOpenPositions(input: GetOpenPositionsInput = {}): Promise<unknown> {
-    void input;
+    this.getOpenPositionsCalls.push(input);
+    if (this.openPositionsError !== null) {
+      throw this.openPositionsError;
+    }
     return this.openPositionsResponse;
+  }
+
+  async queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult> {
+    let response: unknown;
+    try {
+      response = await this.getOpenPositions({ category: input.category, symbol: input.symbol });
+    } catch {
+      return { kind: "failure", reason: "transport_error" };
+    }
+    return evaluatePositionQueryResponse(response, input.symbol);
   }
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
