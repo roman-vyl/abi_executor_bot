@@ -31,6 +31,17 @@ architectural basis, not copied wholesale. Confirmed by reading the current code
   "Ambiguous confirmation fails safely", "A query failure is never treated as confirming
   evidence"). This design follows that same precedent rather than inventing a different
   failure style for this new route.
+- `create_failed` exists in the `EntryPackageExecutionStatus` type but is never assigned
+  anywhere in `entryPackageApplicationService.ts` today — every place a create attempt's
+  outcome cannot be cleanly confirmed stores `"unknown"` instead, by explicit design, so a
+  retry still resends rather than the record being permanently written off
+  (`entryPackageApplicationService.ts:214-224`, comment: "'unknown', not a definitive
+  'create_failed', so a later retry still resends"). `create_failed` is reserved for a
+  possible future clean-rejection distinction that does not exist in production today.
+- Bybit's `/v5/position/list` response is account+symbol scoped under the configured API
+  credentials — it carries no Runtime `trade_cycle_id`, `strategy_instance_id`, or ABI
+  order-binding identity of any kind. No Bybit endpoint can answer "was this specific
+  exposure caused by this specific ABI-created order."
 
 ## Goals / Non-Goals
 
@@ -69,7 +80,7 @@ pair it hasn't already registered via the entry-package PUT route; a missing rec
 means Runtime asked prematurely (a genuine client-side sequencing bug) or ABI's durable
 state diverged from Runtime's — both are conditions Runtime needs to investigate, not a
 fact about the exchange. This maps to the new `unknown_trade_cycle_binding` code (Decision
-4), HTTP `422`, never HTTP `404` and never a `200` closed-position body — the client
+6), HTTP `422`, never HTTP `404` and never a `200` closed-position body — the client
 contract already documented for this capability's own consumer (Runtime) explicitly
 forbids reading `404` as "no position" (`docs/OPEN_POSITION_LOOKUP_EXPLORE.md:122-123`),
 and returning `200 { position_open: false, ... }` here would actively hide a real
@@ -119,10 +130,15 @@ terminal-without-fill.
   resend/reconfirm machinery on a repeat PUT (`docs/OPEN_POSITION_LOOKUP_EXPLORE.md` §2,
   "Retrying an ambiguous attempt reuses the same identity") — a passive, single-shot read
   from this route has no equivalent resend capability and must not guess.
-- `create_failed` — the last create attempt's failure was not necessarily a clean,
-  confirmed absence (`entry-package-execution`'s "An attempt is not resent while its true
-  exchange state is merely unclear" scenario is exactly this case); the order may still
-  exist under a binding this record does not yet durably own.
+- `create_failed` — reserved in `EntryPackageExecutionStatus` for a possible future
+  clean-rejection distinction; current production code never assigns it (Context above)
+  — every ambiguous or unconfirmed create outcome is stored as `unknown` instead, and no
+  code path in `entryPackageApplicationService.ts` today can put a record into this
+  status. This bucket classifies `create_failed` here only conservatively and for
+  forward compatibility: if a future code path ever does emit it, its exchange state
+  would be exactly as unconfirmed as `unknown`'s state is today, for the same reason
+  `unknown` belongs in this bucket. Open-position resolution does not otherwise support
+  or rely on `create_failed` having any specific meaning.
 - `unknown` — ABI's own bounded confirmation logic already failed to classify this
   record's state; a single unauthenticated-context read query inherits the same
   ambiguity, not new certainty.
@@ -161,30 +177,59 @@ Two adapter-level additions, both additive and non-breaking to existing callers:
   `record.exchange_category`, never relying on the global default (closes gap G2).
 - A new adapter method, conceptually `queryPositionForInstrument({ category, symbol })`,
   wraps `getOpenPositions({ category, symbol })` and performs **all raw-shape and
-  structural validation**, independent of any specific trade cycle's expected side:
-  - Response is a list; each item is an object — otherwise malformed-list/item failure.
-  - Required fields (`symbol`, `side`, `size`, `positionIdx`, `avgPrice`, `openTime`) are
-    present on any row being considered — otherwise missing-fields failure.
-  - `avgPrice` parses as positive exact-decimal text using the same parser already used
-    for entry-package price fields (`src/domain/entryPackageApi.ts`'s exact-decimal
-    validator, reused, not reimplemented) — otherwise invalid-decimal or
-    zero/negative-price failure.
-  - `openTime` parses as a positive integer timestamp — otherwise invalid-timestamp
+  structural validation**, independent of any specific trade cycle's expected side. It
+  validates Bybit's actual documented response envelope itself and does **not** reuse
+  `readBybitList()`'s existing lenient behavior (`bybitAdapter.ts:393-405`, which silently
+  returns `[]` for any malformed shape at all) — that fallback is appropriate for
+  `readOpenPosition()`'s existing lenient legacy use, but reusing it here would let a
+  genuinely malformed response silently masquerade as "no position," exactly the failure
+  mode this method exists to prevent. Validation, in order:
+  - `result` SHALL be present and be an object, and `result.list` SHALL be present and be
+    an array — Bybit's documented `/v5/position/list` envelope shape, not a bare
+    top-level list. A missing/non-object `result`, or a missing/non-array `result.list`,
+    is a malformed-envelope failure.
+  - Each item in `result.list` SHALL be a non-null object — otherwise a malformed-item
     failure.
-  - Rows with `size == 0` (or absent/zero after parsing) are excluded from consideration,
-    **not** a failure — if every row is excluded (or the list is empty), the method
-    returns "no position" (not an error), which Decision 5 turns into a legitimate closed
-    answer.
-  - Among rows with `size > 0`: exactly one row with `positionIdx == 0` is the expected
-    shape for V1's one-way scope. Zero such rows alongside any nonzero-`positionIdx` row
-    with `size > 0` is a hedge-row failure (unexpected `positionIdx`). More than one
-    `size > 0` row (regardless of `positionIdx`) is a multiple-plausible-rows/ambiguous
-    failure.
+  - Each item's `symbol` SHALL be a string equal to the exact `symbol` this method was
+    called with — a missing, wrong-typed, or mismatched `symbol` is a failure. (A
+    symbol-scoped query is expected to only ever return rows for that symbol; a mismatch
+    means the response cannot be safely trusted, not that a different row should be
+    tried.)
+  - Each item's `size` SHALL be present and parse as valid, non-negative exact-decimal
+    text (reusing the existing exact-decimal parser from `src/domain/entryPackageApi.ts`,
+    extended to accept an exact-zero value, not only strictly-positive text as its
+    existing `isPositiveExactDecimalText` helper does). A missing `size` field, a `size`
+    that fails exact-decimal parsing (including non-finite text), or a `size` that parses
+    to a negative value is a failure — **never** treated as "no position." This is the
+    one rule that removes the earlier contradiction between "missing size is a failure"
+    and "size is excluded": those are disjoint outcomes of the *same* check — `size`
+    absent or unparseable always fails; `size` present and valid is then classified by
+    its parsed value.
+  - Only an item whose `size` parses to **exactly zero** excludes that item from further
+    consideration as an open position, and is not itself a failure. Bybit's documented
+    flat-position row carries empty/default values for a genuinely closed symbol
+    (`side: ""`, default/empty price fields, `openTime: 0`) — this method does **not**
+    read or validate `side`, `positionIdx`, `avgPrice`, or `openTime` on a valid
+    zero-size row at all; those defaults are expected and never cause a failure.
+  - For an item whose `size` parses to a value **greater than zero**, this method
+    additionally requires: `side` is exactly `"Buy"` or `"Sell"`; `positionIdx` is
+    present and is an integer; `avgPrice` is present and parses as positive exact-decimal
+    text; `openTime` is present and is a positive integer. Any violation here is a
+    failure (missing-field, invalid-decimal, invalid-timestamp, or zero/negative-price,
+    as applicable) — this is the **only** place any of these four fields are read or
+    required; they are never required on a valid zero-size row.
+  - Among items whose `size` parses greater than zero: exactly one item with
+    `positionIdx == 0` is the expected shape for V1's one-way scope. Zero such items
+    alongside any `size > 0` item with a non-zero `positionIdx` is a hedge-row failure
+    (unexpected `positionIdx`). More than one `size > 0` item (regardless of
+    `positionIdx`) is a multiple-plausible-rows/ambiguous failure.
   - Any transport error or timeout from the underlying `getOpenPositions` call is a
     transport failure.
-  - On success with no disqualifying condition, returns the single structurally valid row
-    (`symbol`, `side`, `size`, `positionIdx: 0`, `avgPrice`, `openTime`) or an explicit
-    "no position" result.
+  - On success with no disqualifying condition: zero `size > 0` items (whether from an
+    empty `result.list` or from a `result.list` containing only valid zero-size items)
+    returns "no position"; exactly one valid `size > 0`, `positionIdx == 0` item returns
+    that single structurally valid row (`symbol`, `side`, `size`, `positionIdx: 0`,
+    `avgPrice`, `openTime`).
 
   This method does **not** know or check `record.desired_entry.side` — that is
   Runtime-trade-specific context the adapter boundary has no business holding.
@@ -199,11 +244,12 @@ Two adapter-level additions, both additive and non-breaking to existing callers:
 For a Bucket B record whose category gate passed:
 1. Call the Decision-4 adapter method with `{ category: record.exchange_category, symbol:
    record.exchange_symbol }`.
-2. Any typed adapter failure (transport, malformed, missing fields, invalid decimal,
-   invalid timestamp, zero/negative price, hedge row, ambiguous rows) → fail closed,
-   `internal_error`, HTTP `500`. Never `position_open: false` on a query failure — mirrors
-   `entry-package-execution`'s existing "a query failure is never treated as confirming
-   evidence" discipline.
+2. Any typed adapter failure (transport, malformed envelope, malformed item, symbol
+   mismatch, missing/invalid/negative size, missing fields on a size-positive row,
+   invalid decimal, invalid timestamp, zero/negative price, hedge row, ambiguous rows) →
+   fail closed, `internal_error`, HTTP `500`. Never `position_open: false` on a query
+   failure — mirrors `entry-package-execution`'s existing "a query failure is never
+   treated as confirming evidence" discipline.
 3. "No position" result → `200 { position_open: false, first_fill_at_ms: null,
    average_entry_price: null }`. A partial fill (`size > 0`, however small relative to the
    intended order quantity) already counts as open; there is no minimum-fill threshold and
@@ -211,7 +257,8 @@ For a Bucket B record whose category gate passed:
 4. A structurally valid row → compare `row.side` (mapped `Buy`/`Sell`) against
    `record.desired_entry.side` (`long`/`short`). Mismatch → fail closed, `internal_error`,
    HTTP `500` (wrong-side failure; this is exchange-observed state, not a deterministic
-   record-level scope fact, so it does not get its own 422 code — see Decision 6).
+   record-level scope fact, so it does not get its own 422 code — see Decision 6). See
+   Decision 9 for exactly what this side-match check does and does not prove.
 5. Match → `200 { position_open: true, first_fill_at_ms: row.openTime,
    average_entry_price: row.avgPrice }`, with `average_entry_price` passed through as the
    exact JSON string already validated by the Decision-4 adapter boundary — never
@@ -233,7 +280,7 @@ this route's actually-reachable codes (no request body, so `malformed_json` and
 | 422 | `validation_failed` | Path parameter invalid (reused as-is, identical to the entry-package PUT route) | Empty or malformed-percent-encoded `strategy_instance_id`/`trade_cycle_id` |
 | 422 | `unknown_trade_cycle_binding` **(new)** | No correlation record exists for the supplied pair | Decision 1 |
 | 422 | `unsupported_exchange_scope` **(new)** | Record's `exchange_category` is not `linear` | Decision 3 |
-| 500 | `internal_error` | Reused as-is: every state or exchange condition that cannot be safely resolved | Bucket C (`pending_create`, `create_failed`, `unknown`); any Decision-4 adapter failure (transport, malformed, missing fields, invalid decimal, invalid timestamp, zero/negative price, hedge row, ambiguous rows); Decision-5 side mismatch |
+| 500 | `internal_error` | Reused as-is: every state or exchange condition that cannot be safely resolved | Bucket C (`pending_create`, `create_failed`, `unknown`); any Decision-4 adapter failure (transport, malformed envelope, malformed item, symbol mismatch, missing/invalid/negative size, missing fields on a size-positive row, invalid decimal, invalid timestamp, zero/negative price, hedge row, ambiguous rows); Decision-5 side mismatch |
 
 Rationale for exactly two new codes, not more: `unknown_trade_cycle_binding` and
 `unsupported_exchange_scope` are both deterministically knowable **before** any exchange
@@ -282,6 +329,40 @@ readiness failure maps to the same safe `internal_error` response the PUT route 
 returns for the same condition (`src/routes/entryPackageRoutes.ts`'s `!isReady()` branch),
 reused as-is rather than inventing a distinct not-ready code for this route.
 
+### 9. V1 attribution boundary: Bybit's response is account+symbol scoped, not cycle-scoped — an explicit operating precondition, not a proof
+
+Bybit's `/v5/position/list` reports the account-level current position for the queried
+`category`+`symbol` under the configured API credentials (Context above). It carries no
+Runtime `trade_cycle_id`, no `strategy_instance_id`, and no ABI order-binding identity —
+Bybit has no concept of any of these. This is a hard external constraint, not an adapter
+gap: no Bybit endpoint can answer "does this specific ABI-created order account for the
+current exposure on this symbol."
+
+Consequently, Decision 5's category/symbol query plus side-match against
+`record.desired_entry.side` is a **plausibility check against the resolved record's own
+declared intent**, not positive proof that the reported exposure was caused by the order
+this specific record is bound to. If a second position on the same `exchange_symbol`
+existed under the same credentials — placed manually, by another strategy instance, or by
+any process outside this record's own binding — this route cannot distinguish it from the
+position this record's own order created; both look identical as "the account's current
+position for this symbol" to Bybit.
+
+**V1 operating precondition (external, not enforced by ABI):** for the API credentials
+configured for a given ABI deployment, no manual or other-strategy-owned exposure may
+exist concurrently on the same `exchange_symbol` a resolved record uses. Under that
+precondition, the symbol query plus side match (Decision 5) is an adequate practical
+attribution for V1's supported use — one Runtime, resolving one strategy instance's own
+entry per symbol at a time, via that record's own binding. This change does **not**
+enforce, detect, or verify the precondition — doing so would require an
+`account_id`/subaccount model, cross-instance or cross-record resolution, or a new index
+keyed on symbol across records, none of which this change introduces or designs.
+Multi-strategy or shared-account attribution is explicitly out of scope for V1.
+
+This qualifies, and does not weaken, every other decision above: the composite lookup
+(Decision 1) and status classification (Decision 2) remain exactly how ABI decides
+*which* record's binding to ask about; this decision only makes explicit what the live
+Bybit answer for that binding's symbol actually proves once asked, and what it does not.
+
 ## Risks / Trade-offs
 
 - [Bucket C fails closed for `pending_create`/`create_failed`/`unknown` even though a live
@@ -302,3 +383,12 @@ reused as-is rather than inventing a distinct not-ready code for this route.
   "live-exchange-state-derived uncertainty" character as the other `internal_error`
   branches (hedge row, ambiguous rows) rather than the "known in advance from the record"
   character of `unsupported_exchange_scope`.
+- [V1 attribution (Decision 9) depends on an external, ABI-unenforced operating
+  precondition — no overlapping manual/other-strategy exposure on the same
+  `exchange_symbol` under the configured credentials] → Accepted as a documented V1
+  limitation rather than solved: enforcing it would require an account/subaccount model
+  and cross-record resolution explicitly out of scope for this change. If the precondition
+  is violated, this route can report `position_open: true` for exposure this record's own
+  order did not create — mitigated only by the precondition being operationally
+  straightforward to hold in the currently supported single-strategy-per-symbol V1
+  deployment shape, not by any mechanism in this change.

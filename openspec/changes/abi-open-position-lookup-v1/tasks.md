@@ -36,8 +36,12 @@
       / spec "Record status is classified into durably-closed, live-query-admissible, and
       unresolved buckets": `absent`/`terminal_unfilled` → closed directly, no exchange
       call; `applied`/`pending_replace`/`pending_cancel` → proceed to live query;
-      `pending_create`/`create_failed`/`unknown` → `internal_error`, no exchange call. Do
-      not read `early_execution_observation` anywhere in this service.
+      `pending_create`/`create_failed`/`unknown` → `internal_error`, no exchange call.
+      `create_failed` is currently unproduced by `entryPackageApplicationService.ts`
+      (design.md Context/Decision 2) — classify it defensively for forward
+      compatibility, but do not build or test around any specific assumed meaning for
+      it beyond "unresolved, fail closed". Do not read `early_execution_observation`
+      anywhere in this service.
 - [ ] 2.4 Implement the linear-category gate before any exchange call for
       live-query-admissible records: non-`linear` `record.exchange_category` →
       `unsupported_exchange_scope` (design.md Decision 3).
@@ -47,15 +51,23 @@
 - [ ] 2.6 Implement the side-match check: map the returned row's `side` (`Buy`/`Sell`) to
       `record.desired_entry.side` (`long`/`short`); mismatch → `internal_error`
       (design.md Decision 5, spec "Live position side must match the record's desired
-      entry side").
+      entry side"). This check validates plausibility against the record's own declared
+      intent under the V1 attribution precondition (design.md Decision 9) — it is not a
+      cross-check against any Bybit order/execution identity.
 - [ ] 2.7 Implement final response assembly: no live row (or all rows `size == 0`) →
       `position_open: false`, both facts `null`; matching row → `position_open: true`,
       `first_fill_at_ms` = row `openTime`, `average_entry_price` = row `avgPrice`
-      unmodified (design.md Decision 5, Decision 9's mapping requirement). A partial fill
-      (`size > 0`, any amount) already counts as open — no full-execution wait.
-- [ ] 2.8 Map every adapter-layer failure from section 3 (transport, malformed, missing
-      fields, invalid decimal, invalid timestamp, zero/negative price, ambiguous rows,
-      hedge row) to `internal_error`, never to `position_open: false`.
+      unmodified (design.md Decision 5). A partial fill (`size > 0`, any amount) already
+      counts as open — no full-execution wait.
+- [ ] 2.8 Map every adapter-layer failure from section 3 (transport, malformed envelope,
+      malformed item, symbol mismatch, missing/invalid/negative size, missing fields on
+      a size-positive row, invalid decimal, invalid timestamp, zero/negative price,
+      ambiguous rows, hedge row) to `internal_error`, never to `position_open: false`.
+- [ ] 2.9 Add a short module-level comment on the resolution service documenting the V1
+      attribution/operating precondition (design.md Decision 9): correct attribution
+      depends on no overlapping manual/other-strategy exposure existing on the same
+      `exchange_symbol` under the deployment's configured API credentials; this is not
+      detected, enforced, or verified in code.
 
 ## 3. Typed Bybit position query and mapping
 
@@ -74,16 +86,31 @@
       on `BybitAdapter`/`RestBybitAdapter`) that calls `getOpenPositions({ category,
       symbol })` with the explicit category from 3.1 and performs all raw-shape
       validation from design.md Decision 4 / spec "The raw Bybit position response is
-      strictly validated before being trusted": non-list/non-object response or item;
-      missing `symbol`/`side`/`size`/`positionIdx`/`avgPrice`/`openTime` on a considered
-      row; invalid exact-decimal `avgPrice` (reuse the existing exact-decimal parser from
-      `src/domain/entryPackageApi.ts`, do not reimplement); zero/negative `avgPrice` on a
-      `size > 0` row; non-positive-integer `openTime`; more than one `size > 0` row; a
-      `size > 0` row with non-zero `positionIdx` and no valid `positionIdx == 0` row.
-      Rows with `size == 0` are excluded, not a failure. Returns a discriminated result:
-      a single structurally valid row, "no position", or a typed failure — this method
-      does not know or check `record.desired_entry.side` (design.md Decision 4, explicit
-      boundary).
+      strictly validated before being trusted". This method validates the actual
+      response envelope itself (`result` is an object, `result.list` is an array) and
+      does **not** reuse `readBybitList()`'s lenient fallback-to-`[]` behavior
+      (`bybitAdapter.ts:393-405`), since that would let a malformed envelope silently
+      read as "no position". In order: malformed envelope (missing/non-object `result`,
+      missing/non-array `result.list`) → failure; non-object list item → failure; item
+      `symbol` missing, not a string, or not equal to the exact requested `symbol` →
+      failure; item `size` missing, not valid exact-decimal text, non-finite, or negative
+      → failure (**never** "no position" — this is the exact case that removes the prior
+      contradiction between "missing size fails" and "size is excluded": those are
+      disjoint outcomes of parsing the same field); item `size` parsing to **exactly
+      zero** → excluded from consideration, and `side`/`positionIdx`/`avgPrice`/
+      `openTime` are **not** read or validated on that item at all (Bybit's flat-position
+      row carries empty/default values for these on a closed symbol); item `size`
+      parsing **greater than zero** → additionally require `side` exactly `Buy`/`Sell`,
+      `positionIdx` present and an integer, `avgPrice` present and valid positive
+      exact-decimal text (reuse the existing exact-decimal parser from
+      `src/domain/entryPackageApi.ts`, extended to accept a zero value for the `size`
+      check above; do not reimplement), `openTime` present and a positive integer — any
+      violation is a failure; more than one `size > 0` item → ambiguous failure; a
+      `size > 0` item with non-zero `positionIdx` and no valid `positionIdx == 0` item →
+      hedge-row failure. Returns a discriminated result: a single structurally valid row,
+      "no position" (zero `size > 0` items, whether from an empty list or all-zero-size
+      items), or a typed failure — this method does not know or check
+      `record.desired_entry.side` (design.md Decision 4, explicit boundary).
 - [ ] 3.4 Add a typed error/result type for 3.3's failure branches so the application
       service (2.8) can map each to `internal_error` without inspecting adapter
       internals.
@@ -123,7 +150,11 @@
       `docs/openapi/abi-entry-package-api-v1.json`), covering the path parameters, the
       closed success DTO with its cross-field invariant, and the four documented error
       responses from spec `abi-open-position-lookup-api` — no internal application types,
-      record-state names, or exchange adapter shapes.
+      record-state names, or exchange adapter shapes. Note the V1 attribution operating
+      precondition (design.md Decision 9) in the operation description in plain,
+      external-contract terms (no manual/other-strategy exposure overlapping the same
+      symbol under the deployment's credentials), without exposing internal record-state
+      or adapter mechanics.
 
 ## 7. Unit tests
 
@@ -135,9 +166,14 @@
       closed via no live row, closed via all-`size==0` rows.
 - [ ] 7.4 Unit test the typed Bybit query (3.3) directly against constructed raw
       response fixtures for every validation branch in design.md Decision 4: malformed
-      list/item, missing fields, invalid decimal, invalid timestamp, zero/negative price,
-      zero size (not a failure), multiple plausible rows, unexpected side shape,
-      unexpected `positionIdx`, and the "no position" empty-list case.
+      envelope (missing `result`, `result.list` missing or not an array), non-object list
+      item, symbol mismatch (item `symbol` absent/wrong-typed/not equal to the requested
+      symbol), missing `size`, non-exact-decimal or non-finite `size`, negative `size`,
+      a valid exact-zero `size` row with empty/default `side`/`avgPrice`/`openTime`
+      (asserted as **not** a failure and those fields **not** validated), a `size > 0`
+      row missing or with invalid `side`/`positionIdx`/`avgPrice`/`openTime`
+      individually, multiple plausible `size > 0` rows, unexpected non-zero
+      `positionIdx` on the only `size > 0` row, and the "no position" empty-list case.
 - [ ] 7.5 Unit test the route matcher (4.1) for valid paths, missing/empty segments, and
       malformed percent-encoding, mirroring the existing `matchEntryPackageRoute` test
       coverage style.
@@ -173,8 +209,11 @@
       record) returns `unsupported_exchange_scope` without invoking the fake Bybit
       backend.
 - [ ] 9.6 Integration test exchange-derived failures against the fake backend: simulated
-      timeout, malformed response body, wrong side, hedge-mode row (non-zero
-      `positionIdx`) — each returns `internal_error`.
+      timeout, malformed envelope (`result`/`result.list` missing or wrong-shaped),
+      symbol-mismatched row, missing/invalid/negative `size`, malformed response body,
+      wrong side, hedge-mode row (non-zero `positionIdx`) — each returns
+      `internal_error`. Include a case with a valid zero-size row carrying empty/default
+      `side`/`avgPrice`/`openTime` and confirm it resolves as closed, not a failure.
 - [ ] 9.7 Integration test the missing-record case end-to-end: a pair with no correlation
       record returns `unknown_trade_cycle_binding` without invoking the fake Bybit
       backend.

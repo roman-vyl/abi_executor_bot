@@ -17,6 +17,13 @@ that performs the direct composite lookup and a live Bybit query, and returns no
 PUT flow. The already-implemented Runtime client uses an older instance-only path and
 field names and needs its own coordinated change, which is out of scope here.
 
+Bybit's position response is scoped to the queried `category`+`symbol` under the
+configured API credentials — it carries no Runtime or ABI binding identity, so this route
+attributes a live position to the resolved record via symbol and side matching under an
+explicit V1 operating precondition (no overlapping manual or other-strategy exposure on
+the same symbol under those credentials), not via any cross-check Bybit itself provides
+(see design.md).
+
 ## What Changes
 
 - Add `GET /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position`:
@@ -47,8 +54,10 @@ any record-selection or record-cardinality logic; any notion of a "current trade
 pointer; any new persisted state or repository schema change; any change to the
 entry-package PUT flow, `EntryPackageExecutionRecord`'s stored fields, or
 `entry-package-execution` behavior; `base_timeframe` or `entry_bar_open_time_ms`
-computation (Runtime owns `base_timeframe` and performs this on its own side); and any
-Runtime-side implementation. The Runtime client (`abi-open-position-lookup-client` in the
+computation (Runtime owns `base_timeframe` and performs this on its own side); any
+`account_id`, subaccount, or cross-instance/cross-record attribution model (V1 relies on
+the documented operating precondition above instead, not on new persistence or indexing);
+and any Runtime-side implementation. The Runtime client (`abi-open-position-lookup-client` in the
 `strategy_runtime` repo) currently calls an instance-only path with different response
 field names and requires a separate, coordinated change once this ABI-side contract is
 agreed.
