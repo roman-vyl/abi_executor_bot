@@ -27,23 +27,44 @@ semantics of the instrument.
 - **THEN** ABI resolves `{ ticker: "ETHUSDT.P", symbol: "ETHUSDT", category: "linear",
   product: "perpetual" }`
 
-### Requirement: A trailing `.P` suffix, and only a trailing suffix, selects linear/perpetual
-ABI SHALL recognize `.P` as the perpetual marker only when it is the exact trailing
-characters of the ticker, stripping it to produce `symbol`. A ticker that does not end in
-`.P` SHALL resolve to `category: spot`, `product: spot`, with `symbol` equal to the
-ticker unchanged.
+### Requirement: The ticker must match one of exactly two grammars, or resolution fails closed
+ABI SHALL accept only a ticker matching one of exactly two shapes:
 
-#### Scenario: Non-trailing `.P` does not select linear
-- **WHEN** the ticker contains `.P` somewhere other than as its final two characters
-  (e.g. `BTCUSDT.PX`)
-- **THEN** ABI SHALL NOT treat it as the perpetual suffix and SHALL resolve it via the
-  spot branch, with `symbol` equal to the full ticker text
+- `[A-Z0-9]+` — a bare symbol, resolving to `category: spot`, `product: spot`, with
+  `symbol` equal to the ticker unchanged;
+- `[A-Z0-9]+\.P` — a symbol followed by the exact trailing suffix `.P`, resolving to
+  `category: linear`, `product: perpetual`, with `symbol` equal to the ticker with the
+  trailing `.P` removed.
+
+Any ticker that matches neither shape SHALL be rejected with a typed resolver error
+rather than being resolved to a best-guess `symbol`/`category`.
+
+#### Scenario: Bare uppercase-alphanumeric ticker resolves to spot
+- **WHEN** the ticker is `BTCUSDT`
+- **THEN** ABI resolves `{ symbol: "BTCUSDT", category: "spot", product: "spot" }`
+
+#### Scenario: Uppercase-alphanumeric ticker with trailing `.P` resolves to linear perpetual
+- **WHEN** the ticker is `BTCUSDT.P`
+- **THEN** ABI resolves `{ symbol: "BTCUSDT", category: "linear", product: "perpetual" }`
+
+#### Scenario: Trailing extra characters after `.P` are rejected
+- **WHEN** the ticker is `BTCUSDT.PX`
+- **THEN** ABI SHALL raise a typed resolver error and SHALL NOT resolve it as spot or as
+  any other identity
+
+#### Scenario: A second `.`-delimited segment is rejected
+- **WHEN** the ticker is `BTC.USDT`
+- **THEN** ABI SHALL raise a typed resolver error
+
+#### Scenario: Whitespace within the ticker is rejected
+- **WHEN** the ticker is `BTC USDT`
+- **THEN** ABI SHALL raise a typed resolver error
 
 ### Requirement: Resolution is deterministic, local, and rejects degenerate input
 Resolution SHALL be a pure function of the ticker's text with no network or other I/O,
-returning the identical result for the same input every time. A degenerate ticker — empty,
-or one that strips to an empty symbol — SHALL be rejected with a typed error rather than
-producing a partial or guessed identity.
+returning the identical result for the same input every time. A degenerate ticker —
+empty, or one that is only the `.P` suffix with no symbol text before it — SHALL be
+rejected with a typed error rather than producing a partial or guessed identity.
 
 #### Scenario: Empty ticker is rejected
 - **WHEN** the ticker is an empty string

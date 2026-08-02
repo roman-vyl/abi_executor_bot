@@ -15,10 +15,11 @@ that distinction and wires it in, replacing the throwing stub.
 
 - Add one new small module: an `ExchangeInstrumentResolver` that maps a
   Runtime `ticker` to an `ExchangeInstrumentIdentity` (`ticker`, `symbol`,
-  `category`, `product`), recognizing a trailing `.P` suffix as
-  `linear`/`perpetual` (suffix stripped from `symbol`) and its absence as
-  `spot`/`spot` (symbol unchanged), with a minimal check rejecting a
-  degenerate ticker.
+  `category`, `product`), accepting only two ticker grammars —
+  `[A-Z0-9]+` (spot, symbol unchanged) and `[A-Z0-9]+\.P` (linear
+  perpetual, suffix stripped from `symbol`) — and rejecting anything else
+  (e.g. `BTCUSDT.PX`, `BTC.USDT`, embedded whitespace, empty string, `.P`
+  alone) with a typed error rather than a best-guess resolution.
 - Replace the throwing `resolveSymbol` stub in `src/app/server.ts` with a
   constructed resolver instance, passed to `EntryPackageApplicationService`.
 - Replace `EntryPackageApplicationServiceDeps.resolveSymbol` with

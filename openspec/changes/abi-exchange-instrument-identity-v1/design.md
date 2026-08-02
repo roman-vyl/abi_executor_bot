@@ -44,6 +44,9 @@ See proposal.md - Why. Current code, confirmed by reading the repository:
 ### 1. Module: `ExchangeInstrumentResolver` in `src/exchange/exchangeInstrumentResolver.ts`
 
 ```ts
+const SPOT_PATTERN = /^[A-Z0-9]+$/;
+const LINEAR_PATTERN = /^[A-Z0-9]+\.P$/;
+
 export type ExchangeInstrumentIdentity = {
   ticker: string;
   symbol: string;
@@ -57,27 +60,36 @@ export interface ExchangeInstrumentResolver {
 
 export class BybitExchangeInstrumentResolver implements ExchangeInstrumentResolver {
   resolve(ticker: string): ExchangeInstrumentIdentity {
-    if (ticker.length === 0) {
-      throw new ExchangeInstrumentResolutionError(ticker);
+    if (LINEAR_PATTERN.test(ticker)) {
+      return {
+        ticker,
+        symbol: ticker.slice(0, -2),
+        category: "linear",
+        product: "perpetual",
+      };
     }
-    if (ticker.endsWith(".P")) {
-      const symbol = ticker.slice(0, -2);
-      if (symbol.length === 0) {
-        throw new ExchangeInstrumentResolutionError(ticker);
-      }
-      return { ticker, symbol, category: "linear", product: "perpetual" };
+    if (SPOT_PATTERN.test(ticker)) {
+      return { ticker, symbol: ticker, category: "spot", product: "spot" };
     }
-    return { ticker, symbol: ticker, category: "spot", product: "spot" };
+    throw new ExchangeInstrumentResolutionError(ticker);
   }
 }
 ```
 
 Synchronous (no I/O), matching the requirement that resolution is deterministic and
-local. `product` is kept alongside `category` per the proposal's explicit target shape —
-here it is a plain deterministic function of `category` (`linear → perpetual`,
-`spot → spot`), so it costs nothing extra to compute or store, and existing/future
-consumers that want the human-readable semantics (e.g. logs, correlation-record
-readers) don't have to re-derive it from `category` themselves.
+local. The ticker is validated against exactly two grammars —
+`[A-Z0-9]+` (spot) and `[A-Z0-9]+\.P` (linear perpetual) — anchored at both ends, so
+anything that doesn't fully match either (extra trailing characters as in `BTCUSDT.PX`,
+a second `.`-delimited segment as in `BTC.USDT`, embedded whitespace as in `BTC USDT`,
+empty string, or the suffix alone `.P`) falls through to the typed error. This replaces
+an earlier draft of this design that let a non-trailing `.P` fall through to the spot
+branch unchanged — that was wrong: a malformed ticker must fail closed, not silently
+resolve to a guessed spot symbol containing invalid characters. `product` is kept
+alongside `category` per the proposal's explicit target shape — it is a plain
+deterministic function of `category` (`linear → perpetual`, `spot → spot`), so it costs
+nothing extra to compute or store, and existing/future consumers that want the
+human-readable semantics (e.g. logs, correlation-record readers) don't have to re-derive
+it from `category` themselves.
 
 ### 2. Where it's called: the one existing call site
 
@@ -94,17 +106,44 @@ record).
   uses `input.category` instead of `config.bybitCategory` for the five entry-package
   payloads it builds. This is a signature change only — no payload field beyond the
   existing `category` key changes.
+- `EntryPackageExecutionRecord`/`BindingHistoryEntry` gain `exchange_category: string`
+  next to `exchange_symbol`, set from `identity.category` at the same place
+  `exchange_symbol` is already set.
+- **Every existing-binding call site that currently reads `config.bybitCategory` inline
+  must instead read the binding's stored `record.exchange_category`.** Confirmed by
+  reading the code, these are not hypothetical: `entryPackageApplicationService.ts`
+  builds cancel/get/get-history payloads directly (not through the mapper) at four
+  places — `{ category: this.deps.config.bybitCategory, symbol, orderLinkId }` (line
+  ~322, cancel), `{ category: this.deps.config.bybitCategory, symbol, orderLinkId,
+  limit: "1" }` twice (lines ~355-356, get + get-history) in one branch, and the same
+  three-payload group again at lines ~526, ~548-549 in another branch. All four/six of
+  these become `{ category: record.exchange_category, symbol: record.exchange_symbol,
+  ... }`. Storing `exchange_category` on the record without also making these call sites
+  read it back would be a no-op change dressed up as a fix — the field would sit unused
+  and every existing-binding call would keep silently defaulting to the global
+  configuration, exactly the bug this change exists to remove.
 - `InstrumentTradingRulesProvider.getRules(symbol, category)`: the cache key becomes
   `` `${category}:${symbol}` `` instead of bare `symbol` — this is the minimal change
   required so that adding `category` as an input doesn't let a `linear` lookup and a
   `spot` lookup for the same symbol collide in the cache (a straightforward correctness
   consequence of the signature change, not a new caching design).
-  `FixedMinimumPositionSizeCalculator`'s call site passes `context.resolvedCategory`
-  through unchanged otherwise; the sizing formula itself is not touched.
-- `EntryPackageExecutionRecord`/`BindingHistoryEntry` gain `exchange_category: string`
-  next to `exchange_symbol`, set from `identity.category` at the same place
-  `exchange_symbol` is already set. This is the one piece of state that must persist
-  across requests, because amend/cancel/query read the record instead of re-resolving.
+  `FixedMinimumPositionSizeCalculator`'s call site passes the resolved category through
+  unchanged otherwise; the sizing formula itself is not touched.
+- **The cache key change is not sufficient by itself.** `getRules` currently calls
+  `this.bybit.getInstrumentInfo(symbol)` (`instrumentTradingRulesProvider.ts:35`), and
+  `RestBybitAdapter.getInstrumentInfo(symbol)` (`bybitAdapter.ts:162-172`) builds its own
+  request with `category: this.config.bybitCategory` — the global value, ignoring
+  whatever category `getRules` was called with. Left unchanged, `getRules("BTCUSDT",
+  "spot")` would cache under `spot:BTCUSDT` while the actual Bybit request still asked for
+  `category=linear`, caching a linear response under a spot key. `BybitAdapter.getInstrumentInfo`
+  (interface, `RestBybitAdapter`, and `StubBybitAdapter`) therefore changes to
+  `getInstrumentInfo(category: string, symbol: string)`, and `RestBybitAdapter`'s
+  implementation uses the passed-in `category` instead of `this.config.bybitCategory`
+  when building the instruments-info request. `getRules` passes its own `category`
+  parameter through to this call. This is the same class of direct-consumer fix as the
+  mapper and correlation-record changes above — `getInstrumentInfo` is the immediate
+  downstream consumer of `getRules`'s new `category` parameter, not a new architectural
+  layer.
 
 ### 4. Composition root
 
