@@ -4,10 +4,12 @@
 const SPOT_PATTERN = /^[A-Z0-9]+$/;
 const LINEAR_PATTERN = /^[A-Z0-9]+\.P$/;
 
+export type ExchangeInstrumentCategory = "linear" | "spot";
+
 export type ExchangeInstrumentIdentity = {
   ticker: string;
   symbol: string;
-  category: "linear" | "spot";
+  category: ExchangeInstrumentCategory;
   product: "perpetual" | "spot";
 };
 

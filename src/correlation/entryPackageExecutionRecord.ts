@@ -1,4 +1,5 @@
 import type { DesiredEntryDto } from "../domain/entryPackageApi.js";
+import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
 
 export type EntryPackageExecutionStatus =
   | "pending_create"
@@ -33,7 +34,7 @@ export type BindingHistoryEntry = {
   generation: number;
   role: "entry";
   exchange_symbol: string;
-  exchange_category: string;
+  exchange_category: ExchangeInstrumentCategory;
   started_at: string;
   ended_at: string | null;
   end_reason: BindingHistoryEndReason;
@@ -44,7 +45,9 @@ export type EntryPackageExecutionRecord = {
   trade_cycle_id: string;
   ticker: string;
   exchange_symbol: string;
-  exchange_category: string;
+  // "" only for a record that has never had a real binding (persistAbsentNoHistory) —
+  // every binding that has actually gone through createOrder stores "linear" or "spot".
+  exchange_category: ExchangeInstrumentCategory | "";
   created_at: string;
   updated_at: string;
   desired_entry: DesiredEntryDto | null;
@@ -97,6 +100,12 @@ const END_REASONS: ReadonlySet<Exclude<BindingHistoryEndReason, null>> = new Set
   "exchange_terminal",
 ]);
 
+// Top-level exchange_category additionally allows "" (a record that has
+// never had a real binding); a binding_history entry always describes a
+// binding that was actually created, so "" is never valid there.
+const RECORD_CATEGORIES: ReadonlySet<ExchangeInstrumentCategory | ""> = new Set(["", "linear", "spot"]);
+const BINDING_CATEGORIES: ReadonlySet<ExchangeInstrumentCategory> = new Set(["linear", "spot"]);
+
 // A syntactically-valid JSON line that does not actually conform to the
 // record shape (e.g. from a future schema migration bug, or partial
 // corruption that still happens to parse) must not be silently accepted
@@ -115,6 +124,7 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     isNonEmptyString(record.ticker) &&
     typeof record.exchange_symbol === "string" &&
     typeof record.exchange_category === "string" &&
+    RECORD_CATEGORIES.has(record.exchange_category as ExchangeInstrumentCategory | "") &&
     isNonEmptyString(record.created_at) &&
     isNonEmptyString(record.updated_at) &&
     (record.desired_entry === null || isValidDesiredEntry(record.desired_entry)) &&
@@ -179,6 +189,7 @@ function isValidBindingHistoryEntry(value: unknown): value is BindingHistoryEntr
     entry.role === "entry" &&
     typeof entry.exchange_symbol === "string" &&
     typeof entry.exchange_category === "string" &&
+    BINDING_CATEGORIES.has(entry.exchange_category as ExchangeInstrumentCategory) &&
     typeof entry.started_at === "string" &&
     (entry.ended_at === null || typeof entry.ended_at === "string") &&
     (entry.end_reason === null ||

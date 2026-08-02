@@ -128,6 +128,34 @@ test("replay tolerates a wrong-shaped final line the same way it tolerates trunc
   });
 });
 
+test("replay fails readiness on an invalid exchange_category value", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const validRecord = makeRecord({ orderLinkId: "link-1", orderId: "order-1" });
+    const invalidCategory = { ...validRecord, exchange_category: "banana" };
+    await writeFile(path, `${JSON.stringify(invalidCategory)}\n${JSON.stringify(validRecord)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+test("an absent record with exchange_category '' remains valid", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const absentRecord = { ...makeRecord(), exchange_category: "", status: "absent" as const };
+    await writeFile(path, `${JSON.stringify(absentRecord)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), absentRecord);
+  });
+});
+
 test("missing correlation file replays as ready with an empty store", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "does-not-exist.jsonl");

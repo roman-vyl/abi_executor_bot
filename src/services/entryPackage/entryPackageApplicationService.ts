@@ -17,7 +17,7 @@ import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIden
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
-import type { ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
+import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { amendEntryOrder, cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
@@ -245,7 +245,7 @@ export class EntryPackageApplicationService {
     // the live order actually lives under (e.g. if resolution changes over
     // time).
     const symbol = record.exchange_symbol;
-    const category = record.exchange_category;
+    const category = requireCategory(record.exchange_category);
 
     let calculatedQuantity: string;
     try {
@@ -254,7 +254,7 @@ export class EntryPackageApplicationService {
         desiredEntry.planned_entry_price,
         desiredEntry.initial_stop_price,
         command.riskMultiplier,
-        { resolvedSymbol: symbol, resolvedCategory: asCategory(category) },
+        { resolvedSymbol: symbol, resolvedCategory: category },
       );
     } catch {
       return internalErrorResult();
@@ -279,7 +279,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol,
-      category: asCategory(category),
+      category,
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -322,7 +322,7 @@ export class EntryPackageApplicationService {
     }
 
     const symbol = record.exchange_symbol;
-    const category = record.exchange_category;
+    const category = requireCategory(record.exchange_category);
     const cancelPayload = { category, symbol, orderLinkId };
 
     await this.deps.correlationRepository.save({
@@ -408,7 +408,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: record.exchange_symbol,
-      category: asCategory(record.exchange_category),
+      category: requireCategory(record.exchange_category),
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -490,7 +490,7 @@ export class EntryPackageApplicationService {
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: updated.exchange_symbol,
-      category: asCategory(updated.exchange_category),
+      category: requireCategory(updated.exchange_category),
       side: desiredEntry.side,
       plannedEntryPrice: desiredEntry.planned_entry_price,
       initialStopPrice: desiredEntry.initial_stop_price,
@@ -529,7 +529,7 @@ export class EntryPackageApplicationService {
     }
 
     const symbol = record.exchange_symbol;
-    const category = record.exchange_category;
+    const category = requireCategory(record.exchange_category);
     const cancelPayload = { category, symbol, orderLinkId };
 
     await this.deps.correlationRepository.save({
@@ -762,19 +762,26 @@ function closeBindingFrom(
     generation: record.generation,
     role: "entry",
     exchange_symbol: record.exchange_symbol,
-    exchange_category: record.exchange_category,
+    exchange_category: requireCategory(record.exchange_category),
     started_at: record.current_binding_started_at ?? record.updated_at,
     ended_at: endedAt,
     end_reason: endReason,
   };
 }
 
-// record.exchange_category is stored as a plain string (matching
-// record.exchange_symbol's shape) but is only ever written from a resolved
-// ExchangeInstrumentIdentity's category, so it is always "linear" or
-// "spot" for any binding that has actually gone through createOrder.
-function asCategory(value: string): "linear" | "spot" {
-  return value === "spot" ? "spot" : "linear";
+// record.exchange_category is "" only for a record that has never had a
+// real binding (persistAbsentNoHistory); every call site here only reads it
+// once order_link_id is known non-null, i.e. a binding was actually
+// created, so it must be "linear" or "spot". Anything else (including "")
+// reaching here is stored-state corruption — fail closed rather than
+// silently defaulting to a category that could send the wrong Bybit
+// request for the actual instrument.
+function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstrumentCategory {
+  if (value === "linear" || value === "spot") {
+    return value;
+  }
+
+  throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
 }
 
 function readBybitOrderId(response: unknown): string | null {
