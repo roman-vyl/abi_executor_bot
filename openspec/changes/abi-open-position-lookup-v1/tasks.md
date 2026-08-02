@@ -38,9 +38,12 @@
       call; `applied`/`pending_replace`/`pending_cancel` → proceed to live query;
       `pending_create`/`create_failed`/`unknown` → `internal_error`, no exchange call.
       `create_failed` is currently unproduced by `entryPackageApplicationService.ts`
-      (design.md Context/Decision 2) — classify it defensively for forward
-      compatibility, but do not build or test around any specific assumed meaning for
-      it beyond "unresolved, fail closed". Do not read `early_execution_observation`
+      (design.md Context/Decision 2), and its operational semantics are not currently
+      defined anywhere in the codebase — classify it as unresolved solely because it has
+      no defined meaning to resolve against today, not because a future meaning is
+      assumed to resemble `unknown`'s. Lookup fails closed for it until a future change
+      both produces it and separately specifies what it proves; do not build or test
+      around any assumed future semantics. Do not read `early_execution_observation`
       anywhere in this service.
 - [ ] 2.4 Implement the linear-category gate before any exchange call for
       live-query-admissible records: non-`linear` `record.exchange_category` →
@@ -60,9 +63,11 @@
       unmodified (design.md Decision 5). A partial fill (`size > 0`, any amount) already
       counts as open — no full-execution wait.
 - [ ] 2.8 Map every adapter-layer failure from section 3 (transport, malformed envelope,
-      malformed item, symbol mismatch, missing/invalid/negative size, missing fields on
-      a size-positive row, invalid decimal, invalid timestamp, zero/negative price,
-      ambiguous rows, hedge row) to `internal_error`, never to `position_open: false`.
+      malformed item, symbol mismatch, missing/invalid/negative size, hedge
+      row/unexpected `positionIdx` on any item regardless of size, missing
+      `side`/`avgPrice`/`openTime` on a size-positive row, invalid decimal, invalid
+      timestamp, zero/negative price, ambiguous rows) to `internal_error`, never to
+      `position_open: false`.
 - [ ] 2.9 Add a short module-level comment on the resolution service documenting the V1
       attribution/operating precondition (design.md Decision 9): correct attribution
       depends on no overlapping manual/other-strategy exposure existing on the same
@@ -93,24 +98,28 @@
       read as "no position". In order: malformed envelope (missing/non-object `result`,
       missing/non-array `result.list`) → failure; non-object list item → failure; item
       `symbol` missing, not a string, or not equal to the exact requested `symbol` →
-      failure; item `size` missing, not valid exact-decimal text, non-finite, or negative
-      → failure (**never** "no position" — this is the exact case that removes the prior
-      contradiction between "missing size fails" and "size is excluded": those are
-      disjoint outcomes of parsing the same field); item `size` parsing to **exactly
-      zero** → excluded from consideration, and `side`/`positionIdx`/`avgPrice`/
-      `openTime` are **not** read or validated on that item at all (Bybit's flat-position
-      row carries empty/default values for these on a closed symbol); item `size`
-      parsing **greater than zero** → additionally require `side` exactly `Buy`/`Sell`,
-      `positionIdx` present and an integer, `avgPrice` present and valid positive
-      exact-decimal text (reuse the existing exact-decimal parser from
+      failure; item `positionIdx` missing, not an integer, or not exactly `0` →
+      hedge-row/unexpected-`positionIdx` failure — checked on **every item regardless of
+      `size`**, since a hedge-mode account reports non-zero `positionIdx` even on a flat,
+      zero-size row (do not gate this check behind a `size > 0` check); item `size`
+      missing, not valid exact-decimal text, non-finite, or negative → failure (**never**
+      "no position" — this is the exact case that removes the prior contradiction between
+      "missing size fails" and "size is excluded": those are disjoint outcomes of parsing
+      the same field); item `size` parsing to **exactly zero** (with `positionIdx` already
+      confirmed `0`) → excluded from consideration, and `side`/`avgPrice`/`openTime` are
+      **not** read or validated on that item (Bybit's flat-position row carries
+      empty/default values for these three fields on a closed symbol — `positionIdx` is
+      not part of this exemption); item `size` parsing **greater than zero** →
+      additionally require `side` exactly `Buy`/`Sell`, `avgPrice` present and valid
+      positive exact-decimal text (reuse the existing exact-decimal parser from
       `src/domain/entryPackageApi.ts`, extended to accept a zero value for the `size`
       check above; do not reimplement), `openTime` present and a positive integer — any
-      violation is a failure; more than one `size > 0` item → ambiguous failure; a
-      `size > 0` item with non-zero `positionIdx` and no valid `positionIdx == 0` item →
-      hedge-row failure. Returns a discriminated result: a single structurally valid row,
-      "no position" (zero `size > 0` items, whether from an empty list or all-zero-size
-      items), or a typed failure — this method does not know or check
-      `record.desired_entry.side` (design.md Decision 4, explicit boundary).
+      violation is a failure; more than one `size > 0` item (each already confirmed
+      `positionIdx == 0`) → ambiguous failure. Returns a discriminated result: a single
+      structurally valid row, "no position" (zero `size > 0` items, whether from an empty
+      list or all-zero-size items each with valid `positionIdx == 0`), or a typed failure
+      — this method does not know or check `record.desired_entry.side` (design.md
+      Decision 4, explicit boundary).
 - [ ] 3.4 Add a typed error/result type for 3.3's failure branches so the application
       service (2.8) can map each to `internal_error` without inspecting adapter
       internals.
@@ -168,12 +177,15 @@
       response fixtures for every validation branch in design.md Decision 4: malformed
       envelope (missing `result`, `result.list` missing or not an array), non-object list
       item, symbol mismatch (item `symbol` absent/wrong-typed/not equal to the requested
-      symbol), missing `size`, non-exact-decimal or non-finite `size`, negative `size`,
-      a valid exact-zero `size` row with empty/default `side`/`avgPrice`/`openTime`
-      (asserted as **not** a failure and those fields **not** validated), a `size > 0`
-      row missing or with invalid `side`/`positionIdx`/`avgPrice`/`openTime`
-      individually, multiple plausible `size > 0` rows, unexpected non-zero
-      `positionIdx` on the only `size > 0` row, and the "no position" empty-list case.
+      symbol), missing/non-integer/non-zero `positionIdx` on a `size > 0` row, **and the
+      same missing/non-integer/non-zero `positionIdx` cases on a valid `size == 0` row**
+      (asserted as a failure, not silently excluded as a harmless zero-size row), missing
+      `size`, non-exact-decimal or non-finite `size`, negative `size`, a valid
+      exact-zero `size` row with `positionIdx` present/integer/exactly `0` and
+      empty/default `side`/`avgPrice`/`openTime` (asserted as **not** a failure and only
+      those three fields **not** validated — `positionIdx` still required), a `size > 0`
+      row missing or with invalid `side`/`avgPrice`/`openTime` individually, multiple
+      plausible `size > 0` rows, and the "no position" empty-list case.
 - [ ] 7.5 Unit test the route matcher (4.1) for valid paths, missing/empty segments, and
       malformed percent-encoding, mirroring the existing `matchEntryPackageRoute` test
       coverage style.
@@ -211,9 +223,13 @@
 - [ ] 9.6 Integration test exchange-derived failures against the fake backend: simulated
       timeout, malformed envelope (`result`/`result.list` missing or wrong-shaped),
       symbol-mismatched row, missing/invalid/negative `size`, malformed response body,
-      wrong side, hedge-mode row (non-zero `positionIdx`) — each returns
-      `internal_error`. Include a case with a valid zero-size row carrying empty/default
-      `side`/`avgPrice`/`openTime` and confirm it resolves as closed, not a failure.
+      wrong side, hedge-mode row with `size > 0` and non-zero `positionIdx` — each
+      returns `internal_error`. Separately test a **flat, zero-size** hedge-mode row
+      (`size == 0`, `positionIdx` non-zero, e.g. `1` or `2`) and confirm it also returns
+      `internal_error`, not a closed-position result — this is the exact case the V1
+      one-way scope gate must not silently exempt. Include a case with a valid zero-size,
+      `positionIdx == 0` row carrying empty/default `side`/`avgPrice`/`openTime` and
+      confirm that one resolves as closed, not a failure.
 - [ ] 9.7 Integration test the missing-record case end-to-end: a pair with no correlation
       record returns `unknown_trade_cycle_binding` without invoking the fake Bybit
       backend.

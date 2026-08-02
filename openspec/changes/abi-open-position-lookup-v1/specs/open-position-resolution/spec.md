@@ -89,13 +89,13 @@ ABI SHALL validate Bybit's documented response envelope — `result` as an objec
 - `result` is missing or not an object, or `result.list` is missing or not an array;
 - a list item is not an object;
 - an item's `symbol` is missing, is not a string, or does not equal the exact symbol the query was issued for;
+- an item's `positionIdx` is missing, is not an integer, or is not exactly `0` — checked on every item **regardless of `size`**, since `positionIdx` is Bybit's position-mode discriminator (one-way vs. hedge mode), not a size-dependent fact: a hedge-mode account reports non-zero `positionIdx` even on a flat, zero-size row;
 - an item's `size` is missing, is not valid exact-decimal text, is non-finite, or parses to a negative value;
-- for an item whose `size` parses to a value greater than zero: `side` is not exactly `Buy` or `Sell`, `positionIdx` is missing or not an integer, `avgPrice` is missing, is not valid exact-decimal text, or is zero or negative, or `openTime` is missing or is not a positive integer;
+- for an item whose `size` parses to a value greater than zero: `side` is not exactly `Buy` or `Sell`, `avgPrice` is missing, is not valid exact-decimal text, or is zero or negative, or `openTime` is missing or is not a positive integer;
 - more than one item has `size` parsing to a value greater than zero;
-- an item whose `size` parses to a value greater than zero has a non-zero `positionIdx` (hedge-mode/unexpected row) and no valid `positionIdx == 0` item exists;
 - the underlying request times out or fails at the transport level.
 
-An item whose `size` parses to exactly zero is excluded from consideration as an open position and is not, by itself, a failure. ABI SHALL NOT require `side`, `positionIdx`, `avgPrice`, or `openTime` to be present or valid on such an item — Bybit's documented flat-position row carries empty or default values (`side` as an empty string, default/empty price fields, `openTime` as `0`) for a genuinely closed symbol, and those defaults SHALL NOT be treated as a validation failure.
+An item whose `size` parses to exactly zero, and whose `positionIdx` has already been confirmed present, an integer, and exactly `0`, is excluded from consideration as an open position and is not, by itself, a failure. ABI SHALL NOT require `side`, `avgPrice`, or `openTime` to be present or valid on such an item — Bybit's documented flat-position row carries empty or default values (`side` as an empty string, default/empty price fields, `openTime` as `0`) for a genuinely closed symbol, and those defaults SHALL NOT be treated as a validation failure. `positionIdx` is never exempted by a zero `size`.
 
 #### Scenario: Exchange timeout fails closed
 - **WHEN** the Bybit position query times out or fails at the transport level
@@ -123,8 +123,8 @@ An item whose `size` parses to exactly zero is excluded from consideration as an
 - **AND** ABI returns `internal_error`
 
 #### Scenario: A valid zero-size row is not a failure
-- **WHEN** a list item's `size` parses to exactly zero, with an empty or default `side`, `avgPrice`, or `openTime`
-- **THEN** ABI excludes that item from consideration without requiring those other fields to be valid
+- **WHEN** a list item's `size` parses to exactly zero, its `positionIdx` is present, an integer, and exactly `0`, and it carries an empty or default `side`, `avgPrice`, or `openTime`
+- **THEN** ABI excludes that item from consideration without requiring those latter three fields to be valid
 - **AND** ABI does not return `internal_error` on account of that item
 
 #### Scenario: Ambiguous multiple rows fail closed
@@ -133,8 +133,13 @@ An item whose `size` parses to exactly zero is excluded from consideration as an
 - **AND** ABI returns `internal_error`
 
 #### Scenario: Hedge-mode or unexpected positionIdx fails closed
-- **WHEN** the only item with `size` parsing to a value greater than zero has a non-zero `positionIdx`
+- **WHEN** any item, regardless of its `size`, has a `positionIdx` that is missing, is not an integer, or is not exactly `0`
 - **THEN** ABI does not treat it as a valid one-way position
+- **AND** ABI returns `internal_error`
+
+#### Scenario: Zero-size row with a non-zero positionIdx fails closed
+- **WHEN** an item's `size` parses to exactly zero but its `positionIdx` is missing, is not an integer, or is not exactly `0`
+- **THEN** ABI does not exclude that item as a harmless zero-size row
 - **AND** ABI returns `internal_error`
 
 ### Requirement: Live position side must match the record's desired entry side
@@ -196,6 +201,6 @@ Bybit's position query is scoped to `category`+`symbol` under the configured API
 
 #### Scenario: Attribution precondition is documented, not enforced
 - **WHEN** this capability's behavior is documented
-- **THEN** the documentation SHALL state that correct attribution depends on no overlapping non-ABI-owned exposure existing on the same symbol under the configured credentials
+- **THEN** the documentation SHALL state that correct attribution depends on no overlapping manual or other-strategy-owned exposure existing on the same symbol under the configured credentials, regardless of whether that other exposure was itself placed through ABI or outside ABI
 - **AND** the documentation SHALL NOT claim that the symbol query or side match alone proves the position was caused by this record's own order
 - **AND** ABI SHALL NOT implement any account, subaccount, or cross-record mechanism in this capability to detect or enforce that precondition
