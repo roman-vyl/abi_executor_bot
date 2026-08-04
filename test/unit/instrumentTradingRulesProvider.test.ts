@@ -95,14 +95,14 @@ test("an out-of-range exponent is not cached and getRules throws rather than ret
   assert.equal(bybit.getInstrumentInfoCalls.length, 2);
 });
 
-test("getRules for spot throws without caching anything", async () => {
+test("getRules for spot throws without calling Bybit or caching anything", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.instrumentInfoResponse = validResponse();
   const provider = makeProvider(bybit);
 
   await assert.rejects(() => provider.getRules("BTCUSDT", "spot"));
+  assert.equal(bybit.getInstrumentInfoCalls.length, 0);
 
-  bybit.instrumentInfoResponse = validResponse();
   const linearRules = await provider.getRules("BTCUSDT", "linear");
   assert.deepEqual(linearRules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
 });

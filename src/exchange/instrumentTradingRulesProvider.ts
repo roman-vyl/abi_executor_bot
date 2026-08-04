@@ -36,6 +36,10 @@ export class BybitInstrumentTradingRulesProvider implements InstrumentTradingRul
       return cached.rules;
     }
 
+    if (category === "spot") {
+      throw new Error(`Bybit instruments-info trading rules for ${symbol} are invalid: unsupported_category`);
+    }
+
     const response = await this.bybit.getInstrumentInfo(category, symbol);
     const decoded = decodeInstrumentTradingRulesResponse({ response, expected: { category, symbol } });
     if (!decoded.ok) {
