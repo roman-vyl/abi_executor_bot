@@ -63,6 +63,20 @@ acknowledge absence, or confirm absence directly when nothing was ever live.
 - **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that failure, and
   SHALL treat the cancellation as unconfirmed
 
+#### Scenario: A structurally malformed response while confirming a cancellation never confirms absence
+- **WHEN** ABI queries the exchange to confirm a cancellation and the response is
+  structurally malformed (per the malformed-response conditions defined for confirming
+  package application) rather than a cleanly-reported empty list or clean terminal
+  status, on either the realtime or history query
+- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that response, and
+  SHALL treat the cancellation as unconfirmed
+
+#### Scenario: An unrecognized realtime order status while confirming a cancellation never confirms absence
+- **WHEN** ABI queries the exchange to confirm a cancellation and the realtime query
+  returns a single, correctly-identified row with an unrecognized `orderStatus`
+- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that result, even
+  if a subsequent history query cleanly reports the order absent
+
 ### Requirement: A changed ticker within an existing trade cycle is rejected without contacting the exchange
 The `ticker` associated with a trade cycle is fixed at first application. ABI SHALL
 reject any request that supplies a different ticker for the same trade cycle without
@@ -193,6 +207,45 @@ before acknowledging success, not merely that an order exists.
 - **THEN** ABI SHALL NOT treat that failure as evidence of any particular exchange state,
   and SHALL return a safe internal error unless an independent, cleanly-answered query
   elsewhere confirms the outcome
+
+#### Scenario: A structurally malformed response is never treated as absence
+- **WHEN** a confirmation query's response is structurally malformed (missing or
+  non-object result, missing or non-array list, more than one row for a single
+  `orderLinkId`, a non-object row, or a row whose `symbol` or `orderLinkId` does not
+  match the request) rather than a cleanly-reported empty list
+- **THEN** ABI SHALL NOT treat that response as evidence the order does not exist, and
+  SHALL treat it the same as a query failure for purposes of confirmation
+
+#### Scenario: A response with unparseable or out-of-range numeric fields is never treated as confirming evidence
+- **WHEN** a confirmation query returns a row whose `qty`, `cumExecQty`, `triggerPrice`,
+  `stopLoss`, `takeProfit`, or `avgPrice` field is present but is not valid exact-decimal
+  text, or violates that field's sign rule (`qty`/`avgPrice` must be strictly positive
+  when present; `cumExecQty`/`triggerPrice`/`stopLoss`/`takeProfit` must be zero or
+  positive when present; none may be negative)
+- **THEN** ABI SHALL NOT use that row's fields as evidence the desired package's fields
+  match or fail to match, and SHALL treat the query the same as a query failure
+
+#### Scenario: An unrecognized order status is found but inconclusive, not malformed
+- **WHEN** a confirmation query returns a single, correctly-identified row with a
+  non-empty `orderStatus` value ABI does not recognize as pending, filled, or terminal
+- **THEN** ABI SHALL treat the order as found rather than reject the response as
+  malformed, and SHALL mark the confirmation attempt inconclusive rather than confirming
+  any particular package state from it
+
+#### Scenario: A found-but-inconclusive realtime result is never discarded by an empty history result
+- **WHEN** a realtime confirmation query returns a single, correctly-identified row whose
+  status is unrecognized, or is a terminal-without-fill status that falls through to the
+  order-history query, and the subsequent order-history query cleanly reports the order
+  absent for the entire bounded confirmation budget
+- **THEN** ABI SHALL return a safe internal error rather than treating the package as
+  confirmed absent, since a real order was positively found on realtime
+
+#### Scenario: A definitive history outcome still resolves an inconclusive realtime finding
+- **WHEN** a realtime confirmation query returns a single, correctly-identified row with an
+  unrecognized `orderStatus`, and the subsequent order-history query determines the order
+  became terminal without ever filling
+- **THEN** ABI SHALL classify the package as terminal-without-fill, since history's
+  definitive read is still authoritative over realtime's inconclusive one
 
 ### Requirement: Early execution observed before acknowledgement still receives a truthful acknowledgement
 When the exchange fully or partially fills an order before ABI can respond, ABI SHALL
