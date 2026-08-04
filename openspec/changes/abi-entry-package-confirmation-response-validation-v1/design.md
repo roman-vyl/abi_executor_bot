@@ -11,8 +11,19 @@ folds every structurally-invalid response into the same `undefined` that
 The request payload types (`BybitGetOrderByLinkIdPayload`,
 `BybitGetOrderHistoryPayload` in `src/exchange/bybitOrderMapper.ts`) already
 carry `category`, `symbol`, and `orderLinkId`, so the decoder can validate
-response identity against the same values that were requested without any
-new plumbing.
+response identity against those same values — `queryOrderView` just needs
+to be extended to pass them through (see "Internal identity plumbing"
+decision below); this is a small internal parameter-list change, not new
+plumbing from scratch.
+
+Separately, `confirmEntryPackage`'s realtime-handling branch has a gap
+independent of the decoder: a `found` realtime result whose status is
+unrecognized, or is in `TERMINAL_WITHOUT_FILL_STATUSES` (intentionally
+falling through to history), does not set `sawInconclusiveFinding`. A
+subsequent clean empty history result can then let the loop conclude
+`not_found` despite realtime having positively found an order. See
+proposal.md's "Unknown/terminal order status semantics" for the exact
+required behavior.
 
 ## Goals / Non-Goals
 
@@ -20,9 +31,15 @@ new plumbing.
 - Make "cleanly empty" and "structurally broken" distinguishable at the
   decode boundary, as a pure function testable independently of network
   and retry timing.
-- Preserve every existing outcome-routing behavior in `confirmEntryPackage`
-  / `confirmEntryPackageCancelled` byte-for-byte; only the trustworthiness
-  of the `found`/`not_found` facts feeding it changes.
+- Close the state-machine gap where a positively-found realtime result can
+  be discarded into `not_found` by a later empty history result, without
+  changing anything else about how `confirmEntryPackage` /
+  `confirmEntryPackageCancelled` classify outcomes.
+
+Outcome-routing behavior is **not** preserved byte-for-byte: the
+inconclusive-marking correction described above is a deliberate, narrow
+behavior change, not just a change in the trustworthiness of the facts
+feeding an unchanged state machine.
 
 **Non-Goals:**
 - No general-purpose Bybit response parser. `order/realtime`,
@@ -67,13 +84,27 @@ and can be threaded through then.
 `protocol_failure`.** Bybit's status vocabulary can grow. Rejecting an
 unrecognized status as malformed would make this decoder brittle against
 exchange-side additions and would incorrectly turn a real, identifiable
-order into "no evidence." Instead the row decodes successfully; the
-existing `LIVE_UNFILLED_STATUSES`/`FILLED_STATUSES`/
-`PARTIAL_FILL_STATUSES`/`TERMINAL_WITHOUT_FILL_STATUSES` matching in
-`packageConfirmation.ts` already falls through to `sawInconclusiveFinding`
-for any status it doesn't recognize, which resolves to `ambiguous` — the
-correct fail-closed outcome without the decoder needing to know the full
-status enum.
+order into "no evidence." Instead the row decodes successfully as `found`
+and is handed to `packageConfirmation.ts` for classification.
+
+**Correction: the decoder alone does not make an unrecognized status safe —
+`confirmEntryPackage` must be fixed too.** The `LIVE_UNFILLED_STATUSES`/
+`FILLED_STATUSES`/`PARTIAL_FILL_STATUSES`/`TERMINAL_WITHOUT_FILL_STATUSES`
+matching in `confirmEntryPackage` does *not* currently set
+`sawInconclusiveFinding` for a realtime `found` result whose status is
+unrecognized or terminal-without-fill; those fall through to the history
+query untagged. If history then cleanly reports empty, the loop's end-of-
+attempt check (`sawQueryFailure || sawInconclusiveFinding`) sees neither
+flag set and concludes `not_found` — silently discarding a positively-found
+order. The fix, scoped to that one branch: mark the attempt inconclusive
+whenever a realtime `found` result does not itself produce a definitive
+`pending_confirmed`/`full_fill`/`partial_fill` return, before falling
+through to history. History can still supply a definitive
+`full_fill`/`partial_fill`/`terminal_without_fill` afterward (those returns
+happen before the end-of-attempt check runs); only the "both queries came
+back inconclusive/empty" tail path is affected, and it now correctly lands
+on `ambiguous` instead of `not_found`. See proposal.md's "Unknown/terminal
+order status semantics" table for the exact input/output matrix.
 
 **`list.length > 1` and identity mismatch are `protocol_failure`, not
 "take the first row."** The query is always sent with a specific
@@ -84,12 +115,30 @@ silently indexing `list[0]` in that case (the old behavior) could
 attribute a different order's state to this confirmation.
 
 **Numeric fields are validated with the existing `exactDecimal` machinery,
-not a new parser.** `compareDecimal()` in `src/domain/exactDecimal.ts`
-already throws on non-exact-decimal text; the decoder wraps each of
-`qty`/`cumExecQty`/`triggerPrice`/`stopLoss`/`takeProfit`/`avgPrice` in the
-same try/catch-based validity check `decimalEquals()` in
-`packageConfirmation.ts` already uses, rather than introducing a second
-decimal grammar.
+against a per-field sign rule, not a new parser.** `compareDecimal()` in
+`src/domain/exactDecimal.ts` already throws on non-exact-decimal text and
+can compare a parsed value against `"0"`; the decoder uses it for both
+jobs — reject malformed text/exponent, then classify the parsed value as
+negative, zero, or positive against each field's own rule (see proposal.md's
+numeric field validation table): `qty` and `avgPrice` require a *positive*
+exact-decimal when non-empty (`"0"` and negative both `protocol_failure`);
+`cumExecQty`, `triggerPrice`, `stopLoss`, and `takeProfit` require a
+*non-negative* exact-decimal when non-empty (`"0"` allowed, negative
+`protocol_failure`). A bare "does `compareDecimal` throw" check is
+insufficient on its own — it would pass a negative or zero `qty`/`avgPrice`
+that should be rejected. Each field gets its own reason code so decoder
+tests can assert which field and which class (malformed / negative / zero)
+triggered the rejection.
+
+**`queryOrderView` takes an explicit `expected` identity, not a positional
+tuple.** `queryOrderView({ query, expected: { category, symbol,
+orderLinkId } })` (or the equivalent of passing the already-available
+`BybitGetOrderByLinkIdPayload`/`BybitGetOrderHistoryPayload` through) makes
+the identity the decoder validates against explicit at the call site,
+rather than threading three loose strings. This is strictly internal:
+`queryOrderView`'s two call sites in `confirmEntryPackage` and
+`confirmEntryPackageCancelled` already have this identity on hand from the
+payloads they were already passed.
 
 ## Risks / Trade-offs
 
@@ -111,9 +160,13 @@ decimal grammar.
 
 Internal-only change with no data-model or contract migration.
 1. Add `orderQueryResponseDecoder.ts` with the decode matrix tests.
-2. Rewire `queryOrderView()` to call it; delete
-   `readOrderViewFromBybitList()`.
-3. Run `npm test` and `npm run typecheck`; add
+2. Rewire `queryOrderView()` to call it, passing the expected identity from
+   the existing request payload; delete `readOrderViewFromBybitList()`.
+3. Apply the one-line `sawInconclusiveFinding` correction in
+   `confirmEntryPackage`'s realtime-handling branch (see "Unknown/terminal
+   order status semantics").
+4. Run `npm test` and `npm run typecheck`; add
    `confirmEntryPackage`/`confirmEntryPackageCancelled`-level tests for the
-   malformed-response scenarios listed in the proposal.
+   malformed-response and unknown/terminal-status scenarios listed in the
+   proposal.
 Rollback is a plain revert; no persisted state or schema is touched.
