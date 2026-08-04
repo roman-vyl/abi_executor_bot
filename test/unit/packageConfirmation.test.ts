@@ -167,9 +167,95 @@ test("cancel confirmation: realtime failing but history cleanly confirming absen
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
 
+test("a structurally malformed realtime response with a clean empty history is ambiguous, not not_found", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = malformedResponse();
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("a clean empty realtime with a structurally malformed history is ambiguous, not not_found", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([]);
+  bybit.orderHistoryResponse = malformedResponse();
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("a malformed response during cancel confirmation is ambiguous, not cancelled_confirmed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = malformedResponse();
+  bybit.orderHistoryResponse = malformedResponse();
+
+  const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("valid empty realtime and valid empty history for the whole retry budget still resolve not_found (regression guard)", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "not_found" });
+});
+
+test("an unrecognized realtime order status with clean empty history for the whole budget is ambiguous", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "SomeFutureBybitStatus" }]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("a terminal-without-fill realtime status with clean empty history is ambiguous, not not_found", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "Cancelled", cumExecQty: "0" }]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("an unrecognized realtime status resolved by a definitive terminal-without-fill history returns terminal_without_fill", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "SomeFutureBybitStatus" }]);
+  bybit.orderHistoryResponse = listResponse([{ orderStatus: "Rejected", cumExecQty: "0" }]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "terminal_without_fill" });
+});
+
+test("an unrecognized realtime order status during cancel confirmation is ambiguous, not cancelled_confirmed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "SomeFutureBybitStatus" }]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+function malformedResponse(): unknown {
+  return { retCode: 0, result: { category: "linear", list: "not-an-array" } };
+}
+
 function listResponse(
   items: Array<{
     orderStatus: string;
+    symbol?: string;
+    orderLinkId?: string;
     triggerPrice?: string;
     qty?: string;
     stopLoss?: string;
@@ -177,6 +263,17 @@ function listResponse(
     cumExecQty?: string;
     avgPrice?: string;
   }>,
+  category = "linear",
 ): unknown {
-  return { retCode: 0, result: { list: items } };
+  return {
+    retCode: 0,
+    result: {
+      category,
+      list: items.map((item) => ({
+        symbol: "BTCUSDT",
+        orderLinkId: "link-1",
+        ...item,
+      })),
+    },
+  };
 }

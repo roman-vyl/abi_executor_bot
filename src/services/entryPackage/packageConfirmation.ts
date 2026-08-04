@@ -7,6 +7,8 @@ import type {
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
 } from "../../exchange/bybitOrderMapper.js";
+import type { BybitOrderView, ExpectedOrderIdentity } from "./orderQueryResponseDecoder.js";
+import { decodeOrderQueryResponse } from "./orderQueryResponseDecoder.js";
 
 // Starting point matches verifyPostCreateProtection.ts's existing
 // bounded-retry mechanics (2 attempts / 300ms); tunable independently since
@@ -46,16 +48,6 @@ export type CancelConfirmationOutcome =
   | { kind: "filled_before_cancel"; observation: EarlyExecutionObservation }
   | { kind: "ambiguous" };
 
-type BybitOrderView = {
-  orderStatus: string;
-  triggerPrice: string;
-  qty: string;
-  stopLoss: string;
-  takeProfit: string;
-  cumExecQty: string;
-  avgPrice: string;
-};
-
 // A REST query result is a genuine three-state outcome. Collapsing
 // "queried and found nothing" and "the query itself failed" into a single
 // undefined, as an earlier version of this module did, made a transient
@@ -78,45 +70,58 @@ export async function confirmEntryPackage(input: {
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
   desired: DesiredPackageFields;
 }): Promise<PackageConfirmationOutcome> {
+  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+
   let sawQueryFailure = false;
   let sawInconclusiveFinding = false;
 
   for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
-    const realtime = await queryOrderView(() => input.bybit.getOrderByLinkId(input.getEntryOrderPayload));
+    const realtime = await queryOrderView(
+      () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
+      realtimeIdentity,
+    );
     if (realtime.status === "query_failed") {
       sawQueryFailure = true;
     }
 
     if (realtime.status === "found") {
       const item = realtime.item;
+      // Any found-but-not-yet-definitive realtime result (including an
+      // unrecognized status, or a terminal status that intentionally falls
+      // through to history below) marks this attempt inconclusive before
+      // the history fallback runs. A positively-found order must never be
+      // discarded into "not_found" solely because history later reports
+      // clean-empty (design.md's unknown/terminal order status correction).
+      sawInconclusiveFinding = true;
 
       if (FILLED_STATUSES.has(item.orderStatus)) {
         if (fillFieldsPlausible(item, input.desired)) {
           return { kind: "full_fill", observation: toObservation(item, input.desired.qty) };
         }
-        sawInconclusiveFinding = true;
       } else if (PARTIAL_FILL_STATUSES.has(item.orderStatus)) {
         if (fillFieldsPlausible(item, input.desired)) {
           return { kind: "partial_fill", observation: toObservation(item, input.desired.qty) };
         }
-        sawInconclusiveFinding = true;
       } else if (LIVE_UNFILLED_STATUSES.has(item.orderStatus)) {
         if (fieldsMatch(item, input.desired)) {
           return { kind: "pending_confirmed" };
         }
         // Fields not yet consistent (e.g. an amend still propagating) —
         // retry within the bounded window rather than confirming early.
-        sawInconclusiveFinding = true;
         if (attempt < CONFIRMATION_ATTEMPTS - 1) {
           await sleep(CONFIRMATION_RETRY_DELAY_MS);
         }
         continue;
       }
-      // A realtime item reporting a terminal status falls through to the
-      // order-history fallback below (design.md §10).
+      // A realtime item reporting a terminal or unrecognized status falls
+      // through to the order-history fallback below (design.md §10).
     }
 
-    const history = await queryOrderView(() => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload));
+    const history = await queryOrderView(
+      () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
+      historyIdentity,
+    );
     if (history.status === "query_failed") {
       sawQueryFailure = true;
     }
@@ -167,8 +172,14 @@ export async function confirmEntryPackageCancelled(input: {
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
   desiredQty: string;
 }): Promise<CancelConfirmationOutcome> {
+  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+
   for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
-    const realtime = await queryOrderView(() => input.bybit.getOrderByLinkId(input.getEntryOrderPayload));
+    const realtime = await queryOrderView(
+      () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
+      realtimeIdentity,
+    );
 
     if (realtime.status === "found" && hasFill(realtime.item)) {
       return { kind: "filled_before_cancel", observation: toObservation(realtime.item, input.desiredQty) };
@@ -176,7 +187,10 @@ export async function confirmEntryPackageCancelled(input: {
 
     const realtimeIsLive = realtime.status === "found" && LIVE_UNFILLED_STATUSES.has(realtime.item.orderStatus);
     if (!realtimeIsLive) {
-      const history = await queryOrderView(() => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload));
+      const history = await queryOrderView(
+        () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
+        historyIdentity,
+      );
 
       if (history.status === "found" && hasFill(history.item)) {
         return { kind: "filled_before_cancel", observation: toObservation(history.item, input.desiredQty) };
@@ -277,7 +291,10 @@ function toObservation(item: BybitOrderView, desiredQty: string): EarlyExecution
   return observation;
 }
 
-async function queryOrderView(query: () => Promise<unknown>): Promise<QueryResult> {
+async function queryOrderView(
+  query: () => Promise<unknown>,
+  expected: ExpectedOrderIdentity,
+): Promise<QueryResult> {
   let response: unknown;
   try {
     response = await query();
@@ -285,43 +302,15 @@ async function queryOrderView(query: () => Promise<unknown>): Promise<QueryResul
     return { status: "query_failed" };
   }
 
-  const item = readOrderViewFromBybitList(response);
-  return item === undefined ? { status: "not_found" } : { status: "found", item };
-}
-
-function readOrderViewFromBybitList(response: unknown): BybitOrderView | undefined {
-  if (typeof response !== "object" || response === null || !("result" in response)) {
-    return undefined;
+  const decoded = decodeOrderQueryResponse({ response, expected });
+  if (decoded.kind === "found") {
+    return { status: "found", item: decoded.item };
   }
-
-  const result = (response as Record<string, unknown>).result;
-  if (typeof result !== "object" || result === null || !("list" in result)) {
-    return undefined;
+  if (decoded.kind === "not_found") {
+    return { status: "not_found" };
   }
-
-  const list = (result as Record<string, unknown>).list;
-  if (!Array.isArray(list) || list.length === 0) {
-    return undefined;
-  }
-
-  const item = list[0];
-  if (typeof item !== "object" || item === null) {
-    return undefined;
-  }
-
-  const record = item as Record<string, unknown>;
-  return {
-    orderStatus: readString(record, "orderStatus"),
-    triggerPrice: readString(record, "triggerPrice"),
-    qty: readString(record, "qty"),
-    stopLoss: readString(record, "stopLoss"),
-    takeProfit: readString(record, "takeProfit"),
-    cumExecQty: readString(record, "cumExecQty"),
-    avgPrice: readString(record, "avgPrice"),
-  };
-}
-
-function readString(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  return typeof value === "string" ? value : "";
+  // protocol_failure: a structurally malformed or identity-mismatched
+  // response proves nothing, so it is folded into the same query_failed
+  // bucket a transport exception lands in (design.md).
+  return { status: "query_failed" };
 }

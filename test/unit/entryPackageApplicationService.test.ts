@@ -151,6 +151,25 @@ test("successful CANCEL returns absent after durable confirmation", async () => 
   });
 });
 
+test("CANCEL with a malformed confirmation response never returns entry_package_absent and leaves state unresolved", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.orderByLinkIdResponse = malformedResponse();
+    bybit.orderHistoryResponse = malformedResponse();
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.notEqual(record?.status, "absent");
+    assert.equal(record?.status, "unknown");
+    assert.equal(record?.order_link_id, orderLinkId, "the record does not become absent");
+  });
+});
+
 test("a spot ticker (no .P suffix) uses category=spot end-to-end, never the global bybitCategory default", async () => {
   await withService(async ({ service, bybit, repo, rulesProvider }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -215,6 +234,40 @@ test("create accepted but confirmation ambiguous returns a safe error", async ()
     const result = await service.apply(makeCommand());
 
     assertInternalError(result);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+test("create accepted but confirmation malformed never fabricates success: internal_error, status unknown, pending_action preserved", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = malformedResponse();
+    bybit.orderHistoryResponse = malformedResponse();
+
+    const result = await service.apply(makeCommand());
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "unknown");
+    assert.equal(record?.pending_action, "create");
+  });
+});
+
+test("a repeat PUT after a malformed confirmation never resends solely because the prior confirmation was malformed", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = malformedResponse();
+    bybit.orderHistoryResponse = malformedResponse();
+
+    const first = await service.apply(makeCommand());
+    assertInternalError(first);
+    assert.equal(bybit.createOrderCalls.length, 1);
+
+    const second = await service.apply(makeCommand());
+    assertInternalError(second);
+    assert.equal(
+      bybit.createOrderCalls.length,
+      1,
+      "a malformed confirmation is ambiguous, not not_found — it must never be treated as grounds to resend",
+    );
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
   });
 });
@@ -507,6 +560,12 @@ function liveOrder(
 
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
+}
+
+// Structurally invalid: `list` present but not an array, so it can never
+// be mistaken for a clean "not found" or a real found order.
+function malformedResponse(): unknown {
+  return { retCode: 0, result: { list: "not-an-array" } };
 }
 
 function assertApplied(result: EntryPackageHttpResult, calculatedQuantity: string): void {

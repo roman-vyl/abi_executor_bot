@@ -1,9 +1,9 @@
 ## 1. Decoder module
 
-- [ ] 1.1 Create `src/services/entryPackage/orderQueryResponseDecoder.ts` with
+- [x] 1.1 Create `src/services/entryPackage/orderQueryResponseDecoder.ts` with
       `BybitOrderView`, `DecodedOrderQuery`, and `OrderQueryProtocolFailureReason`
       types as specified in design.md.
-- [ ] 1.2 Implement `decodeOrderQueryResponse({ response, expected: { category,
+- [x] 1.2 Implement `decodeOrderQueryResponse({ response, expected: { category,
       symbol, orderLinkId } })`:
       - envelope/`result`/`category` checks → `malformed_envelope` /
         `category_mismatch`
@@ -29,12 +29,12 @@
       - malformed decimal text or out-of-range exponent on any of the above →
         that field's `invalid_*` reason
       - all checks pass with exactly one row → `{ kind: "found", item }`
-- [ ] 1.3 Unit tests covering the full pure decoder matrix: valid empty list,
+- [x] 1.3 Unit tests covering the full pure decoder matrix: valid empty list,
       valid one matching row, missing/non-object result, missing/non-array
       list, list not array, multiple rows, null/scalar row, category
       mismatch, symbol mismatch, orderLinkId mismatch, unknown non-empty
       `orderStatus` → found.
-- [ ] 1.4 Unit tests for the numeric validation matrix, at minimum: negative
+- [x] 1.4 Unit tests for the numeric validation matrix, at minimum: negative
       `qty`, zero `qty`, negative `cumExecQty`, zero `cumExecQty` (allowed —
       assert it decodes as `found`), negative `triggerPrice`, zero
       `triggerPrice` (allowed), negative `stopLoss`, zero `stopLoss`
@@ -44,20 +44,20 @@
 
 ## 2. Wire into packageConfirmation.ts
 
-- [ ] 2.1 Rewrite `queryOrderView()` in
+- [x] 2.1 Rewrite `queryOrderView()` in
       `src/services/entryPackage/packageConfirmation.ts` to accept an
       `expected: { category, symbol, orderLinkId }` (or equivalent payload)
       alongside the query callback, call `decodeOrderQueryResponse()` with
       it, mapping `found`/`not_found` through unchanged and
       `protocol_failure` to `{ status: "query_failed" }`.
-- [ ] 2.2 Update `queryOrderView()`'s two call sites in `confirmEntryPackage`
+- [x] 2.2 Update `queryOrderView()`'s two call sites in `confirmEntryPackage`
       and `confirmEntryPackageCancelled` to pass the expected identity from
       `getEntryOrderPayload`/`getEntryOrderHistoryPayload` (both already
       carry `category`/`symbol`/`orderLinkId`).
-- [ ] 2.3 Delete `readOrderViewFromBybitList()` and the now-unused
+- [x] 2.3 Delete `readOrderViewFromBybitList()` and the now-unused
       `BybitOrderView` type in `packageConfirmation.ts` (import the type from
       the new decoder module instead).
-- [ ] 2.4 In `confirmEntryPackage`'s realtime-handling branch, set
+- [x] 2.4 In `confirmEntryPackage`'s realtime-handling branch, set
       `sawInconclusiveFinding = true` whenever `realtime.status === "found"`
       and none of the `pending_confirmed`/`full_fill`/`partial_fill` return
       paths was taken (covers both an unrecognized `orderStatus` and a
@@ -65,14 +65,14 @@
       design.md's "Unknown/terminal order status semantics" correction. Do
       not change any other branch, the retry loop shape, attempt count, or
       delay.
-- [ ] 2.5 Confirm `confirmEntryPackageCancelled` and all shared helpers
+- [x] 2.5 Confirm `confirmEntryPackageCancelled` and all shared helpers
       (`fieldsMatch`, `fillFieldsPlausible`, `hasFill`,
       `confirmsAbsenceOrTerminal`, `toObservation`, `decimalEquals`) are
       untouched beyond the call-site change in 2.2.
 
 ## 3. Confirmation-behavior regression tests
 
-- [ ] 3.1 Add tests in the existing `packageConfirmation` test suite:
+- [x] 3.1 Add tests in the existing `packageConfirmation` test suite:
       - malformed realtime + valid empty history → `ambiguous`, not
         `not_found`
       - valid empty realtime + malformed history → `ambiguous`, not
@@ -83,7 +83,7 @@
         budget → `not_found` / `cancelled_confirmed` per existing rules
         (regression guard that the fix didn't break the legitimate-absence
         path)
-- [ ] 3.2 Add tests for the unknown/terminal-status correction:
+- [x] 3.2 Add tests for the unknown/terminal-status correction:
       - unrecognized realtime `orderStatus` + clean empty history for the
         whole retry budget → `ambiguous`
       - terminal-without-fill realtime `orderStatus` + clean empty history
@@ -95,19 +95,19 @@
 
 ## 4. Application-service safety regression tests
 
-- [ ] 4.1 Add/extend `EntryPackageApplicationService` tests: malformed
+- [x] 4.1 Add/extend `EntryPackageApplicationService` tests: malformed
       confirmation on create/amend → HTTP 500 `internal_error`, record status
       `unknown`, `pending_action` preserved, `entry_package_applied` not
       returned.
-- [ ] 4.2 Add a test for a repeat PUT after a malformed confirmation: the
+- [x] 4.2 Add a test for a repeat PUT after a malformed confirmation: the
       command is not resent to the exchange solely because the prior
       confirmation was malformed (only a cleanly-absent query result permits
       resend, per the existing "not_found" gate).
-- [ ] 4.3 Add a test for cancel confirmation with a malformed response:
+- [x] 4.3 Add a test for cancel confirmation with a malformed response:
       `entry_package_absent` is not returned, the record does not become
       absent, and state remains unresolved/`unknown`.
 
 ## 5. Verification
 
-- [ ] 5.1 Run `npm test`.
-- [ ] 5.2 Run `npm run typecheck`.
+- [x] 5.1 Run `npm test`.
+- [x] 5.2 Run `npm run typecheck`.

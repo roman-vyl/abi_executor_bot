@@ -106,12 +106,14 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown> {
     this.getOrderByLinkIdCalls.push(payload);
-    return this.orderByLinkIdResponseByLinkId.get(payload.orderLinkId) ?? this.orderByLinkIdResponse;
+    const response = this.orderByLinkIdResponseByLinkId.get(payload.orderLinkId) ?? this.orderByLinkIdResponse;
+    return withDefaultOrderIdentity(response, payload);
   }
 
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     this.getOrderHistoryCalls.push(payload);
-    return this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
+    const response = this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
+    return withDefaultOrderIdentity(response, payload);
   }
 
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
@@ -138,4 +140,50 @@ export class FakeBybitAdapter implements BybitAdapter {
     void input;
     return { retCode: 0, result: {} };
   }
+}
+
+// Fills in `result.category` and each row's `symbol`/`orderLinkId` from the
+// request payload wherever the test's response object left them unset,
+// so existing tests that only assert on orderStatus/qty/etc. keep decoding
+// as a clean found/not_found result under the strict decoder. A test that
+// wants to exercise a category/symbol/orderLinkId mismatch sets that field
+// explicitly on its response, which this never overrides.
+function withDefaultOrderIdentity(
+  response: unknown,
+  payload: { category: string; symbol: string; orderLinkId: string },
+): unknown {
+  if (typeof response !== "object" || response === null) {
+    return response;
+  }
+  const responseRecord = response as Record<string, unknown>;
+  const result = responseRecord.result;
+  if (typeof result !== "object" || result === null) {
+    return response;
+  }
+
+  const resultRecord = result as Record<string, unknown>;
+  const nextResult: Record<string, unknown> = { ...resultRecord };
+  if (!("category" in resultRecord)) {
+    nextResult.category = payload.category;
+  }
+
+  const list = resultRecord.list;
+  if (Array.isArray(list)) {
+    nextResult.list = list.map((row) => {
+      if (typeof row !== "object" || row === null) {
+        return row;
+      }
+      const rowRecord = row as Record<string, unknown>;
+      const nextRow: Record<string, unknown> = { ...rowRecord };
+      if (!("symbol" in rowRecord)) {
+        nextRow.symbol = payload.symbol;
+      }
+      if (!("orderLinkId" in rowRecord)) {
+        nextRow.orderLinkId = payload.orderLinkId;
+      }
+      return nextRow;
+    });
+  }
+
+  return { ...responseRecord, result: nextResult };
 }
