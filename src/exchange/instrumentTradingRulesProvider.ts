@@ -1,11 +1,9 @@
 import type { AbiConfig } from "../config/config.js";
 import type { BybitAdapter } from "./bybitAdapter.js";
+import { decodeInstrumentTradingRulesResponse } from "./instrumentTradingRulesResponseDecoder.js";
+import type { InstrumentTradingRules } from "./instrumentTradingRulesResponseDecoder.js";
 
-export type InstrumentTradingRules = {
-  minOrderQty: string;
-  qtyStep: string;
-  minNotionalValue: string;
-};
+export type { InstrumentTradingRules };
 
 export interface InstrumentTradingRulesProvider {
   getRules(symbol: string, category: "linear" | "spot"): Promise<InstrumentTradingRules>;
@@ -39,59 +37,12 @@ export class BybitInstrumentTradingRulesProvider implements InstrumentTradingRul
     }
 
     const response = await this.bybit.getInstrumentInfo(category, symbol);
-    const rules = parseInstrumentTradingRules(response, symbol);
-    this.cache.set(cacheKey, { rules, expiresAt: now + this.ttlMs });
-    return rules;
+    const decoded = decodeInstrumentTradingRulesResponse({ response, expected: { category, symbol } });
+    if (!decoded.ok) {
+      throw new Error(`Bybit instruments-info response for ${symbol} is invalid: ${decoded.reason}`);
+    }
+
+    this.cache.set(cacheKey, { rules: decoded.rules, expiresAt: now + this.ttlMs });
+    return decoded.rules;
   }
-}
-
-function parseInstrumentTradingRules(response: unknown, symbol: string): InstrumentTradingRules {
-  const item = readInstrumentListItem(response);
-  if (item === undefined) {
-    throw new Error(`Bybit instruments-info response did not include symbol ${symbol}`);
-  }
-
-  const lotSizeFilter = item.lotSizeFilter;
-  if (typeof lotSizeFilter !== "object" || lotSizeFilter === null) {
-    throw new Error(`Bybit instruments-info response for ${symbol} is missing lotSizeFilter`);
-  }
-
-  const record = lotSizeFilter as Record<string, unknown>;
-  const minOrderQty = readRecordString(record, "minOrderQty");
-  const qtyStep = readRecordString(record, "qtyStep");
-  const minNotionalValue = readRecordString(record, "minNotionalValue");
-
-  if (minOrderQty === "" || qtyStep === "" || minNotionalValue === "") {
-    throw new Error(`Bybit instruments-info response for ${symbol} is missing lot size fields`);
-  }
-
-  return { minOrderQty, qtyStep, minNotionalValue };
-}
-
-function readInstrumentListItem(response: unknown): { lotSizeFilter: unknown } | undefined {
-  if (typeof response !== "object" || response === null || !("result" in response)) {
-    return undefined;
-  }
-
-  const result = (response as Record<string, unknown>).result;
-  if (typeof result !== "object" || result === null || !("list" in result)) {
-    return undefined;
-  }
-
-  const list = (result as Record<string, unknown>).list;
-  if (!Array.isArray(list) || list.length === 0) {
-    return undefined;
-  }
-
-  const item = list[0];
-  if (typeof item !== "object" || item === null) {
-    return undefined;
-  }
-
-  return item as { lotSizeFilter: unknown };
-}
-
-function readRecordString(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  return typeof value === "string" ? value : "";
 }

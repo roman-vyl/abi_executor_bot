@@ -11,6 +11,7 @@ import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } fro
 import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import type { ExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
+import { BybitInstrumentTradingRulesProvider } from "../../src/exchange/instrumentTradingRulesProvider.js";
 import { EntryPackageApplicationService } from "../../src/services/entryPackage/entryPackageApplicationService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
@@ -275,6 +276,41 @@ test("a Filled row with a non-string numeric field never fabricates success: int
     const record = repo.get("instance-1", "cycle-1");
     assert.equal(record?.status, "unknown");
     assert.notEqual((result.body as { status?: string }).status, "entry_package_applied");
+  });
+});
+
+test("a malformed instruments-info response never fabricates success: internal_error, no createOrder, no applied record", async () => {
+  await withRealRulesProviderService(async ({ service, bybit, repo }) => {
+    bybit.instrumentInfoResponse = {
+      retCode: 0,
+      result: { category: "linear", list: [{ symbol: "BTCUSDT", lotSizeFilter: { minOrderQty: "0" } }] },
+    };
+
+    const result = await service.apply(makeCommand());
+
+    assertInternalError(result);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record, undefined);
+  });
+});
+
+test("an unsupported spot instruments-info lookup never fabricates success: internal_error, no createOrder, no applied record", async () => {
+  await withRealRulesProviderService(async ({ service, bybit, repo }) => {
+    bybit.instrumentInfoResponse = {
+      retCode: 0,
+      result: {
+        category: "spot",
+        list: [{ symbol: "BTCUSDT", lotSizeFilter: { basePrecision: "0.000001", minOrderAmt: "5" } }],
+      },
+    };
+
+    const result = await service.apply(makeCommand({ ticker: "BTCUSDT" }));
+
+    assertInternalError(result);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record, undefined);
   });
 });
 
@@ -650,6 +686,43 @@ async function withService(
     });
 
     await fn({ service, bybit, repo, rulesProvider });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// Wires the real BybitInstrumentTradingRulesProvider (instead of
+// FakeInstrumentTradingRulesProvider) so a test can drive service.apply
+// purely through bybit.instrumentInfoResponse, exercising the actual
+// instruments-info response decoder end to end.
+async function withRealRulesProviderService(
+  fn: (ctx: { service: EntryPackageApplicationService; bybit: FakeBybitAdapter; repo: EntryPackageCorrelationRepository }) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "abi-entry-package-app-service-real-rules-"));
+  try {
+    const config = makeTestConfig({
+      dryRun: false,
+      liveTradingEnabled: true,
+      bybitApiKey: "test-key",
+      bybitApiSecret: "test-secret",
+      bybitEnvironment: "testnet",
+    });
+    const bybit = new FakeBybitAdapter();
+    const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
+    const rulesProvider = new BybitInstrumentTradingRulesProvider(bybit, config);
+    const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
+    const mutex = new KeyedMutex();
+
+    const service = new EntryPackageApplicationService({
+      config,
+      bybit,
+      correlationRepository: repo,
+      positionSizeCalculator,
+      mutex,
+      exchangeInstrumentResolver: new BybitExchangeInstrumentResolver(),
+    });
+
+    await fn({ service, bybit, repo });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
