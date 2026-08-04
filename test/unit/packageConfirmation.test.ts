@@ -43,6 +43,30 @@ test("full fill before acknowledgement is classified from realtime and returns a
   }
 });
 
+test("a Filled row whose cumExecQty is a number rather than a string is ambiguous, not full_fill", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [
+        {
+          symbol: "BTCUSDT",
+          orderLinkId: "link-1",
+          orderStatus: "Filled",
+          cumExecQty: 0.001, // malformed: exchange field must be a string, never coerced
+          avgPrice: "99950",
+        },
+      ],
+    },
+  };
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
 test("partial fill before acknowledgement records observed filled and remaining quantities", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = listResponse([

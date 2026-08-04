@@ -96,45 +96,66 @@ export function decodeOrderQueryResponse(input: {
     return { kind: "protocol_failure", reason: "invalid_order_status" };
   }
 
-  const qty = readStringField(record, "qty");
-  if (!isPositiveOrEmptyExactDecimal(qty)) {
+  const qtyField = readOptionalStringField(record, "qty");
+  if (!qtyField.ok || !isPositiveOrEmptyExactDecimal(qtyField.value)) {
     return { kind: "protocol_failure", reason: "invalid_qty" };
   }
 
-  const cumExecQty = readStringField(record, "cumExecQty");
-  if (!isNonNegativeOrEmptyExactDecimal(cumExecQty)) {
+  const cumExecQtyField = readOptionalStringField(record, "cumExecQty");
+  if (!cumExecQtyField.ok || !isNonNegativeOrEmptyExactDecimal(cumExecQtyField.value)) {
     return { kind: "protocol_failure", reason: "invalid_cumulative_filled_qty" };
   }
 
-  const triggerPrice = readStringField(record, "triggerPrice");
-  if (!isNonNegativeOrEmptyExactDecimal(triggerPrice)) {
+  const triggerPriceField = readOptionalStringField(record, "triggerPrice");
+  if (!triggerPriceField.ok || !isNonNegativeOrEmptyExactDecimal(triggerPriceField.value)) {
     return { kind: "protocol_failure", reason: "invalid_trigger_price" };
   }
 
-  const stopLoss = readStringField(record, "stopLoss");
-  if (!isNonNegativeOrEmptyExactDecimal(stopLoss)) {
+  const stopLossField = readOptionalStringField(record, "stopLoss");
+  if (!stopLossField.ok || !isNonNegativeOrEmptyExactDecimal(stopLossField.value)) {
     return { kind: "protocol_failure", reason: "invalid_stop_loss" };
   }
 
-  const takeProfit = readStringField(record, "takeProfit");
-  if (!isNonNegativeOrEmptyExactDecimal(takeProfit)) {
+  const takeProfitField = readOptionalStringField(record, "takeProfit");
+  if (!takeProfitField.ok || !isNonNegativeOrEmptyExactDecimal(takeProfitField.value)) {
     return { kind: "protocol_failure", reason: "invalid_take_profit" };
   }
 
-  const avgPrice = readStringField(record, "avgPrice");
-  if (!isPositiveOrEmptyExactDecimal(avgPrice)) {
+  const avgPriceField = readOptionalStringField(record, "avgPrice");
+  if (!avgPriceField.ok || !isPositiveOrEmptyExactDecimal(avgPriceField.value)) {
     return { kind: "protocol_failure", reason: "invalid_average_price" };
   }
 
   return {
     kind: "found",
-    item: { orderStatus, triggerPrice, qty, stopLoss, takeProfit, cumExecQty, avgPrice },
+    item: {
+      orderStatus,
+      triggerPrice: triggerPriceField.value,
+      qty: qtyField.value,
+      stopLoss: stopLossField.value,
+      takeProfit: takeProfitField.value,
+      cumExecQty: cumExecQtyField.value,
+      avgPrice: avgPriceField.value,
+    },
   };
 }
 
-function readStringField(record: Record<string, unknown>, key: string): string {
+// A field the exchange omits entirely (not an own key on the row) is a
+// legitimate empty — some fields only appear at certain order states. A
+// field that IS present but is not a string (a number, null, boolean,
+// object) is not an omission, it's a malformed row: silently coercing it
+// to "" would let a wrong-shaped field masquerade as "the exchange didn't
+// report this," so it is rejected as protocol_failure instead.
+function readOptionalStringField(
+  record: Record<string, unknown>,
+  key: string,
+): { ok: true; value: string } | { ok: false } {
+  if (!Object.hasOwn(record, key)) {
+    return { ok: true, value: "" };
+  }
+
   const value = record[key];
-  return typeof value === "string" ? value : "";
+  return typeof value === "string" ? { ok: true, value } : { ok: false };
 }
 
 function isPositiveOrEmptyExactDecimal(text: string): boolean {

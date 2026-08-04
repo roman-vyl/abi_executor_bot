@@ -237,3 +237,49 @@ test("an out-of-range exponent on any field is rejected", () => {
     "invalid_take_profit",
   );
 });
+
+// A field the exchange omits entirely is a legitimate empty. A field that
+// IS present but not a string is a malformed row, not an omission — it
+// must never be silently coerced to "".
+
+test("a numeric field genuinely absent from the row (no own key) is treated as empty and decodes as found", () => {
+  const { avgPrice: _avgPrice, ...rowWithoutAvgPrice } = row();
+  const decoded = decodeOrderQueryResponse({
+    response: { retCode: 0, result: { category: "linear", list: [rowWithoutAvgPrice] } },
+    expected,
+  });
+  assert.equal(decoded.kind, "found");
+  if (decoded.kind === "found") {
+    assert.equal(decoded.item.avgPrice, "");
+  }
+});
+
+test("qty present as a number rather than a string is invalid_qty, not coerced", () => {
+  assertProtocolFailure({ retCode: 0, result: { category: "linear", list: [row({ qty: 0.001 })] } }, "invalid_qty");
+});
+
+test("qty present as null rather than a string is invalid_qty, not treated as absent", () => {
+  assertProtocolFailure({ retCode: 0, result: { category: "linear", list: [row({ qty: null })] } }, "invalid_qty");
+});
+
+test("qty present as an object rather than a string is invalid_qty", () => {
+  assertProtocolFailure({ retCode: 0, result: { category: "linear", list: [row({ qty: {} })] } }, "invalid_qty");
+});
+
+test("qty present as a boolean rather than a string is invalid_qty", () => {
+  assertProtocolFailure({ retCode: 0, result: { category: "linear", list: [row({ qty: true })] } }, "invalid_qty");
+});
+
+test("avgPrice present as a number rather than a string is invalid_average_price, not coerced", () => {
+  assertProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [row({ avgPrice: 99950 })] } },
+    "invalid_average_price",
+  );
+});
+
+test("cumExecQty present as null rather than a string is invalid_cumulative_filled_qty, not treated as zero", () => {
+  assertProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [row({ cumExecQty: null })] } },
+    "invalid_cumulative_filled_qty",
+  );
+});

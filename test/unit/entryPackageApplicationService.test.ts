@@ -252,6 +252,32 @@ test("create accepted but confirmation malformed never fabricates success: inter
   });
 });
 
+test("a Filled row with a non-string numeric field never fabricates success: internal_error, status unknown, no entry_package_applied", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = {
+      retCode: 0,
+      result: {
+        category: "linear",
+        list: [
+          {
+            orderStatus: "Filled",
+            cumExecQty: 0.001, // malformed: exchange field must be a string, never coerced
+            avgPrice: "99950",
+          },
+        ],
+      },
+    };
+    bybit.orderHistoryResponse = orderList([]);
+
+    const result = await service.apply(makeCommand());
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "unknown");
+    assert.notEqual((result.body as { status?: string }).status, "entry_package_applied");
+  });
+});
+
 test("a repeat PUT after a malformed confirmation never resends solely because the prior confirmation was malformed", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = malformedResponse();
