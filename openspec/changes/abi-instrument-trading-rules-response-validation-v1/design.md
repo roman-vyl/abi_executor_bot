@@ -41,6 +41,11 @@ designs.
   specific to `order/realtime`/`order/history`. No shared abstraction is
   introduced between them beyond the exact-decimal helpers they already
   both depend on.
+- No `spot` `lotSizeFilter` field mapping (`basePrecision` → `qtyStep`,
+  `minOrderAmt` → `minNotionalValue`). `spot`'s trading-rules schema is
+  materially different, not a renamed version of `linear`'s three fields —
+  deciding how (or whether) to size `spot` orders is a separate decision
+  with its own trade-offs, out of scope for a response-validation change.
 
 ## Decisions
 
@@ -55,16 +60,43 @@ caller and already throws to signal failure to
 `getRules()` do the one translation to a thrown error, keeping the decoder
 trivially unit-testable without needing to catch exceptions in tests.
 
-**Reuse `isPositiveExactDecimalText`/`isNonNegativeExactDecimalText` from
-`src/domain/entryPackageApi.ts` rather than the locally-defined
-`isPositiveOrEmptyExactDecimal`/`isNonNegativeOrEmptyExactDecimal` helpers
-in `orderQueryResponseDecoder.ts`.**
-The order-query decoder's helpers additionally accept `""` because several
-of its fields are legitimately absent at certain order states (see that
-file's comment). None of the three `instruments-info` fields are ever
-legitimately absent — `lotSizeFilter` either has all three or the response
-is malformed — so the plain (non-"-or-empty") domain helpers are the
-correct, already-existing fit; no new decimal-validation helper is added.
+**Validate numeric fields with `compareDecimal` from `exactDecimal.ts`
+(wrapped in `try/catch`), not `isPositiveExactDecimalText`/
+`isNonNegativeExactDecimalText` from `entryPackageApi.ts`.**
+Those grammar/sign helpers are deliberately total — `analyzeExactDecimalText`'s
+own comment states it applies no `MAX_ABS_EXPONENT` bound because the
+Bybit position-size adapter boundary that also uses it must never throw.
+That's the wrong fit here: `minOrderQty`/`qtyStep`/`minNotionalValue` feed
+directly into `ceilToStep`/`ceilRatioToStep`, which parse with the
+BigInt-backed `compareDecimal`/arithmetic family and *do* enforce
+`MAX_ABS_EXPONENT = 100`, throwing outside it. A response containing, say,
+`minOrderQty: "1e999"` would pass the grammar-only check, get cached as a
+"valid" rule, and then throw on every sizing attempt for that
+`category:symbol` until the cache entry expired — the exact "invalid rules
+poison the cache" failure mode this change exists to prevent, just moved
+one layer instead of eliminated. Validating with `compareDecimal(value,
+"0")` itself (positive: `> 0`, non-negative: `>= 0`, non-string or a throw
+from `compareDecimal` both count as invalid) makes "the decoder accepted
+it" and "the sizing arithmetic can consume it" the same guarantee by
+construction. No new decimal-validation helper is added; `compareDecimal`
+already exists and is already the function `ceilToStep`/`ceilRatioToStep`
+depend on.
+
+**`category` is restricted to `linear`; `spot` fails closed as
+unsupported rather than being parsed with `linear`'s field names.**
+Bybit's public `instruments-info` documentation gives `spot` a different
+`lotSizeFilter` shape (`basePrecision`, `minOrderAmt`; `minOrderQty`
+deprecated; no `qtyStep`). Attempting to read `qtyStep`/`minNotionalValue`
+off a `spot` response would either always fail (if genuinely absent,
+correctly rejected but for a misleading "malformed" reason) or, worse,
+silently succeed if Bybit ever includes stray/legacy fields under those
+names with unrelated semantics. Rejecting `category === "spot"` outright,
+before field parsing, makes the unsupported case explicit and typed rather
+than an accident of the linear-shaped checks happening to fail. This
+matches proposal.md's scope: `getRules(symbol, category)` already accepts
+`"linear" | "spot"` (from `abi-exchange-instrument-identity-v1`), and
+`spot` is reachable today for any ticker without a `.P` suffix, so this is
+closing a real path, not a hypothetical one.
 
 **Cache write happens in `getRules()`, not inside the decoder.**
 The decoder has no knowledge of the cache; `getRules()` calls it, and only
@@ -89,3 +121,11 @@ reordering of existing provider code, not new caching logic.
   required numeric fields vs. six optional ones with different sign rules)
   that a shared abstraction would need its own design discussion outside
   this change's scope.
+- [Any live account whose resolved ticker is `spot` gets `internal_error`
+  for every entry-package command instead of a (previously accidental,
+  likely already-broken) sizing attempt] → Accepted and intended per
+  proposal.md's Impact section: Live V1's open-position/entry-package
+  contour is linear-only in practice, and an explicit typed rejection is
+  strictly safer than the prior behavior, which depended on `spot`
+  responses happening to fail `linear`-shaped field checks rather than
+  guaranteeing it.
