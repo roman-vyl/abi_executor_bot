@@ -427,12 +427,3 @@ geometries.
 - **THEN** the documentation SHALL state that the side-to-direction mapping applies to
   the currently supported entry geometry and is not guaranteed for a future, differently
   shaped strategy
-
-### Requirement: Legacy signal and intent endpoints remain unaffected
-Implementing this capability SHALL NOT change the observable behavior of the existing
-legacy signal and intent endpoints.
-
-#### Scenario: Legacy endpoints behave exactly as before
-- **WHEN** this capability is implemented
-- **THEN** `POST /signals`, `PUT /intents/:id`, `POST /intents/:id/cancel`, and
-  `GET /intents/:id` SHALL continue to behave exactly as they did before this change
