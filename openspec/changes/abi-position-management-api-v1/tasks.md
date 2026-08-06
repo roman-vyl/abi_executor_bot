@@ -4,13 +4,15 @@
       plus `PositionManagementErrorCode` including `position_not_open` and reused
       `unsupported_exchange_scope`/`unknown_trade_cycle_binding`.
 - [ ] 1.2 Define exact-decimal numeric-equality comparison for protection confirmation, distinct
-      from string comparison, and ensure responses echo canonical requested values.
+      from string comparison; ensure the response type carries back the accepted request strings
+      unchanged rather than any canonicalized or exchange-reported value.
 
 ## 2. HTTP boundary
 
 - [ ] 2.1 Add route matching for both endpoints, including a hard empty-body check on `DELETE` that
       rejects any non-empty body (including quantity/percentage/close_fraction fields) as
-      `validation_failed` without parsing it as a size input.
+      `validation_failed` with `error.details` pointing at path `/`, without parsing it as a size
+      input.
 - [ ] 2.2 Keep both boundaries independent of exchange/execution wiring — validated transport
       commands only.
 
@@ -18,9 +20,11 @@
 
 - [ ] 3.1 Serialize `protection_applied` and `trade_cycle_closed` reachable only from a
       verified-outcome path (zero, not-accepted-alone), never a bare "accepted" result.
-- [ ] 3.2 Serialize `position_not_open`, `unsupported_exchange_scope`, `unknown_trade_cycle_binding`,
-      `validation_failed`, and safe `internal_error` per the spec's mapping table, including the
-      unambiguous-ownership and complete-correlation gates for close.
+- [ ] 3.2 Serialize `unsupported_exchange_scope` and `internal_error` for the shared
+      scope-resolution gate on both endpoints (unsupported category vs. ambiguous ownership), and
+      `position_not_open` only once that gate has passed for protection.
+- [ ] 3.3 Serialize `unknown_trade_cycle_binding`, `validation_failed`, and safe `internal_error` per
+      the spec's mapping table, including close's complete-correlation gate.
 
 ## 4. OpenAPI
 
@@ -29,12 +33,13 @@
 
 ## 5. Contract-level tests
 
-- [ ] 5.1 Test protection: body validation, numeric-equality confirmation (matching, formatting-only
-      difference, genuine mismatch), and `position_not_open`.
-- [ ] 5.2 Test close: empty-body acceptance, rejection of any non-empty body, unsupported-scope and
-      ambiguous-ownership fail-closed paths, incomplete/contradictory correlation, and already-closed
-      cleanup verification.
-- [ ] 5.3 Test shared error mapping (`unknown_trade_cycle_binding`, `internal_error`) for both
+- [ ] 5.1 Test the shared scope-resolution gate on both endpoints: unsupported category, ambiguous
+      ownership, and a zero-size-but-unambiguous scope proceeding to each endpoint's own check.
+- [ ] 5.2 Test protection: body validation, numeric-equality confirmation (matching, formatting-only
+      difference, genuine mismatch), accepted-string echo, and `position_not_open`.
+- [ ] 5.3 Test close: empty-body acceptance, rejection of any non-empty body (`error.details` at
+      `/`), incomplete/contradictory correlation, and already-closed cleanup verification.
+- [ ] 5.4 Test shared error mapping (`unknown_trade_cycle_binding`, `internal_error`) for both
       endpoints.
 
 ## 6. Verification

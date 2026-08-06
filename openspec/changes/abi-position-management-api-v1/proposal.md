@@ -13,15 +13,16 @@ pair already used by the other two endpoints.
 - Add `DELETE .../open-position`, accepting only an absent/empty body: close the trade cycle's
   entire current position and remove every exchange order ABI can attribute to that ownership pair.
 - Fix `2xx` to mean "exchange-verified", never "write accepted": protection confirmation requires
-  exact-decimal numeric equality to the requested values, and the response always echoes the
-  canonical requested/pair values, never an exchange-normalized one.
+  exact-decimal numeric equality to the requested values, and the response always returns the exact
+  accepted request strings unchanged — never an exchange-normalized value.
 - Fix typed failures beyond the existing `validation_failed`/`internal_error`: reuse
   `unknown_trade_cycle_binding` and `unsupported_exchange_scope` from `abi-open-position-lookup-api`
   on both endpoints; add `position_not_open` for a protection request against a pair with no live
   position.
-- Require full close to proceed only under unambiguous pair ownership within the supported V1
-  exchange scope; ambiguous, overlapping, or out-of-scope exposure is never closed, and another
-  pair's orders are never cancelled.
+- Require both writes to proceed only after resolving the pair to exactly one unambiguous, supported
+  position scope (account/category/symbol/position slot), which may hold a positive or zero size;
+  ambiguous, overlapping, or out-of-scope exposure is never written to, and another pair's orders are
+  never cancelled. `position_not_open` is checked only once that scope resolves unambiguously.
 - Add an OpenAPI 3.1 operation for each endpoint.
 
 Non-goal: internal ABI execution (Bybit calls, adapter wiring, retries/recovery, order-attribution
@@ -46,4 +47,4 @@ None.
 - Future ABI code: DTOs, transport validation, thin HTTP handlers, OpenAPI, contract-level tests —
   no execution wiring.
 - Trading safety: a write that was merely accepted/submitted/queued can never be reported as
-  success, and a position or order can never be closed/cancelled under ambiguous ownership.
+  success, and neither endpoint ever writes under ambiguous or unresolved ownership.

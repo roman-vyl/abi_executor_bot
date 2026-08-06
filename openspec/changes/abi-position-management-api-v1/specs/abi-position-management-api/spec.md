@@ -17,12 +17,43 @@ ABI SHALL expose `PUT /v1/strategy-instances/{strategy_instance_id}/trade-cycles
 - **WHEN** `stop_price` is missing, null, or not valid exact-decimal text, or `take_price` is present, non-null, and not valid exact-decimal text
 - **THEN** ABI returns HTTP `422` with `error.code` `validation_failed` identifying the offending field
 
-### Requirement: Protection confirmation requires exact numeric equality, not exchange acceptance
-`protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. The response SHALL echo the canonical requested values, never an exchange-normalized representation.
+### Requirement: ABI exposes a close endpoint accepting only an empty body
+ABI SHALL expose `DELETE /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position`, defining no field of any kind for quantity, percentage, or close fraction. The request body SHALL be absent or zero-length. Any non-empty body SHALL be rejected as `validation_failed`, with `error.details` identifying the request body's root (`/`), never silently ignored.
 
-#### Scenario: Verified protection is acknowledged with canonical values
+#### Scenario: Empty-body request is accepted
+- **WHEN** a client sends `DELETE` to the route with no body
+- **THEN** ABI accepts the request based solely on the two path identifiers
+
+#### Scenario: Non-empty body is rejected
+- **WHEN** a `DELETE` request carries any non-empty body, including one that would set a quantity, percentage, or close fraction
+- **THEN** ABI returns HTTP `422` with `error.code` `validation_failed`
+- **AND** `error.details` identifies path `/`, the request body's root
+- **AND** ABI does not act on any content of that body
+
+### Requirement: Both write operations require unambiguous, in-scope position-scope resolution before any exchange write
+Before performing any exchange write, ABI SHALL resolve the requested pair to exactly one unambiguous, supported exchange position scope — the combination of account, category, symbol, and position slot — for both `PUT .../protection` and `DELETE .../open-position`. This scope MAY currently hold a positive or zero size; resolving it does not by itself imply a live position exists. ABI SHALL fail closed — perform no exchange write, return no `2xx` — when the resolved scope's exchange category is outside the supported V1 scope (`unsupported_exchange_scope`), or when exposure on the resolved account, category, symbol, or position slot is ambiguous or overlapping such that it cannot be uniquely attributed to the pair (`internal_error`). Each endpoint's own size-dependent check (`position_not_open` for protection; cleanup verification for close) SHALL be evaluated only after this resolution succeeds.
+
+#### Scenario: Unsupported exchange scope blocks both operations
+- **WHEN** the resolved scope's exchange category is outside this capability's supported V1 scope
+- **THEN** ABI returns HTTP `422` with `error.code` `unsupported_exchange_scope`
+- **AND** ABI performs no exchange write
+
+#### Scenario: Ambiguous ownership blocks both operations
+- **WHEN** exposure on the resolved account, category, symbol, or position slot cannot be uniquely attributed to the requested pair, including an unsupported or unexpected position-slot signal
+- **THEN** ABI returns HTTP `500` with `error.code` `internal_error`
+- **AND** ABI performs no exchange write
+
+#### Scenario: A zero-size scope still resolves unambiguously
+- **WHEN** the requested pair's position scope is otherwise unambiguous and supported but its current size is zero
+- **THEN** scope resolution succeeds
+- **AND** ABI proceeds to the endpoint's own size-dependent check rather than failing on scope alone
+
+### Requirement: Protection confirmation requires exact numeric equality, not exchange acceptance
+`protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. ABI SHALL NOT canonicalize, reformat, or otherwise alter the accepted request values: the response SHALL return the exact `stop_price`/`take_price` strings ABI accepted in the request, unchanged.
+
+#### Scenario: Verified protection returns the accepted request strings unchanged
 - **WHEN** the exchange's confirmed stop/take are numerically equal to the requested values
-- **THEN** ABI returns HTTP `200` with `status: "protection_applied"` and the requested `stop_price`/`take_price` as submitted
+- **THEN** ABI returns HTTP `200` with `status: "protection_applied"` and the exact `stop_price`/`take_price` strings it accepted in the request
 
 #### Scenario: Exchange-normalized value blocks success
 - **WHEN** the exchange's confirmed stop or take is numerically different from the requested value (e.g. adjusted to a tick size)
@@ -32,24 +63,12 @@ ABI SHALL expose `PUT /v1/strategy-instances/{strategy_instance_id}/trade-cycles
 - **WHEN** the exchange has accepted, submitted, or queued the write but ABI has not verified it
 - **THEN** ABI does not return `protection_applied` or any other `2xx`
 
-### Requirement: Protection fails closed when the pair has no live position to protect
-When a known binding exists for the pair but ABI verifies no live open position exists, ABI SHALL return HTTP `422` with `error.code` `position_not_open`, not `internal_error`.
+### Requirement: Protection fails closed when the resolved scope has no live position to protect
+After ABI has resolved a single unambiguous, supported position scope for the pair (per the shared resolution requirement above), if the verified live position size at that scope is zero, ABI SHALL return HTTP `422` with `error.code` `position_not_open`, not `internal_error`.
 
-#### Scenario: Protection is rejected for a closed position
-- **WHEN** the requested pair has a known binding but its live position size is verified zero
+#### Scenario: Protection is rejected for a resolved but zero-size position
+- **WHEN** the requested pair's position scope resolves unambiguously but its live position size is verified zero
 - **THEN** ABI returns HTTP `422` with `error.code` `position_not_open`
-
-### Requirement: ABI exposes a close endpoint accepting only an empty body
-ABI SHALL expose `DELETE /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position`, defining no field of any kind for quantity, percentage, or close fraction. The request body SHALL be absent or zero-length. Any non-empty body SHALL be rejected as `validation_failed`, never silently ignored.
-
-#### Scenario: Empty-body request is accepted
-- **WHEN** a client sends `DELETE` to the route with no body
-- **THEN** ABI accepts the request based solely on the two path identifiers
-
-#### Scenario: Non-empty body is rejected
-- **WHEN** a `DELETE` request carries any non-empty body, including one that would set a quantity, percentage, or close fraction
-- **THEN** ABI returns HTTP `422` with `error.code` `validation_failed`
-- **AND** ABI does not act on any content of that body
 
 ### Requirement: Close means the full current remainder, determined by ABI
 A close request SHALL mean closing 100% of the pair's actual current open position size, as ABI determines it from the exchange at the time of the request — never a caller-supplied quantity.
@@ -59,22 +78,12 @@ A close request SHALL mean closing 100% of the pair's actual current open positi
 - **THEN** ABI determines the position's current size itself and closes all of it
 - **AND** no partial-close outcome is possible through this endpoint
 
-### Requirement: Close proceeds only under unambiguous pair ownership within the supported V1 exchange scope
-ABI SHALL close a position, and cancel orders for it, only when it can resolve the requested pair to exactly one unambiguous exchange position within the supported V1 exchange scope. ABI SHALL fail closed — never proceed, never return `2xx` — when the resolved position's exchange category is outside the supported V1 scope (`unsupported_exchange_scope`), or when exposure on the resolved symbol, account, or position slot is ambiguous or overlapping such that it cannot be uniquely attributed to the pair (`internal_error`). ABI SHALL NOT cancel any order it cannot attribute to the exact requested pair, regardless of shared symbol or account.
-
-#### Scenario: Unsupported exchange scope is rejected before any close action
-- **WHEN** the resolved position's exchange category is outside this capability's supported V1 scope
-- **THEN** ABI returns HTTP `422` with `error.code` `unsupported_exchange_scope`
-- **AND** ABI takes no cancel or close action
-
-#### Scenario: Ambiguous ownership is not closed
-- **WHEN** exposure on the resolved symbol, account, or position slot cannot be uniquely attributed to the requested pair, including an unsupported or unexpected position-slot signal
-- **THEN** ABI returns HTTP `500` with `error.code` `internal_error`
-- **AND** ABI does not cancel or close any position or order on that ambiguous basis
+### Requirement: Close cancels only orders it attributes to the pair
+ABI SHALL cancel every order it attributes to the requested pair — protective, limit, conditional, and residual entry — and SHALL NOT cancel any order it cannot attribute to the exact requested pair, regardless of shared symbol or account.
 
 #### Scenario: Only pair-owned orders are cancelled
 - **WHEN** ABI closes a position for a pair
-- **THEN** every order ABI attributes to that pair — protective, limit, conditional, and residual entry — is cancelled
+- **THEN** every order ABI attributes to that pair is cancelled
 - **AND** no order ABI cannot attribute to that pair is cancelled, even on the same symbol or account
 
 ### Requirement: Close success means both postconditions are verified under complete pair correlation
@@ -89,10 +98,10 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 - **THEN** ABI does not return `trade_cycle_closed` or any other `2xx`
 
 ### Requirement: Close still runs and verifies cleanup when no position is open
-When the pair's open position is already zero at the start of a close request, ABI SHALL still perform and verify order cleanup for that pair before returning success.
+When the pair's resolved position scope already holds zero size at the start of a close request, ABI SHALL still perform and verify order cleanup for that pair before returning success.
 
 #### Scenario: Already-closed position still verifies leftover orders
-- **WHEN** a close request is received for a pair whose open position is already zero
+- **WHEN** a close request is received for a pair whose resolved position scope already holds zero size
 - **THEN** ABI still checks for and cancels any order it attributes to that pair
 - **AND** ABI returns `trade_cycle_closed` only after verifying none remain active
 
