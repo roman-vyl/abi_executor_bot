@@ -21,7 +21,9 @@ its own correlation record of what it has done; it never decides what to trade.
 
 ## Non-responsibilities
 
-- Abi does not decide strategy, sizing policy, or trade-cycle lifecycle — Runtime owns those.
+- Runtime owns strategy decisions, trade-cycle lifecycle, and the supplied risk multiplier.
+- Abi owns conversion of the requested entry package into an exchange-executable quantity under
+  the current sizing policy and Bybit trading rules.
 - Abi does not persist anything beyond its own entry-package correlation store.
 - Abi does not support multiple concurrent exchange venues.
 

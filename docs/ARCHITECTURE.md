@@ -25,7 +25,9 @@ database.
 ## External dependencies
 
 - **Bybit REST API** — the only exchange Abi talks to (`src/exchange/bybitAdapter.ts`).
-- **Strategy Runtime** — the only HTTP client Abi serves.
+- **Strategy Runtime** — the primary application client, for the versioned entry-package and
+  open-position endpoints.
+- **Operator tooling** — clients of the account, health, and execution-mode endpoints.
 
 ## Main components
 
@@ -47,8 +49,12 @@ database.
   order quantity from those trading rules.
 - **`RestBybitAdapter`** (`src/exchange/bybitAdapter.ts`) — the sole Bybit REST client.
 - **`KeyedMutex`** (`src/concurrency/keyedMutex.ts`) — in-process per-key serialization.
-- **Route handlers** (`src/routes/*.ts`) — thin HTTP boundaries; each validates/decodes and
-  hands off to the service or adapter above, never touching correlation state or Bybit directly.
+- **Route handlers** (`src/routes/*.ts`) — thin HTTP boundaries. Entry-package and open-position
+  routes delegate to their application services and never touch correlation state or Bybit
+  directly. Account/operator routes (`src/routes/accountRoutes.ts`) are the exception: they call
+  the Bybit adapter directly, through their own account-action boundary
+  (`src/account/accountActions.ts`), for balance, order, and position queries and emergency
+  cancel-all/close-all actions.
 
 ## Entry-package flow
 
@@ -86,8 +92,10 @@ resolves through `OpenPositionResolutionService`:
    global configured category.
 5. An unresolved/ambiguous status, or any query failure, fails closed rather than guessing.
 
-Stored status and any historical fill observation are only ever used to decide *whether* and
-*how* to query Bybit — never as the position-truth answer itself.
+A durably closed correlation status may itself prove that no position can be open — it resolves
+the answer without a Bybit query. For every live-query-admissible state, the open/closed answer
+comes from a current Bybit query; any historical fill observation on the record is never
+substituted for that live query.
 
 ## Persistence and recovery
 
@@ -122,6 +130,11 @@ Abi is single-process; there is no distributed-lock or multi-instance coordinati
   writes require `ABI_DRY_RUN=false`, `ABI_LIVE_TRADING_ENABLED=true`, both Bybit credentials
   configured, and a non-mainnet `BYBIT_ENV`. Any missing condition is reported in
   `blockedReasons` and blocks live execution.
+- **Open-position attribution boundary (V1)**: the live Bybit query is scoped to
+  `(category, symbol)`, not to a specific order binding — Bybit's response carries no
+  Runtime/Abi order identity to match against. Correct attribution therefore depends on no
+  overlapping manual or other-strategy exposure existing concurrently on the same symbol under
+  the same credentials; Abi does not detect or enforce that.
 
 ## Sources of truth
 

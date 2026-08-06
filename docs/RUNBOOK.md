@@ -90,8 +90,9 @@ curl "http://127.0.0.1:8787/execution/mode"
 ```
 
 `/health` reports `entryPackageReady`, which becomes `true` once the correlation store has
-finished replaying on startup. Entry-package and open-position requests are not served until
-then.
+finished replaying on startup. Entry-package and open-position routes are readiness-gated: until
+replay completes, they fail closed with an `internal_error` response rather than acting on
+state that might not be fully recovered.
 
 ## Entry-package correlation storage path
 
@@ -113,8 +114,8 @@ npm run smoke:sandbox:read
 Expected shape:
 
 ```text
-mode.bybitEnvironment=demo
-mode.canExecuteLive=true
+mode.bybitEnvironment=demo|testnet
+mode.canExecuteLive=<reported value; not required to be true for read-only checks>
 health=true
 balance=ok
 active_orders=ok
@@ -138,7 +139,9 @@ npm run smoke:entry-package:fake
 - **`/execution/mode` reports `canExecuteLive: false`** — read `blockedReasons` in the response;
   each entry names exactly which condition (dry-run flag, live-trading flag, credentials,
   environment) is unmet.
-- **Account routes return `skipped_bybit_query`** — `BYBIT_API_KEY`/`BYBIT_API_SECRET` are not
-  set; the response's `wouldQueryBybit` field shows what would have been sent.
+- **Active-orders, open-positions, or close-all return `skipped_bybit_query`** —
+  `BYBIT_API_KEY`/`BYBIT_API_SECRET` are not set; the response's `wouldQueryBybit` field shows
+  what would have been sent. The balance route has no such skip path — with missing or invalid
+  credentials it calls Bybit and returns whatever error Bybit reports.
 - **Container never becomes healthy** — check `docker compose logs abi`; the healthcheck polls
   `GET /health` and fails closed if the process is not listening.
