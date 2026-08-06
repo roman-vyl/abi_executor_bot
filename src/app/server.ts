@@ -14,6 +14,7 @@ import { writeJson } from "./http.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
 import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
+import { handlePositionManagementRoutes } from "../routes/positionManagementRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 export function startServer(config: AbiConfig): void {
@@ -83,6 +84,10 @@ export function startServer(config: AbiConfig): void {
         isReady: () => readiness.isReady,
       })
     ) {
+      return;
+    }
+
+    if (await handlePositionManagementRoutes({ request, response })) {
       return;
     }
 
