@@ -1,4 +1,12 @@
-## ADDED Requirements
+# container-runtime Specification
+
+## Purpose
+
+Defines the minimal Docker image, Compose runtime defaults, secret handling,
+correlation-store persistence, and operator documentation for running Abi in
+containers.
+
+## Requirements
 
 ### Requirement: Abi provides a reproducible Docker image
 Abi SHALL provide a Dockerfile that builds the TypeScript service from source and starts the compiled Abi application without relying on host `node_modules` or host `dist` output.
@@ -12,10 +20,10 @@ Abi SHALL provide a Dockerfile that builds the TypeScript service from source an
 #### Scenario: Runtime entrypoint matches compiled service
 - **WHEN** the container starts
 - **THEN** Abi runs from the compiled `dist/app/index.js` application entrypoint
-- **AND** trading runtime behavior is unchanged from the non-container compiled startup path
+- **AND** service behavior is unchanged from the non-container compiled startup path
 
 ### Requirement: Docker image excludes secrets and local runtime state
-Abi SHALL keep secrets, local environment files, local journals, archives, dependencies, and host build output out of the Docker image build context.
+Abi SHALL keep secrets, local environment files, local correlation-store state, archives, dependencies, and host build output out of the Docker image build context.
 
 #### Scenario: Environment files are excluded
 - **WHEN** `.dockerignore` is evaluated for a Docker build
@@ -56,14 +64,14 @@ Abi SHALL provide a base `docker-compose.yml` that starts the service in a safe 
 - **AND** `canExecuteLive` is not `true`
 - **AND** the reported Bybit environment is `testnet`
 
-### Requirement: Journal state persists outside the image
-Abi SHALL keep journal state outside the Docker image by mounting a host runtime directory into the container.
+### Requirement: Correlation store persists outside the image
+Abi SHALL keep its entry-package correlation store outside the Docker image by mounting a host runtime directory into the container.
 
-#### Scenario: Journal path is mounted
+#### Scenario: Correlation store path is mounted
 - **WHEN** the base Compose stack starts
 - **THEN** the host `./var` path is mounted at `/app/var`
-- **AND** journal data written by Abi is outside the image layer
-- **AND** rebuilding the image does not intentionally delete host journal data
+- **AND** entry-package correlation data written by Abi is outside the image layer
+- **AND** rebuilding the image does not intentionally delete host correlation-store data
 
 ### Requirement: Demo live startup is explicit
 Abi SHALL provide an explicit demo Compose override path for sandbox live runs that uses a local env file and does not affect the safe default Compose path.
@@ -80,28 +88,25 @@ Abi SHALL provide an explicit demo Compose override path for sandbox live runs t
 - **AND** mainnet live execution remains out of scope
 - **AND** the existing live guard is not bypassed
 
-### Requirement: Docker documentation covers safe operation and smoke verification
-Abi SHALL include Docker documentation that explains how to build, run, verify, and smoke-test the container without committing secrets.
+### Requirement: Container operation is documented in the runbook
+Abi SHALL document how to build, run, and verify the container without committing secrets.
 
 #### Scenario: Safe Docker workflow is documented
-- **WHEN** an operator reads `docs/DOCKER.md`
+- **WHEN** an operator reads `docs/RUNBOOK.md`
 - **THEN** the docs include how to build the image
 - **AND** how to start the safe dry-run container
 - **AND** how to check `/health`
 - **AND** how to check `/execution/mode`
-- **AND** how to confirm `.env.demo.local` is not committed
 
 #### Scenario: Demo workflow is documented
-- **WHEN** an operator reads `docs/DOCKER.md`
+- **WHEN** an operator reads `docs/RUNBOOK.md`
 - **THEN** the docs include the demo startup command using `docker-compose.yml` plus `docker-compose.demo.yml`
 - **AND** the docs explain that demo credentials are supplied by `.env.demo.local`
 - **AND** the docs state that containerization does not include mainnet deployment
 
-#### Scenario: Smoke commands against container are documented
-- **WHEN** an operator reads `docs/DOCKER.md`
-- **THEN** the docs include commands for running `smoke:sandbox:read` against `ABI_BASE_URL=http://127.0.0.1:8787`
-- **AND** the docs include commands for running `smoke:sandbox:contract` against `ABI_BASE_URL=http://127.0.0.1:8787`
-- **AND** the docs state that real Bybit write smoke requires separate explicit authorization
+#### Scenario: Read-only smoke against the container is documented
+- **WHEN** an operator reads `docs/RUNBOOK.md`
+- **THEN** the docs include running the read-only sandbox smoke against `ABI_BASE_URL=http://127.0.0.1:8787`
 
 ### Requirement: Existing non-Docker verification remains green
 Abi SHALL preserve existing local verification behavior outside Docker.
@@ -110,12 +115,4 @@ Abi SHALL preserve existing local verification behavior outside Docker.
 - **WHEN** implementation of this change is complete
 - **THEN** `npm test` passes outside Docker
 - **AND** `npm run build` passes outside Docker
-- **AND** `npm run smoke:contract:fake` passes outside Docker
-
-#### Scenario: Trading behavior is unchanged
-- **WHEN** Abi is run outside Docker after this change
-- **THEN** the bbb signal contract is unchanged
-- **AND** Bybit payload mapping is unchanged
-- **AND** protection verification behavior is unchanged
-- **AND** sizing behavior is unchanged
-- **AND** mainnet live guard behavior is unchanged
+- **AND** `npm run smoke:entry-package:fake` passes outside Docker

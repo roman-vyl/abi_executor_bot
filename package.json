@@ -10,13 +10,8 @@
     "validate:openapi": "node scripts/validate-entry-package-openapi.mjs",
     "archive:project": "bash scripts/archive-project.sh",
     "smoke:sandbox:read": "bash scripts/smoke-testnet-readonly.sh",
-    "smoke:sandbox:order": "bash scripts/smoke-testnet-order.sh",
-    "smoke:sandbox:amend": "bash scripts/smoke-sandbox-amend.sh",
-    "smoke:sandbox:contract": "bash scripts/smoke-sandbox-contract-matrix.sh",
-    "smoke:contract:fake": "bash scripts/smoke-contract-matrix-fake.sh",
     "smoke:entry-package:fake": "bash scripts/smoke-entry-package-contract-matrix.sh",
     "smoke:testnet:read": "bash scripts/smoke-testnet-readonly.sh",
-    "smoke:testnet:order": "bash scripts/smoke-testnet-order.sh",
     "start": "node dist/app/index.js",
     "start:prod": "node dist/app/index.js"
   },

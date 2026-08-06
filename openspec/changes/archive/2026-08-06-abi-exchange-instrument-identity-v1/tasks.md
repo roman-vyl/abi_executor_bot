@@ -67,4 +67,4 @@
 - [x] 4.3 Run `openspec validate --all --strict`.
 - [x] 4.4 Confirm no diff to `src/domain/entryPackageApi.ts`, `src/domain/signals.ts`,
       `src/services/signals/*`, `src/services/intents/*`, or `mapExecutionPlanToBybit`.
-- [ ] 4.5 Sync specs and archive this change only after explicit user approval.
+- [x] 4.5 Sync specs and archive this change only after explicit user approval.

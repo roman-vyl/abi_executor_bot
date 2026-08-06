@@ -3,12 +3,9 @@ export type AbiConfig = {
   port: number;
   dryRun: boolean;
   liveTradingEnabled: boolean;
-  allowedSymbols: string[];
-  journalPath: string;
   entryPackageCorrelationPath: string;
   instrumentRulesCacheTtlMs: number;
   bybitRequestTimeoutMs: number;
-  fixedSmokeQty: string;
   bybitEnvironment: "demo" | "testnet" | "mainnet";
   bybitTestnet: boolean;
   bybitApiKey: string;
@@ -26,13 +23,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     port: readInt(env.ABI_PORT, 8787),
     dryRun: readBool(env.ABI_DRY_RUN, true),
     liveTradingEnabled: readBool(env.ABI_LIVE_TRADING_ENABLED, false),
-    allowedSymbols: readCsv(env.ABI_ALLOWED_SYMBOLS, ["BTCUSDT"]),
-    journalPath: env.ABI_JOURNAL_PATH ?? "./var/abi_journal.jsonl",
     entryPackageCorrelationPath:
       env.ABI_ENTRY_PACKAGE_CORRELATION_PATH ?? "./var/abi_entry_package_correlation.jsonl",
     instrumentRulesCacheTtlMs: readInt(env.ABI_INSTRUMENT_RULES_CACHE_TTL_MS, 300_000),
     bybitRequestTimeoutMs: readInt(env.ABI_BYBIT_REQUEST_TIMEOUT_MS, 10_000),
-    fixedSmokeQty: readPositiveNumberString(env.ABI_FIXED_SMOKE_QTY, "0.001"),
     bybitEnvironment: readBybitEnvironment(env),
     bybitTestnet: readBybitEnvironment(env) === "testnet",
     bybitApiKey: env.BYBIT_API_KEY?.trim() ?? "",
@@ -73,19 +67,6 @@ function readInt(value: string | undefined, fallback: number): number {
   }
 
   return parsed;
-}
-
-function readCsv(value: string | undefined, fallback: string[]): string[] {
-  if (value === undefined || value.trim() === "") {
-    return fallback;
-  }
-
-  const parsed = value
-    .split(",")
-    .map((item) => item.trim().toUpperCase())
-    .filter(Boolean);
-
-  return parsed.length > 0 ? parsed : fallback;
 }
 
 function readPositiveNumberString(value: string | undefined, fallback: string): string {

@@ -11,16 +11,12 @@ import { EntryPackageApplicationService } from "../services/entryPackage/entryPa
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import { writeJson } from "./http.js";
-import { Journal } from "../journal/journal.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
-import { handleIntentRoutes } from "../routes/intentRoutes.js";
 import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
-import { handleSignalRoutes } from "../routes/signalRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 export function startServer(config: AbiConfig): void {
-  const journal = new Journal(config.journalPath);
   const bybit = new RestBybitAdapter(config);
 
   const correlationRepository = new EntryPackageCorrelationRepository(config.entryPackageCorrelationPath);
@@ -45,7 +41,7 @@ export function startServer(config: AbiConfig): void {
   });
 
   // Correlation-store replay runs asynchronously and must not delay
-  // server.listen() for legacy/account routes (design.md §13).
+  // server.listen() for account routes (design.md §13).
   void correlationRepository
     .replay()
     .then((result) => {
@@ -87,14 +83,6 @@ export function startServer(config: AbiConfig): void {
         isReady: () => readiness.isReady,
       })
     ) {
-      return;
-    }
-
-    if (await handleSignalRoutes({ request, response, config, bybit, journal })) {
-      return;
-    }
-
-    if (await handleIntentRoutes({ request, response, config, bybit, journal })) {
       return;
     }
 
