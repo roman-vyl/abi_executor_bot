@@ -1,118 +1,69 @@
 ## Context
 
-Runtime already addresses an entry package and an open-position read by the same
-`strategy_instance_id` + `trade_cycle_id` pair (`abi-entry-package-api`, `abi-open-position-lookup-api`).
-This change adds the two remaining synchronous position-management commands Runtime needs against
-an already-open position under that same pair, and defines only their public HTTP contract —
-transport shape, DTOs, and what a `2xx` is allowed to mean. It does not choose how ABI internally
-confirms a write against the exchange or attributes an order to a trade cycle; those stay
-implementation, deferred the same way `entry-package-execution` was deferred from
+This defines only the public HTTP contract for the two position-management commands in
+`proposal.md` — transport shape, DTOs, and what `2xx` is allowed to mean. It does not choose how
+ABI internally confirms a write, attributes an order to a trade cycle, or resolves a position.
+Those stay implementation, deferred the same way `entry-package-execution` was deferred from
 `abi-entry-package-api`.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Fix two HTTP methods/routes under the existing pair-scoped path prefix.
-- Define closed request/response DTOs for both.
-- Make `2xx` mean "verified against the exchange", never "write accepted".
-- Make "close" mean "100% of the current remainder, plus every order this pair owns" by construction
-  — no quantity/percentage field exists to say otherwise.
-- Reuse the existing error envelope and error-code vocabulary; add only what's genuinely new.
+- Distinguish "no live position to protect" from generic exchange-derived failure.
+- Reuse `abi-open-position-lookup-api`'s exchange-scope code rather than inventing a parallel one.
+- Make the close endpoint's body shape reject, not silently drop, any size-bearing input.
+- Make protection confirmation numeric, not string-literal, while echoing Runtime's own values.
+- Make full close conditional on unambiguous ownership within supported scope, not merely reachable.
 
 **Non-Goal:** Internal ABI execution (exchange calls, order-attribution mechanics, retries, pending
 state, partial close, webhook-driven external-close detection) is outside this change.
 
 ## Decisions
 
-### 1. Two pair-scoped resources, reusing the existing `open-position` noun
+### 1. Route and error-vocabulary reuse
+`PUT .../protection` and `DELETE .../open-position` remain the only two routes. `unsupported_exchange_scope`
+is reused verbatim from `abi-open-position-lookup-api` — same meaning (resolved position's exchange
+category outside V1 support), same HTTP status, no redefinition. `position_not_open` is genuinely
+new: `unknown_trade_cycle_binding` covers an unknown *pair*, `unsupported_exchange_scope` is
+knowable before any exchange call, and `internal_error` would hide a deterministic, actionable
+outcome ("nothing to protect") behind the bucket reserved for exchange-derived ambiguity.
 
-```text
-PUT    /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/protection
-DELETE /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position
-```
+### 2. Protection confirmation is numeric equality with a fixed response body
+Confirmation compares the exchange's reported stop/take to the request using exact-decimal numeric
+equality, so formatting differences never block success but any real value change (e.g. tick-size
+normalization) does. The response always echoes the values Runtime submitted, not whatever the
+exchange echoes back, so Runtime never reconciles two representations of the same number.
 
-`protection` is a new resource: `PUT` replaces the position's whole protective state (not an
-incremental patch), matching the entry-package endpoint's full-replacement style. `DELETE` targets
-the same `open-position` resource `abi-open-position-lookup-api` already reads with `GET` —
-deleting it means closing the position it describes, so no new noun is needed. `DELETE` carries no
-body: the absence of any quantity/percentage/fraction field is what makes "always 100%" a property
-of the shape, not a rule Runtime has to remember to follow.
+### 3. The close endpoint's empty-body gate is a hard rejection, not a filter
+Rather than accepting a body and ignoring unknown/size-bearing fields (the entry-package endpoint's
+closed-object pattern), close treats any non-empty body as invalid outright. This is stricter than a
+closed-object schema would be — a schema still has to define what's "unknown" per field; refusing
+all body content removes that surface entirely, including for fields not yet imagined.
 
-### 2. Protection request/response
-
-```json
-// PUT .../protection
-{ "stop_price": "99000", "take_price": "103000" }
-```
-
-`stop_price` is required, non-null, exact-decimal text. `take_price` is exact-decimal text or
-`null` — omitting take-profit protection is a supported state, not an error. Object is closed.
-
-```json
-// 200
-{
-  "strategy_instance_id": "runtime-owned-instance-id",
-  "trade_cycle_id": "runtime-owned-cycle-id",
-  "status": "protection_applied",
-  "stop_price": "99000",
-  "take_price": "103000"
-}
-```
-
-`protection_applied` SHALL mean ABI has verified `stop_price`/`take_price` are the position's actual
-current protection. Accepted/submitted/queued exchange state is not this status and does not
-produce any `2xx`.
-
-### 3. Close response
-
-```json
-// 200, no request body
-{
-  "strategy_instance_id": "runtime-owned-instance-id",
-  "trade_cycle_id": "runtime-owned-cycle-id",
-  "status": "trade_cycle_closed"
-}
-```
-
-`trade_cycle_closed` SHALL mean ABI has verified both: the pair's open position quantity is zero,
-and no order ABI can attribute to this exact pair remains active. "Attributable to this pair"
-excludes any order ABI cannot tie to this `strategy_instance_id` + `trade_cycle_id` — same-symbol or
-same-account orders belonging to anything else are never touched and never block this check. ABI
-performs and verifies this cleanup even when no position is currently open (already-closed is not a
-shortcut to skip verifying leftover orders), so repeated `DELETE` calls are safe.
-
-### 4. Error taxonomy: reuse first, add one new code
-
-Both endpoints reuse the existing envelope (`{ error: { code, message, details? } }`) and reuse
-`validation_failed`/`internal_error` from `abi-entry-package-api` and `unknown_trade_cycle_binding`
-from `abi-open-position-lookup-api` for "this pair has no known binding at all". `internal_error`
-also covers every exchange-derived or ambiguous failure that would otherwise require guessing —
-same fail-closed discipline the other two contracts already use, not a new one invented here.
-
-| HTTP | Public code | Applies to |
-|---:|---|---|
-| 400 | `malformed_json` | PUT only |
-| 415 | `unsupported_media_type` | PUT only |
-| 422 | `validation_failed` | both |
-| 422 | `unknown_trade_cycle_binding` | both (reused) |
-| 500 | `internal_error` | both (reused) |
-
-No new business code is minted for "could not confirm the write" — it is exchange-derived
-uncertainty and falls into `internal_error`, exactly like every other unresolved case in the two
-existing contracts.
+### 4. Close requires a resolvable, unambiguous, in-scope position before acting
+Cancelling only pair-attributable orders defines *which* orders are touched; it does not say whether
+ABI should act at all when the position itself can't be uniquely resolved. This decision gates every
+write on that: unsupported scope (category only, matching `abi-open-position-lookup-api`'s existing
+gate) fails with the reused business code; ambiguous or overlapping exposure — including symbol,
+account, or position-slot ambiguity — that passes the category gate but still can't be uniquely
+attributed fails with `internal_error`, matching that capability's precedent of routing
+exchange-observed (not record-derived) uncertainty to the generic fail-closed code rather than a
+further business code. `trade_cycle_closed` additionally requires the pair's stored correlation to
+be complete and non-contradictory — a resolvable exchange position is necessary but not sufficient.
 
 ## Risks / Trade-offs
 
-- [Reusing `open-position` as the `DELETE` target couples this contract's route naming to the lookup
-  endpoint's] → Accepted: it removes a naming decision and keeps one noun per resource concept.
-- [No dedicated code distinguishes "write rejected" from "write accepted but unconfirmed"] →
-  Accepted for V1, consistent with the other two contracts' existing `internal_error` catch-all.
+- [`position_not_open` gives Runtime one more code to branch on] → Accepted: folding it into
+  `internal_error` would make a deterministic, expected outcome indistinguishable from genuine
+  exchange trouble.
+- [The ambiguous-ownership gate can reject a close a looser implementation would complete] →
+  Accepted: a wrongly closed position or wrongly cancelled order is worse than a `500` Runtime must
+  retry or escalate.
+- [Rejecting any non-empty close body is stricter than the entry-package endpoint's closed-object
+  pattern] → Accepted for a destructive, no-parameter action; there is no legitimate field this
+  endpoint should ever accept.
 
 ## Migration Plan
 
 Additive only; no existing route, DTO, or stored state changes. Production wiring is a separate,
 later change.
-
-## Open Questions
-
-None for the scoped transport contract.
