@@ -26,8 +26,11 @@ test("protection OpenAPI examples conform to runtime request and response contra
     serializeProtectionApplied({
       strategyInstanceId: applied.strategy_instance_id,
       tradeCycleId: applied.trade_cycle_id,
-      stopPrice: applied.stop_price,
-      takePrice: applied.take_price,
+      acceptedStopPrice: applied.stop_price,
+      acceptedTakePrice: applied.take_price,
+      confirmedStopPrice: applied.stop_price,
+      confirmedTakePrice: applied.take_price,
+      verificationSucceeded: true,
     }).body,
     applied,
   );
@@ -42,6 +45,9 @@ test("close OpenAPI example conforms to the runtime response contract", async ()
     serializeTradeCycleClosed({
       strategyInstanceId: closed.strategy_instance_id,
       tradeCycleId: closed.trade_cycle_id,
+      positionZeroVerified: true,
+      noAttributedActiveOrdersVerified: true,
+      correlationCompleteAndConsistent: true,
     }).body,
     closed,
   );

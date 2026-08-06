@@ -1,6 +1,6 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
 import { isExactDecimalText } from "./entryPackageApi.js";
-import { compareDecimal } from "./exactDecimal.js";
+import { decimalEquals } from "./exactDecimal.js";
 
 export type ProtectionRequestBody = {
   stop_price: string;
@@ -64,6 +64,16 @@ export type ProtectionValidationResult =
   | {
       ok: true;
       command: ProtectionCommand;
+    }
+  | {
+      ok: false;
+      details: EntryPackageValidationDetail[];
+    };
+
+export type CloseValidationResult =
+  | {
+      ok: true;
+      command: CloseCommand;
     }
   | {
       ok: false;
@@ -140,54 +150,120 @@ export function validateProtectionCommand(
   };
 }
 
-// The comparison confirmation will use once execution wiring supplies an
-// exchange-reported value (spec: "Protection confirmation requires exact
-// numeric equality, not exchange acceptance") — string formatting
-// differences (trailing zeros, leading '+') must not block confirmation,
-// only a genuine value change may. Reuses exactDecimal.ts's compareDecimal
-// rather than reimplementing arithmetic; total (never throws), so a
-// malformed exchange-reported value reads as a mismatch, not an uncaught
-// exception.
-export function isNumericallyEqualExactDecimal(a: string, b: string): boolean {
-  try {
-    return compareDecimal(a, b) === 0;
-  } catch {
-    return false;
+// Builds the close endpoint's command independently of whatever the route's
+// own path-matching already checked — the domain layer validates its own
+// inputs rather than trusting a caller's prior pass (mirrors
+// validateProtectionCommand's independent path-opaqueness check).
+export function validateCloseCommand(path: {
+  strategyInstanceId: unknown;
+  tradeCycleId: unknown;
+}): CloseValidationResult {
+  const details: EntryPackageValidationDetail[] = [];
+
+  validateOpaqueNonEmptyString(
+    path.strategyInstanceId,
+    "/path/strategy_instance_id",
+    "strategy_instance_id",
+    details,
+  );
+  validateOpaqueNonEmptyString(path.tradeCycleId, "/path/trade_cycle_id", "trade_cycle_id", details);
+
+  if (details.length > 0) {
+    return { ok: false, details };
   }
+
+  return {
+    ok: true,
+    command: {
+      strategyInstanceId: path.strategyInstanceId as string,
+      tradeCycleId: path.tradeCycleId as string,
+    },
+  };
 }
 
-export function serializeProtectionApplied(input: {
+// The comparison confirmation uses (spec: "Protection confirmation requires
+// exact numeric equality, not exchange acceptance") — string formatting
+// differences (trailing zeros, leading '+') must not block confirmation,
+// only a genuine value change may. Delegates to exactDecimal.ts's
+// decimalEquals, which is total (never throws) and does not scale by
+// 10^exponent, so an arbitrarily large exponent never gets rejected as
+// "out of range" the way transport's own grammar never bounded it either.
+export function isNumericallyEqualExactDecimal(a: string, b: string): boolean {
+  return decimalEquals(a, b);
+}
+
+// Everything serializeProtectionApplied needs to prove the 2xx is earned,
+// not merely that its own fields are well-formed: the accepted request's
+// stop/take (what the response echoes back), the exchange's independently
+// confirmed stop/take (what proves the write actually took effect), and an
+// explicit flag that verification itself ran to completion — a caller that
+// hasn't finished verifying has no business calling this at all, but the
+// type still makes that state representable so it fails closed rather than
+// being assumed away (spec: "Protection confirmation requires exact numeric
+// equality, not exchange acceptance").
+export type ProtectionConfirmation = {
   strategyInstanceId: string;
   tradeCycleId: string;
-  stopPrice: string;
-  takePrice: string | null;
-}): PositionManagementHttpResult {
+  acceptedStopPrice: string;
+  acceptedTakePrice: string | null;
+  confirmedStopPrice: string;
+  confirmedTakePrice: string | null;
+  verificationSucceeded: boolean;
+};
+
+export function serializeProtectionApplied(input: ProtectionConfirmation): PositionManagementHttpResult {
   if (
+    !input.verificationSucceeded ||
     input.strategyInstanceId.length === 0 ||
     input.tradeCycleId.length === 0 ||
-    !isExactDecimalText(input.stopPrice) ||
-    (input.takePrice !== null && !isExactDecimalText(input.takePrice))
+    !isExactDecimalText(input.acceptedStopPrice) ||
+    !isExactDecimalText(input.confirmedStopPrice) ||
+    (input.acceptedTakePrice !== null && !isExactDecimalText(input.acceptedTakePrice)) ||
+    (input.confirmedTakePrice !== null && !isExactDecimalText(input.confirmedTakePrice)) ||
+    (input.acceptedTakePrice === null) !== (input.confirmedTakePrice === null) ||
+    !isNumericallyEqualExactDecimal(input.acceptedStopPrice, input.confirmedStopPrice) ||
+    (input.acceptedTakePrice !== null &&
+      input.confirmedTakePrice !== null &&
+      !isNumericallyEqualExactDecimal(input.acceptedTakePrice, input.confirmedTakePrice))
   ) {
     return internalErrorResult();
   }
 
+  // The response echoes what Runtime submitted, never the exchange's
+  // confirmed value or formatting — confirmedStopPrice/confirmedTakePrice
+  // exist only to gate this branch, not to appear in the body.
   return {
     statusCode: 200,
     body: {
       strategy_instance_id: input.strategyInstanceId,
       trade_cycle_id: input.tradeCycleId,
       status: "protection_applied",
-      stop_price: input.stopPrice,
-      take_price: input.takePrice,
+      stop_price: input.acceptedStopPrice,
+      take_price: input.acceptedTakePrice,
     },
   };
 }
 
-export function serializeTradeCycleClosed(input: {
+// The three minimal postconditions close's own success requirement names
+// (spec: "Close success means both postconditions are verified under
+// complete pair correlation") — all three must be independently verified
+// true, not merely absent/undefined, before a 2xx is possible.
+export type CloseConfirmation = {
   strategyInstanceId: string;
   tradeCycleId: string;
-}): PositionManagementHttpResult {
-  if (input.strategyInstanceId.length === 0 || input.tradeCycleId.length === 0) {
+  positionZeroVerified: boolean;
+  noAttributedActiveOrdersVerified: boolean;
+  correlationCompleteAndConsistent: boolean;
+};
+
+export function serializeTradeCycleClosed(input: CloseConfirmation): PositionManagementHttpResult {
+  if (
+    input.strategyInstanceId.length === 0 ||
+    input.tradeCycleId.length === 0 ||
+    !input.positionZeroVerified ||
+    !input.noAttributedActiveOrdersVerified ||
+    !input.correlationCompleteAndConsistent
+  ) {
     return internalErrorResult();
   }
 

@@ -59,6 +59,17 @@ test("close route rejects an empty path identifier", () => {
   }
 });
 
+test("protection route rejects an empty path identifier the same way close does", () => {
+  const match = matchProtectionRoute("PUT", "/v1/strategy-instances//trade-cycles/cycle/protection");
+
+  assert.equal(match.matched, true);
+  if (match.matched) {
+    assert.deepEqual(match.details, [
+      { path: "/path/strategy_instance_id", message: "path value must be a non-empty string" },
+    ]);
+  }
+});
+
 test("unsupported media type on protection maps to 415", async () => {
   const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
     "content-type": "text/plain",

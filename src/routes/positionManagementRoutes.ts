@@ -8,6 +8,7 @@ import {
   internalErrorResult,
   malformedJsonResult,
   unsupportedMediaTypeResult,
+  validateCloseCommand,
   validateProtectionCommand,
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
@@ -118,8 +119,20 @@ async function handleClose(
     return;
   }
 
+  const validation = validateCloseCommand({
+    strategyInstanceId: match.strategyInstanceId,
+    tradeCycleId: match.tradeCycleId,
+  });
+
+  if (!validation.ok) {
+    writeResult(response, validationFailedResult(validation.details));
+    return;
+  }
+
   // Scope resolution, order cleanup, and postcondition verification are
-  // deferred to a later execution change (proposal.md non-goal).
+  // deferred to a later execution change (proposal.md non-goal): a
+  // transport-valid command fails safe rather than fabricating success.
+  void validation.command;
   writeResult(response, internalErrorResult());
 }
 
@@ -144,8 +157,11 @@ export function matchProtectionRoute(
   }
 
   const details: EntryPackageValidationDetail[] = [];
-  const strategyInstanceId = decodePathValue(segments[3], "/path/strategy_instance_id", details);
-  const tradeCycleId = decodePathValue(segments[5], "/path/trade_cycle_id", details);
+  // Reused from openPositionApi.ts: same opaque-path decode-and-empty-check
+  // matchCloseRoute below already uses (design.md Decision 1) — both
+  // endpoints on this pair decode path identifiers identically.
+  const strategyInstanceId = decodeOpaquePathValue(segments[3], "/path/strategy_instance_id", details);
+  const tradeCycleId = decodeOpaquePathValue(segments[5], "/path/trade_cycle_id", details);
 
   if (details.length > 0) {
     return { matched: true, details };
@@ -191,22 +207,6 @@ function pathSegments(requestUrl: string): string[] {
   const queryStart = requestUrl.indexOf("?");
   const pathname = queryStart === -1 ? requestUrl : requestUrl.slice(0, queryStart);
   return pathname.split("/");
-}
-
-function decodePathValue(
-  value: string,
-  path: string,
-  details: EntryPackageValidationDetail[],
-): string | undefined {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    details.push({
-      path,
-      message: "path value must use valid percent encoding",
-    });
-    return undefined;
-  }
 }
 
 // DELETE's body is required to be empty (spec: "ABI exposes a close endpoint

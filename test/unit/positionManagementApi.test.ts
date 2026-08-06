@@ -11,9 +11,11 @@ import {
   unknownTradeCycleBindingResult,
   unsupportedExchangeScopeResult,
   unsupportedMediaTypeResult,
+  validateCloseCommand,
   validateProtectionCommand,
   validationFailedResult,
 } from "../../src/domain/positionManagementApi.js";
+import type { CloseConfirmation, ProtectionConfirmation } from "../../src/domain/positionManagementApi.js";
 
 test("valid protection request with a take price is accepted", () => {
   const result = validateProtectionCommand(
@@ -124,13 +126,21 @@ test("isNumericallyEqualExactDecimal is total: malformed input is a mismatch, no
   assert.equal(isNumericallyEqualExactDecimal("99000", ""), false);
 });
 
-test("serializeProtectionApplied returns the exact accepted request strings, closed object", () => {
-  const result = serializeProtectionApplied({
+function verifiedProtection(overrides: Partial<ProtectionConfirmation> = {}): ProtectionConfirmation {
+  return {
     strategyInstanceId: "instance",
     tradeCycleId: "cycle",
-    stopPrice: "99000",
-    takePrice: "103000",
-  });
+    acceptedStopPrice: "99000",
+    acceptedTakePrice: "103000",
+    confirmedStopPrice: "99000",
+    confirmedTakePrice: "103000",
+    verificationSucceeded: true,
+    ...overrides,
+  };
+}
+
+test("serializeProtectionApplied returns 200 with the accepted request strings when fully confirmed", () => {
+  const result = serializeProtectionApplied(verifiedProtection());
 
   assert.deepEqual(result, {
     statusCode: 200,
@@ -144,13 +154,25 @@ test("serializeProtectionApplied returns the exact accepted request strings, clo
   });
 });
 
-test("serializeProtectionApplied nulls take_price through unchanged", () => {
-  const result = serializeProtectionApplied({
-    strategyInstanceId: "instance",
-    tradeCycleId: "cycle",
-    stopPrice: "99000",
-    takePrice: null,
-  });
+test("serializeProtectionApplied returns the accepted strings even when the exchange echoed different formatting", () => {
+  const result = serializeProtectionApplied(
+    verifiedProtection({
+      acceptedStopPrice: "99000",
+      confirmedStopPrice: "99000.00",
+      acceptedTakePrice: "+103000",
+      confirmedTakePrice: "103000e0",
+    }),
+  );
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual((result.body as Record<string, unknown>).stop_price, "99000");
+  assert.deepEqual((result.body as Record<string, unknown>).take_price, "+103000");
+});
+
+test("serializeProtectionApplied nulls take_price through unchanged when both sides are null", () => {
+  const result = serializeProtectionApplied(
+    verifiedProtection({ acceptedTakePrice: null, confirmedTakePrice: null }),
+  );
 
   assert.equal(result.statusCode, 200);
   assert.deepEqual(Object.keys(result.body).sort(), [
@@ -163,8 +185,63 @@ test("serializeProtectionApplied nulls take_price through unchanged", () => {
   assert.equal((result.body as Record<string, unknown>).take_price, null);
 });
 
-test("serializeTradeCycleClosed returns the closed success object", () => {
-  const result = serializeTradeCycleClosed({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+test("serializeProtectionApplied fails closed when verification did not succeed", () => {
+  const result = serializeProtectionApplied(verifiedProtection({ verificationSucceeded: false }));
+  assert.deepEqual(result, internalErrorResult());
+});
+
+test("serializeProtectionApplied fails closed on a genuine stop-price mismatch", () => {
+  const result = serializeProtectionApplied(verifiedProtection({ confirmedStopPrice: "99001" }));
+  assert.deepEqual(result, internalErrorResult());
+});
+
+test("serializeProtectionApplied fails closed on a genuine take-price mismatch", () => {
+  const result = serializeProtectionApplied(verifiedProtection({ confirmedTakePrice: "103500" }));
+  assert.deepEqual(result, internalErrorResult());
+});
+
+test("serializeProtectionApplied fails closed when accepted take is null but confirmed take is not", () => {
+  const result = serializeProtectionApplied(verifiedProtection({ acceptedTakePrice: null }));
+  assert.deepEqual(result, internalErrorResult());
+});
+
+test("serializeProtectionApplied fails closed when confirmed take is null but accepted take is not", () => {
+  const result = serializeProtectionApplied(verifiedProtection({ confirmedTakePrice: null }));
+  assert.deepEqual(result, internalErrorResult());
+});
+
+test("serializeProtectionApplied fails closed on malformed decimal or empty identifiers", () => {
+  assert.deepEqual(
+    serializeProtectionApplied(verifiedProtection({ acceptedStopPrice: "not-a-number" })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeProtectionApplied(verifiedProtection({ confirmedStopPrice: "not-a-number" })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeProtectionApplied(verifiedProtection({ strategyInstanceId: "" })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeProtectionApplied(verifiedProtection({ tradeCycleId: "" })),
+    internalErrorResult(),
+  );
+});
+
+function verifiedClose(overrides: Partial<CloseConfirmation> = {}): CloseConfirmation {
+  return {
+    strategyInstanceId: "instance",
+    tradeCycleId: "cycle",
+    positionZeroVerified: true,
+    noAttributedActiveOrdersVerified: true,
+    correlationCompleteAndConsistent: true,
+    ...overrides,
+  };
+}
+
+test("serializeTradeCycleClosed returns the closed success object when all postconditions are verified", () => {
+  const result = serializeTradeCycleClosed(verifiedClose());
 
   assert.deepEqual(result, {
     statusCode: 200,
@@ -174,6 +251,51 @@ test("serializeTradeCycleClosed returns the closed success object", () => {
       status: "trade_cycle_closed",
     },
   });
+});
+
+test("serializeTradeCycleClosed fails closed when any single postcondition is unverified", () => {
+  assert.deepEqual(
+    serializeTradeCycleClosed(verifiedClose({ positionZeroVerified: false })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeTradeCycleClosed(verifiedClose({ noAttributedActiveOrdersVerified: false })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeTradeCycleClosed(verifiedClose({ correlationCompleteAndConsistent: false })),
+    internalErrorResult(),
+  );
+});
+
+test("serializeTradeCycleClosed fails closed on empty identifiers even with all postconditions verified", () => {
+  assert.deepEqual(
+    serializeTradeCycleClosed(verifiedClose({ strategyInstanceId: "" })),
+    internalErrorResult(),
+  );
+  assert.deepEqual(
+    serializeTradeCycleClosed(verifiedClose({ tradeCycleId: "" })),
+    internalErrorResult(),
+  );
+});
+
+test("validateCloseCommand builds a typed command from opaque non-empty path values", () => {
+  const result = validateCloseCommand({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+
+  assert.deepEqual(result, {
+    ok: true,
+    command: { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+  });
+});
+
+test("validateCloseCommand rejects empty or missing path identifiers", () => {
+  const result = validateCloseCommand({ strategyInstanceId: "", tradeCycleId: undefined });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(result.details.some((detail) => detail.path === "/path/strategy_instance_id"));
+    assert.ok(result.details.some((detail) => detail.path === "/path/trade_cycle_id"));
+  }
 });
 
 test("error result builders map to the documented codes and statuses", () => {

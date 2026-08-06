@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ceilRatioToStep, ceilToStep, compareDecimal, maxDecimal, subtractDecimal } from "../../src/domain/exactDecimal.js";
+import {
+  ceilRatioToStep,
+  ceilToStep,
+  compareDecimal,
+  decimalEquals,
+  maxDecimal,
+  subtractDecimal,
+} from "../../src/domain/exactDecimal.js";
 
 test("accepts the full exact-decimal transport grammar, matching isExactDecimalText", () => {
   assert.equal(compareDecimal(".5", "0.5"), 0);
@@ -36,4 +43,34 @@ test("maxDecimal and subtractDecimal handle bare-dot and signed forms", () => {
 
 test("subtractDecimal still guards against a negative result", () => {
   assert.throws(() => subtractDecimal("1", "2"));
+});
+
+test("decimalEquals ignores formatting-only differences", () => {
+  assert.equal(decimalEquals("99", "99.0"), true);
+  assert.equal(decimalEquals("99", "+99"), true);
+  assert.equal(decimalEquals("99", "990e-1"), true);
+  assert.equal(decimalEquals(".5", "0.5"), true);
+  assert.equal(decimalEquals("1.", "1"), true);
+  assert.equal(decimalEquals("0", "-0"), true);
+  assert.equal(decimalEquals("0", "0.00"), true);
+  assert.equal(decimalEquals("0", "0e5"), true);
+});
+
+test("decimalEquals is exact for exponents far beyond compareDecimal's MAX_ABS_EXPONENT bound", () => {
+  assert.equal(decimalEquals("1e101", "10e100"), true);
+  assert.equal(decimalEquals("1e1000", "10e999"), true);
+  assert.equal(decimalEquals("1e1000", "2e1000"), false);
+});
+
+test("decimalEquals reports a genuine numeric difference as false", () => {
+  assert.equal(decimalEquals("99000", "99001"), false);
+  assert.equal(decimalEquals("99000", "98999.99"), false);
+  assert.equal(decimalEquals("1", "-1"), false);
+});
+
+test("decimalEquals is total: malformed input is a mismatch, never a throw", () => {
+  assert.equal(decimalEquals("not-a-number", "1"), false);
+  assert.equal(decimalEquals("", "1"), false);
+  assert.equal(decimalEquals("1.2.3", "1.2.3"), false);
+  assert.equal(decimalEquals("1", "1"), true);
 });
