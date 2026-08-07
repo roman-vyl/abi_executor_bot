@@ -1,8 +1,14 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { positionScopeKey } from "../domain/positionScope.js";
+import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
 import type { EntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
-import { correlationRecordKey, isValidEntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  isDurablyClosedEntryPackageStatus,
+  isValidEntryPackageExecutionRecord,
+} from "./entryPackageExecutionRecord.js";
 
 export type CorrelationReplayResult = { ok: true } | { ok: false; reason: string };
 
@@ -16,6 +22,12 @@ export class EntryPackageCorrelationRepository {
   private readonly byCompositeKey = new Map<string, EntryPackageExecutionRecord>();
   private readonly byOrderLinkId = new Map<string, EntryPackageExecutionRecord>();
   private readonly byOrderId = new Map<string, EntryPackageExecutionRecord>();
+  // Current physical-position-scope ownership, derived from byCompositeKey.
+  // Unlike the two indexes above (append-only forever), this one has
+  // release semantics and is maintained differently for live writes vs.
+  // replay — see applyScopeClaimOnWrite() and rebuildScopeIndexFromReplay()
+  // (position-scope-exclusivity design.md Decisions 2 and 8).
+  private readonly byScope = new Map<string, EntryPackageExecutionRecord>();
 
   // FIFO queue serializing physical appends across all keys, since every
   // write shares one file. This is independent of the per-key business-logic
@@ -74,7 +86,20 @@ export class EntryPackageCorrelationRepository {
         return { ok: false, reason: `correlation record at line ${index + 1} does not match the expected schema` };
       }
 
+      // Phase 1: replay every valid line, keyed indexes only. byScope is
+      // deliberately not touched here — an intermediate line can show a
+      // scope legitimately mid-transfer between two pairs before a later
+      // line for the earlier pair resolves it, so per-line claim/release
+      // would either false-positive on that intermediate moment or
+      // silently overwrite a still-active claim (design.md Decision 8).
       this.indexRecord(parsed);
+    }
+
+    // Phase 2: ownership is evaluated once, only from each pair's latest
+    // (post-Phase-1) record — never from a superseded intermediate one.
+    const conflict = this.rebuildScopeIndexFromReplay();
+    if (conflict !== undefined) {
+      return { ok: false, reason: conflict };
     }
 
     return { ok: true };
@@ -92,6 +117,15 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
+  // The pair, if any, currently holding this physical scope. Callers
+  // acquiring a new scope binding must serialize this read together with
+  // the durable write that claims it under the scope-level KeyedMutex —
+  // this method itself performs no locking (position-scope-exclusivity
+  // design.md Decisions 2, 6).
+  findOwnerByScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord | undefined {
+    return this.byScope.get(positionScopeKey(category, symbol));
+  }
+
   async save(record: EntryPackageExecutionRecord): Promise<void> {
     const line = `${JSON.stringify(record)}\n`;
 
@@ -102,6 +136,13 @@ export class EntryPackageCorrelationRepository {
     await task;
 
     this.indexRecord(record);
+    // Live-write-only scope claim/release (design.md Decision 2). Correct
+    // here specifically because live save() calls are already strictly
+    // ordered by the pair-lock and scope-lock, so this record is always
+    // already the latest for its pair the instant this runs — unlike
+    // replay, there is no later line still to arrive that could change the
+    // answer. See rebuildScopeIndexFromReplay() for the startup path.
+    this.applyScopeClaimOnWrite(record);
   }
 
   private async appendDurable(line: string): Promise<void> {
@@ -132,6 +173,66 @@ export class EntryPackageCorrelationRepository {
       }
     }
   }
+
+  // Live-write scope claim/release. Never call this from replay() — see
+  // rebuildScopeIndexFromReplay() for why the same per-line step is unsound
+  // there (design.md Decision 8).
+  private applyScopeClaimOnWrite(record: EntryPackageExecutionRecord): void {
+    if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+      return;
+    }
+
+    const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
+
+    if (!isDurablyClosedEntryPackageStatus(record.status)) {
+      this.byScope.set(scope, record);
+      return;
+    }
+
+    // Durably closed: release, but only if this pair is still the
+    // recorded owner — never delete a different pair's legitimate claim.
+    const currentOwner = this.byScope.get(scope);
+    if (currentOwner !== undefined && isSamePair(currentOwner, record)) {
+      this.byScope.delete(scope);
+    }
+  }
+
+  // Phase 2 of replay (design.md Decision 8): evaluated once, after every
+  // line has been indexed into byCompositeKey, using only each pair's
+  // final latest record — never an intermediate one a later line for the
+  // same pair has since superseded. byCompositeKey.values() yields exactly
+  // one record per pair, so a scope collision found here is necessarily
+  // between two *different* pairs' latest durable state, not a sequencing
+  // artifact.
+  private rebuildScopeIndexFromReplay(): string | undefined {
+    this.byScope.clear();
+
+    for (const record of this.byCompositeKey.values()) {
+      if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+        continue;
+      }
+      if (isDurablyClosedEntryPackageStatus(record.status)) {
+        continue;
+      }
+
+      const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
+      const existingOwner = this.byScope.get(scope);
+      if (existingOwner !== undefined) {
+        return (
+          `conflicting scope ownership for ${scope}: both ` +
+          `${correlationRecordKey(existingOwner.strategy_instance_id, existingOwner.trade_cycle_id)} and ` +
+          `${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} are durably open`
+        );
+      }
+      this.byScope.set(scope, record);
+    }
+
+    return undefined;
+  }
+}
+
+function isSamePair(a: EntryPackageExecutionRecord, b: EntryPackageExecutionRecord): boolean {
+  return a.strategy_instance_id === b.strategy_instance_id && a.trade_cycle_id === b.trade_cycle_id;
 }
 
 function isNotFoundError(error: unknown): boolean {

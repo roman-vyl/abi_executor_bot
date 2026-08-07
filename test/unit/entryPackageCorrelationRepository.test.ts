@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
-import type { EntryPackageExecutionRecord } from "../../src/correlation/entryPackageExecutionRecord.js";
+import type {
+  EntryPackageExecutionRecord,
+  EntryPackageExecutionStatus,
+} from "../../src/correlation/entryPackageExecutionRecord.js";
 
 test("save writes one durable JSONL line and updates in-memory indexes", async () => {
   await withTempDir(async (dir) => {
@@ -192,6 +195,134 @@ test("save ordering is preserved across concurrent writes for different keys (FI
   });
 });
 
+test("save claims a scope for a non-durably-closed record", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+    const record = makeRecord({ orderLinkId: "link-1", status: "pending_create" });
+
+    await repo.save(record);
+
+    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), record);
+  });
+});
+
+test("save releases a scope only when the record's own pair becomes durably closed", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    await repo.save(makeRecord({ orderLinkId: "link-1", status: "applied" }));
+    await repo.save(makeRecord({ orderLinkId: null, status: "absent" }));
+
+    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined);
+  });
+});
+
+test("two different scopes are claimed independently", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+    const btc = makeRecord({ tradeCycleId: "cycle-1", orderLinkId: "link-1", exchangeSymbol: "BTCUSDT" });
+    const eth = makeRecord({ tradeCycleId: "cycle-2", orderLinkId: "link-2", exchangeSymbol: "ETHUSDT" });
+
+    await repo.save(btc);
+    await repo.save(eth);
+
+    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), btc);
+    assert.deepEqual(repo.findOwnerByScope("linear", "ETHUSDT"), eth);
+  });
+});
+
+test("releasing a scope never deletes a different pair's own claim on it", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    const ownerRecord = makeRecord({ tradeCycleId: "cycle-owner", orderLinkId: "link-owner", status: "applied" });
+    await repo.save(ownerRecord);
+
+    // A different pair's own record durably closing must never remove
+    // cycle-owner's unrelated claim on the same scope, even though this
+    // shouldn't arise in practice once the acquisition guard is in place.
+    await repo.save(
+      makeRecord({ tradeCycleId: "cycle-other", orderLinkId: null, status: "absent" }),
+    );
+
+    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), ownerRecord);
+  });
+});
+
+test("replay resolves a scope handed off between pairs without a false-positive intermediate conflict", async () => {
+  // The position-scope-exclusivity design.md Decision 8 counter-example:
+  // pair A holds BTC, pair B claims BTC while A is still open, then A's
+  // *later* record durably closes. The correct final answer is pair B
+  // owns BTC; nothing here is a real conflict.
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const line1 = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", generation: 1, status: "applied" });
+    const line2 = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", generation: 1, status: "pending_create" });
+    const line3 = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: null, generation: 1, status: "absent" });
+    await writeFile(
+      path,
+      `${JSON.stringify(line1)}\n${JSON.stringify(line2)}\n${JSON.stringify(line3)}\n`,
+      "utf8",
+    );
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), line2);
+  });
+});
+
+test("replay fails closed when two different pairs' latest records both hold the same scope", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const a = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", status: "applied" });
+    const b = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", status: "pending_create" });
+    await writeFile(path, `${JSON.stringify(a)}\n${JSON.stringify(b)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+test("replay treats sequential historical scope reuse as no conflict", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const aApplied = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", status: "applied" });
+    const aAbsent = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: null, status: "absent" });
+    const b = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", status: "pending_create" });
+    await writeFile(
+      path,
+      `${JSON.stringify(aApplied)}\n${JSON.stringify(aAbsent)}\n${JSON.stringify(b)}\n`,
+      "utf8",
+    );
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), b);
+  });
+});
+
+test("a record with no real binding (exchange_category '') never claims a scope", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+    const neverBound: EntryPackageExecutionRecord = { ...makeRecord(), exchange_category: "", status: "absent" };
+
+    await repo.save(neverBound);
+
+    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined);
+  });
+});
+
 function makeRecord(
   overrides: Partial<{
     strategyInstanceId: string;
@@ -199,13 +330,15 @@ function makeRecord(
     orderLinkId: string;
     orderId: string;
     generation: number;
+    status: EntryPackageExecutionStatus;
+    exchangeSymbol: string;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
     strategy_instance_id: overrides.strategyInstanceId ?? "instance-1",
     trade_cycle_id: overrides.tradeCycleId ?? "cycle-1",
     ticker: "BTCUSDT.P",
-    exchange_symbol: "BTCUSDT",
+    exchange_symbol: overrides.exchangeSymbol ?? "BTCUSDT",
     exchange_category: "linear",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
@@ -215,7 +348,7 @@ function makeRecord(
     order_link_id: overrides.orderLinkId ?? null,
     order_id: overrides.orderId ?? null,
     generation: overrides.generation ?? 1,
-    status: "pending_create",
+    status: overrides.status ?? "pending_create",
     early_execution_observation: null,
     binding_history: [],
     pending_action: overrides.orderLinkId !== undefined ? "create" : null,

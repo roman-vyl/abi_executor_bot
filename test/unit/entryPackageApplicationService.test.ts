@@ -7,6 +7,10 @@ import test from "node:test";
 import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../src/config/config.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
+import type {
+  EntryPackageExecutionRecord,
+  EntryPackageExecutionStatus,
+} from "../../src/correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../src/domain/entryPackageApi.js";
 import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import type { ExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
@@ -578,6 +582,208 @@ test("a failing first request releases the mutex so a subsequent request for the
   });
 });
 
+test("two different pairs racing the same scope: exactly one is claimed, the other fails closed before any exchange write", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const [first, second] = await Promise.all([
+      service.apply(makeCommand({ tradeCycleId: "cycle-1" })),
+      service.apply(makeCommand({ tradeCycleId: "cycle-2" })),
+    ]);
+
+    const results = [first, second];
+    const succeeded = results.filter((result) => result.statusCode === 200);
+    const failed = results.filter((result) => result.statusCode !== 200);
+
+    assert.equal(succeeded.length, 1, "exactly one pair claims the scope");
+    assert.equal(failed.length, 1);
+    assertInternalError(failed[0]!);
+    assert.equal(bybit.createOrderCalls.length, 1, "the losing pair never reaches the exchange");
+  });
+});
+
+test("two different pairs on different scopes both succeed independently", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const [btc, eth] = await Promise.all([
+      service.apply(makeCommand({ tradeCycleId: "cycle-1" })),
+      service.apply(makeCommand({ tradeCycleId: "cycle-2", ticker: "ETHUSDT.P" })),
+    ]);
+
+    assertApplied(btc, "0.001");
+    assertApplied(eth, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2);
+  });
+});
+
+test("a durably absent pair releases its scope for a different pair", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    const cancelled = await service.apply(makeCommand({ tradeCycleId: "cycle-1", desiredEntry: null }));
+    assertAbsent(cancelled);
+
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    const other = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    assertApplied(other, "0.001");
+  });
+});
+
+test("a durably terminal-without-fill pair releases its scope for a different pair", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([{ orderStatus: "Rejected", cumExecQty: "0" }]);
+    const terminal = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    assertInternalError(terminal);
+
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    const other = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    assertApplied(other, "0.001");
+  });
+});
+
+test("a crash between the scope claim and the exchange call keeps the scope held, blocking a different pair", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.createOrder = async () => {
+      throw new Error("transport failure");
+    };
+
+    const failed = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    assertInternalError(failed);
+
+    const otherPair = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    assertInternalError(otherPair);
+    assert.equal(bybit.createOrderCalls.length, 0, "neither pair ever reached a working exchange call yet");
+
+    bybit.createOrder = async (payload) => {
+      bybit.createOrderCalls.push(payload);
+      return { retCode: 0, result: { orderLinkId: "fake-create" } };
+    };
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const ownerRetry = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    assertApplied(ownerRetry, "0.001");
+  });
+});
+
+test("liveness: a mix of same-scope and different-scope pairs completes without deadlock", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const requests: Promise<EntryPackageHttpResult>[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      requests.push(service.apply(makeCommand({ tradeCycleId: `btc-cycle-${index}` })));
+      requests.push(service.apply(makeCommand({ tradeCycleId: `eth-cycle-${index}`, ticker: "ETHUSDT.P" })));
+    }
+
+    const results = await Promise.all(requests);
+    assert.equal(results.length, 10);
+    assert.equal(bybit.createOrderCalls.length, 2, "exactly one winner per scope (BTCUSDT, ETHUSDT)");
+  });
+});
+
+test("scope ownership survives restart: a held-status record blocks a different pair after replay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-held-"));
+  try {
+    const path = join(dir, "correlation.jsonl");
+    const repoBeforeRestart = new EntryPackageCorrelationRepository(path);
+    await repoBeforeRestart.save(makeScopeTestRecord({ status: "applied" }));
+
+    const repoAfterRestart = new EntryPackageCorrelationRepository(path);
+    const replayResult = await repoAfterRestart.replay();
+    assert.deepEqual(replayResult, { ok: true });
+
+    const result = await runServiceAgainstRepository(repoAfterRestart, makeCommand({ tradeCycleId: "cycle-2" }));
+
+    assertInternalError(result.httpResult);
+    assert.equal(result.bybit.createOrderCalls.length, 0, "the other pair never reaches the exchange after restart");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("scope ownership survives restart: a durably closed record frees its scope after replay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-closed-"));
+  try {
+    const path = join(dir, "correlation.jsonl");
+    const repoBeforeRestart = new EntryPackageCorrelationRepository(path);
+    await repoBeforeRestart.save(makeScopeTestRecord({ status: "absent", orderLinkId: null }));
+
+    const repoAfterRestart = new EntryPackageCorrelationRepository(path);
+    const replayResult = await repoAfterRestart.replay();
+    assert.deepEqual(replayResult, { ok: true });
+
+    const result = await runServiceAgainstRepository(repoAfterRestart, makeCommand({ tradeCycleId: "cycle-2" }));
+
+    assertApplied(result.httpResult, "0.001");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+function makeScopeTestRecord(
+  overrides: Partial<{ status: EntryPackageExecutionStatus; orderLinkId: string | null }> = {},
+): EntryPackageExecutionRecord {
+  const orderLinkId = overrides.orderLinkId === undefined ? "restart-link-1" : overrides.orderLinkId;
+  return {
+    strategy_instance_id: "instance-1",
+    trade_cycle_id: "cycle-1",
+    ticker: "BTCUSDT.P",
+    exchange_symbol: "BTCUSDT",
+    exchange_category: "linear",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    desired_entry: orderLinkId === null ? null : makeDesiredEntry(),
+    risk_multiplier: "1",
+    calculated_quantity: orderLinkId === null ? null : "0.001",
+    order_link_id: orderLinkId,
+    order_id: orderLinkId === null ? null : "restart-order-1",
+    generation: 1,
+    status: overrides.status ?? "applied",
+    early_execution_observation: null,
+    binding_history: [],
+    pending_action: orderLinkId === null ? null : "create",
+    current_binding_started_at: orderLinkId === null ? null : "2026-01-01T00:00:00.000Z",
+  };
+}
+
+async function runServiceAgainstRepository(
+  repository: EntryPackageCorrelationRepository,
+  command: EntryPackageCommand,
+): Promise<{ httpResult: EntryPackageHttpResult; bybit: FakeBybitAdapter }> {
+  const config = makeTestConfig({
+    dryRun: false,
+    liveTradingEnabled: true,
+    bybitApiKey: "test-key",
+    bybitApiSecret: "test-secret",
+    bybitEnvironment: "testnet",
+  });
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+  const rulesProvider = new FakeInstrumentTradingRulesProvider();
+  const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
+
+  const service = new EntryPackageApplicationService({
+    config,
+    bybit,
+    correlationRepository: repository,
+    positionSizeCalculator,
+    mutex: new KeyedMutex(),
+    scopeMutex: new KeyedMutex(),
+    exchangeInstrumentResolver: new BybitExchangeInstrumentResolver(),
+  });
+
+  const httpResult = await service.apply(command);
+  return { httpResult, bybit };
+}
+
 function makeCommand(overrides: Partial<EntryPackageCommand> = {}): EntryPackageCommand {
   return {
     strategyInstanceId: "instance-1",
@@ -675,6 +881,7 @@ async function withService(
     const rulesProvider = new FakeInstrumentTradingRulesProvider();
     const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
     const mutex = new KeyedMutex();
+    const scopeMutex = new KeyedMutex();
 
     const service = new EntryPackageApplicationService({
       config,
@@ -682,6 +889,7 @@ async function withService(
       correlationRepository: repo,
       positionSizeCalculator,
       mutex,
+      scopeMutex,
       exchangeInstrumentResolver,
     });
 
@@ -712,6 +920,7 @@ async function withRealRulesProviderService(
     const rulesProvider = new BybitInstrumentTradingRulesProvider(bybit, config);
     const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
     const mutex = new KeyedMutex();
+    const scopeMutex = new KeyedMutex();
 
     const service = new EntryPackageApplicationService({
       config,
@@ -719,6 +928,7 @@ async function withRealRulesProviderService(
       correlationRepository: repo,
       positionSizeCalculator,
       mutex,
+      scopeMutex,
       exchangeInstrumentResolver: new BybitExchangeInstrumentResolver(),
     });
 

@@ -5,7 +5,7 @@ import type {
   BindingHistoryEntry,
   EntryPackageExecutionRecord,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
+import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
@@ -14,6 +14,7 @@ import {
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
+import { positionScopeKey } from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
@@ -28,7 +29,20 @@ export type EntryPackageApplicationServiceDeps = {
   bybit: BybitAdapter;
   correlationRepository: EntryPackageCorrelationRepository;
   positionSizeCalculator: PositionSizeCalculator;
+  // Serializes commands for one (strategy_instance_id, trade_cycle_id)
+  // pair. Held for the entire process() call — see `apply()`.
   mutex: KeyedMutex;
+  // Serializes acquisition of one physical position scope (category +
+  // symbol) across *different* pairs. A distinct instance/keyspace from
+  // `mutex` above, never the other way around: `mutex` (pair-lock) is
+  // always acquired first/outer by `apply()`; `scopeMutex` is only ever
+  // acquired second/inner, inside `createOrder()`, and only briefly around
+  // the ownership check + durable claim write — never across a Bybit call
+  // or a confirmation retry. No code path acquires `mutex` while holding
+  // `scopeMutex`. This fixed ordering is what makes the two locks
+  // deadlock-free by construction (position-scope-exclusivity design.md
+  // Decisions 4-5) — preserve it if either lock's call sites ever change.
+  scopeMutex: KeyedMutex;
   // Resolves a Runtime ticker into its Bybit exchange instrument identity
   // (symbol, category, product). Only ever called for a new generation
   // (createOrder) — every other branch reuses the identity already stored
@@ -190,8 +204,38 @@ export class EntryPackageApplicationService {
       current_binding_started_at: currentBindingStartedAt,
     };
 
-    // Durable write before any exchange call (design.md §11 step 4d).
-    await this.deps.correlationRepository.save(provisional);
+    // Scope-level guard (position-scope-exclusivity design.md Decisions
+    // 3, 6): whichever pair reaches this scope's provisional write first
+    // durably claims it. The scope lock is held only for the check + this
+    // one write, never across the Bybit call below — repeating the mutex
+    // mistake already fixed once for the pair-lock would be a regression.
+    const claim = await this.deps.scopeMutex.withKeyLock(
+      positionScopeKey(identity.category, identity.symbol),
+      async (): Promise<"claimed" | "conflict"> => {
+        const owner = this.deps.correlationRepository.findOwnerByScope(identity.category, identity.symbol);
+        const ownedByAnotherActivePair =
+          owner !== undefined && !isOwnedBySamePair(owner, command) && !isDurablyClosedEntryPackageStatus(owner.status);
+        if (ownedByAnotherActivePair) {
+          return "conflict";
+        }
+
+        // Durable write before any exchange call (design.md §11 step 4d).
+        // This write both claims the scope (via the repository's live
+        // byScope update) and remains the existing pre-exchange-call
+        // record — no separate reservation write is introduced.
+        await this.deps.correlationRepository.save(provisional);
+        return "claimed";
+      },
+    );
+
+    if (claim === "conflict") {
+      // Another pair already holds this physical scope and has not
+      // durably proven it no longer can. Fail closed before any exchange
+      // write; no correlation write happens for this attempt, and no new
+      // public error code is introduced (position-scope-exclusivity
+      // design.md Decision 9).
+      return internalErrorResult();
+    }
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
       symbol: identity.symbol,
@@ -749,6 +793,10 @@ function isMetadataOnlyChange(a: DesiredEntryDto, b: DesiredEntryDto): boolean {
     a.source_plan_bar_open_time_ms !== b.source_plan_bar_open_time_ms || a.locked_exit_profile !== b.locked_exit_profile;
 
   return coreUnchanged && metadataChanged;
+}
+
+function isOwnedBySamePair(owner: EntryPackageExecutionRecord, command: EntryPackageCommand): boolean {
+  return owner.strategy_instance_id === command.strategyInstanceId && owner.trade_cycle_id === command.tradeCycleId;
 }
 
 function closeBindingFrom(
