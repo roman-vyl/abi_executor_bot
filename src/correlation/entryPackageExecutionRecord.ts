@@ -11,6 +11,18 @@ export type EntryPackageExecutionStatus =
   | "unknown"
   | "terminal_unfilled";
 
+// The one domain fact both open-position resolution (its `durably_closed`
+// bucket) and physical-scope release share: a binding in either of these
+// two statuses is durably proven to admit no position and no order that
+// could still produce one, without needing a live exchange query. Shared
+// here rather than left as two independently-maintained two-element sets
+// (position-scope-exclusivity design.md Decision 10).
+export function isDurablyClosedEntryPackageStatus(
+  status: EntryPackageExecutionStatus,
+): status is "absent" | "terminal_unfilled" {
+  return status === "absent" || status === "terminal_unfilled";
+}
+
 // Which external command was last dispatched (or is about to be) for the
 // record's current binding, so a repeat PUT arriving after a crash or an
 // inconclusive confirmation knows exactly what to resend rather than only

@@ -1,5 +1,6 @@
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { EntryPackageExecutionStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import { isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
 import type { OpenPositionHttpResult } from "../../domain/openPositionApi.js";
 import {
@@ -88,10 +89,11 @@ export class OpenPositionResolutionService {
 }
 
 function classifyStatus(status: EntryPackageExecutionStatus): StatusBucket {
+  if (isDurablyClosedEntryPackageStatus(status)) {
+    return "durably_closed";
+  }
+
   switch (status) {
-    case "absent":
-    case "terminal_unfilled":
-      return "durably_closed";
     case "applied":
     case "pending_replace":
     case "pending_cancel":

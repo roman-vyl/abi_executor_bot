@@ -24,6 +24,11 @@ export function startServer(config: AbiConfig): void {
   const rulesProvider = new BybitInstrumentTradingRulesProvider(bybit, config);
   const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
   const mutex = new KeyedMutex();
+  // Serializes physical-position-scope acquisition across different pairs
+  // (position-scope-exclusivity design.md Decision 4) — a distinct
+  // instance from `mutex` above, always acquired second/inner, never
+  // acquired while `mutex` is not already held for the same request.
+  const scopeMutex = new KeyedMutex();
   const readiness = new EntryPackageReadiness();
   const exchangeInstrumentResolver = new BybitExchangeInstrumentResolver();
 
@@ -33,6 +38,7 @@ export function startServer(config: AbiConfig): void {
     correlationRepository,
     positionSizeCalculator,
     mutex,
+    scopeMutex,
     exchangeInstrumentResolver,
   });
 
