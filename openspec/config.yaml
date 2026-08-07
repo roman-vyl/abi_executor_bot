@@ -21,7 +21,22 @@ rules:
     - State the user-visible or operational outcome and explicit non-goals.
     - Call out trading-safety, idempotency, recovery, and correlation-store implications.
     - Identify whether behavior affects dry-run, demo/testnet live execution, or mainnet guards.
+    - "Keep it brief: Why, What Changes, Non-goals, Impact only."
+    - Do not describe classes, methods, file paths, locks, DTOs, or implementation sequence.
+    - Do not repeat behavior already expressed in specs.
+  specs:
+    - Describe observable behavior only.
+    - Never name implementation classes, methods, repositories, mutexes, or source files.
+    - Specify only behavior introduced or changed by this change.
+    - Prefer the minimum number of requirements and scenarios needed to remove ambiguity.
+  design:
+    - Document only non-obvious technical decisions and trade-offs.
+    - Do not restate proposal or spec requirements.
+    - Omit design.md entirely when the implementation is straightforward.
   tasks:
     - Include focused tests for changed behavior and run npm test.
     - Keep runtime changes within the existing architecture and avoid unrelated refactors.
     - For live smoke work, include guard verification and cleanup checks.
+    - Keep tasks implementation-oriented and concise.
+    - Reference design/spec decisions instead of restating them.
+    - One checkbox per independently verifiable implementation step.
