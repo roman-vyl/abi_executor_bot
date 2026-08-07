@@ -1,68 +1,56 @@
-## 1. Shared query and adapter surface
+## 1. Adapter surface
 
-- [ ] 1.1 Extend `ValidatedOpenPositionRow` and `evaluatePositionQueryResponse`
-      (`src/exchange/bybitAdapter.ts`) with `stopLoss`/`takeProfit` (raw exact-decimal strings, `""`
-      meaning "not set"), validated the same way `avgPrice` is today when `size > 0`. No behavior
-      change for existing callers that ignore the new fields.
-- [ ] 1.2 Replace `SetTradingStopInput`/`BybitAdapter.setTradingStop` with a correctly-shaped method for
-      `POST /v5/position/trading-stop` (`category`, `symbol`, `positionIdx=0`, `tpslMode=Full`,
-      `stopLoss`, `takeProfit`, trigger fields from `config.bybitTriggerBy`). Confirm the old stub
-      (`placeMarketOrder`/`setTradingStop`) has zero callers before changing its shape (design.md
-      Decision 4) and update `test/fakes/fakeBybitAdapter.ts` to match.
+- [ ] 1.1 Add `stopLoss`/`takeProfit` to `ValidatedOpenPositionRow` as raw, optional exact-decimal
+      strings (Decision 6). No change to `evaluatePositionQueryResponse`'s existing outcomes.
+- [ ] 1.2 Replace `SetTradingStopInput`/`BybitAdapter.setTradingStop` with a correctly-shaped
+      `POST /v5/position/trading-stop` call (Decision 5: `category`, `symbol`, `positionIdx=0`,
+      `tpslMode=Full`, `stopLoss`, `takeProfit`, `config.bybitTriggerBy`; `take_price: null` →
+      `takeProfit: "0"`). Confirm the old stub has zero real callers; update
+      `test/fakes/fakeBybitAdapter.ts`.
 - [ ] 1.3 Add `executeProtectionUpdate` to `src/execution/execution.ts`, mirroring
-      `executeEntryOrder`'s live-guard gating (`skipped_live_execution` on `!canExecuteLive`,
-      design.md Decision 5).
+      `executeEntryOrder`'s live-guard gating.
 
 ## 2. Reuse the live-position gate
 
-- [ ] 2.1 Split `OpenPositionResolutionService.resolve()` (design.md Decision 3) into its existing
-      HTTP-shaping wrapper plus a new internal method returning a discriminated result (`open` /
-      `closed` / `unsupported_scope` / `error`). Run `test/unit/openPositionResolutionService.test.ts`
-      unchanged to confirm no behavior change on the GET endpoint.
+- [ ] 2.1 Split `OpenPositionResolutionService.resolve()` into its HTTP-shaping wrapper plus an
+      internal method returning `open` / `closed` / `unsupported_scope` / `error` (Decision 4).
+      Confirm `test/unit/openPositionResolutionService.test.ts` passes unchanged.
 
 ## 3. `ProtectionApplicationService`
 
-- [ ] 3.1 Add `src/services/protection/protectionApplicationService.ts`: looks up the record
-      (`unknown_trade_cycle_binding` if missing), re-verifies scope ownership via
-      `correlationRepository.findOwnerByScope` (design.md Decision 2), calls the shared live-position
-      gate from 2.1, sends the write via `executeProtectionUpdate`, then performs the read-back query
-      and exact-decimal comparison via `isNumericallyEqualExactDecimal`, and builds a
-      `ProtectionConfirmation` for `serializeProtectionApplied` (`positionManagementApi.ts`) or an
-      appropriate error result. No correlation-store write.
-- [ ] 3.2 Wrap the whole operation in `mutex.withKeyLock(correlationRecordKey(...), ...)`, reusing the
-      same `KeyedMutex` instance passed to `EntryPackageApplicationService` (design.md Decision 7).
-      `scopeMutex` is not used here.
-- [ ] 3.3 Gate on the existing entry-package readiness signal (design.md Decision 8), matching how
-      `openPositionRoutes.ts` already gates on `isReady()`.
+- [ ] 3.1 Add `src/services/protection/protectionApplicationService.ts`: durable-absence shortcut →
+      ownership re-check → live-position gate (2.1) → write (1.2/1.3) → bounded read-back (Decisions
+      2, 3, 6). No correlation-store write.
+- [ ] 3.2 Reuse the existing `KeyedMutex` instance and `correlationRecordKey`; do not use
+      `scopeMutex` (Decision 7).
+- [ ] 3.3 Gate on the existing entry-package readiness signal.
 
 ## 4. Wiring
 
-- [ ] 4.1 In `app/server.ts`, construct `ProtectionApplicationService` with `correlationRepository`,
-      `bybit`, `mutex`, `config`, and pass it (plus `isReady`) into `handlePositionManagementRoutes`.
-- [ ] 4.2 Update `handleProtection` (`src/routes/positionManagementRoutes.ts`) to call the service
-      instead of unconditionally returning `internalErrorResult()`.
+- [ ] 4.1 Construct `ProtectionApplicationService` in `app/server.ts` and pass it into
+      `handlePositionManagementRoutes`.
+- [ ] 4.2 Update `handleProtection` to call the service instead of unconditionally returning
+      `internal_error`.
 
 ## 5. Tests
 
-- [ ] 5.1 Unit tests for `ProtectionApplicationService`: unknown pair, scope-ownership mismatch
-      (constructed via a fake repository), non-`linear` scope, no live position, live position with
-      successful write + matching read-back (`protection_applied`), read-back numeric mismatch,
-      read-back query failure, live-execution-guard-disabled, `take_price: null` clearing the
-      take-profit leg.
-- [ ] 5.2 Update `test/unit/positionManagementRoutes.test.ts`'s "a transport-valid protection request
-      fails safe without a fabricated success" test: it now exercises a real (fake-backed) service
-      path rather than asserting the old unconditional stub.
-- [ ] 5.3 Concurrency test: a protection command and a concurrent entry-package REPLACE for the same
-      pair never interleave (design.md Decision 7 / spec's serialization requirement).
-- [ ] 5.4 Confirm `test/unit/openPositionResolutionService.test.ts` and
-      `test/unit/positionManagementApi.test.ts` pass unchanged.
+- [ ] 5.1 `ProtectionApplicationService` unit tests: unknown pair; durably-absent pair (no exchange
+      call); ownership mismatch; unsupported category; no live position; live-execution-guard
+      disabled; write with immediate matching read-back; read-back matching only on a later bounded
+      attempt; read-back exhausted without matching; `take_price: null` clearing take-profit, with
+      read-back reporting numeric zero rather than an exact string match.
+- [ ] 5.2 Update `positionManagementRoutes.test.ts`'s stub-behavior test to exercise the real
+      (fake-backed) service path.
+- [ ] 5.3 Concurrency test: protection vs. concurrent entry-package replace for the same pair never
+      interleave; different pairs proceed independently.
+- [ ] 5.4 Confirm `openPositionResolutionService.test.ts` and `positionManagementApi.test.ts` pass
+      unchanged.
 
 ## 6. Verification
 
 - [ ] 6.1 Run `npm test`, `npm run typecheck`, `npm run build`.
 - [ ] 6.2 Review the diff: no new public DTO, route, or error code; no new
-      `EntryPackageExecutionRecord` field or correlation write from protection execution; `DELETE
-      .../open-position` untouched.
+      `EntryPackageExecutionRecord` field or correlation write; `DELETE .../open-position` untouched.
 
 ## Deferred follow-up (not this change's scope)
 
