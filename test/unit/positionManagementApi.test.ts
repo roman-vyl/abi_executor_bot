@@ -262,6 +262,29 @@ test("serializeProtectionApplied fails closed on malformed decimal or empty iden
   );
 });
 
+// Defense-in-depth: this can't happen on the production path today (the
+// route already rejects zero/negative stop_price/take_price before a
+// ProtectionConfirmation is ever built), but the serializer is the last
+// fail-closed success gate, so it stays consistent with the same
+// strictly-positive contract validateProtectionCommand now enforces.
+test("serializeProtectionApplied fails closed on a zero or negative price, even if verification otherwise agrees", () => {
+  for (const stopPrice of ["0", "-99000"]) {
+    assert.deepEqual(
+      serializeProtectionApplied(verifiedProtection({ acceptedStopPrice: stopPrice, confirmedStopPrice: stopPrice })),
+      internalErrorResult(),
+      stopPrice,
+    );
+  }
+
+  for (const takePrice of ["0", "-103000"]) {
+    assert.deepEqual(
+      serializeProtectionApplied(verifiedProtection({ acceptedTakePrice: takePrice, confirmedTakePrice: takePrice })),
+      internalErrorResult(),
+      takePrice,
+    );
+  }
+});
+
 function verifiedClose(overrides: Partial<CloseConfirmation> = {}): CloseConfirmation {
   return {
     strategyInstanceId: "instance",

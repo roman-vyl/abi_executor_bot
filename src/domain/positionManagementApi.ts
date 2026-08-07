@@ -1,5 +1,5 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
-import { isExactDecimalText, isPositiveExactDecimalText } from "./entryPackageApi.js";
+import { isPositiveExactDecimalText } from "./entryPackageApi.js";
 import { decimalEquals } from "./exactDecimal.js";
 
 export type ProtectionRequestBody = {
@@ -216,10 +216,10 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
     !input.verificationSucceeded ||
     input.strategyInstanceId.length === 0 ||
     input.tradeCycleId.length === 0 ||
-    !isExactDecimalText(input.acceptedStopPrice) ||
-    !isExactDecimalText(input.confirmedStopPrice) ||
-    (input.acceptedTakePrice !== null && !isExactDecimalText(input.acceptedTakePrice)) ||
-    (input.confirmedTakePrice !== null && !isExactDecimalText(input.confirmedTakePrice)) ||
+    !isPositiveExactDecimalText(input.acceptedStopPrice) ||
+    !isPositiveExactDecimalText(input.confirmedStopPrice) ||
+    (input.acceptedTakePrice !== null && !isPositiveExactDecimalText(input.acceptedTakePrice)) ||
+    (input.confirmedTakePrice !== null && !isPositiveExactDecimalText(input.confirmedTakePrice)) ||
     (input.acceptedTakePrice === null) !== (input.confirmedTakePrice === null) ||
     !isNumericallyEqualExactDecimal(input.acceptedStopPrice, input.confirmedStopPrice) ||
     (input.acceptedTakePrice !== null &&

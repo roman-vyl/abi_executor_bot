@@ -90,7 +90,7 @@
                       "error": {
                         "code": "validation_failed",
                         "message": "request validation failed",
-                        "details": [{ "path": "/stop_price", "message": "stop_price must be exact-decimal text" }]
+                        "details": [{ "path": "/stop_price", "message": "stop_price must be strictly positive exact-decimal text" }]
                       }
                     }
                   },
