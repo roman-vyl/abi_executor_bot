@@ -209,8 +209,36 @@ export class EntryPackageCorrelationRepository {
 
     for (const record of this.byCompositeKey.values()) {
       if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+        // "" is the valid never-bound shape (persistAbsentNoHistory) only
+        // when durably closed. A non-durably-closed record with no real
+        // exchange identity is a contradiction the current write paths
+        // never produce (createOrder() always sets a real category before
+        // any status other than absent) — but replay must fail closed
+        // rather than silently exclude it from ownership if it ever does.
+        if (!isDurablyClosedEntryPackageStatus(record.status)) {
+          return (
+            `record for ${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} has no real ` +
+            `exchange binding (exchange_category=${JSON.stringify(record.exchange_category)}) but is not durably ` +
+            `closed (status=${record.status})`
+          );
+        }
         continue;
       }
+
+      if (record.exchange_symbol === "") {
+        // Same contradiction for the symbol half of a real binding: a
+        // "linear"/"spot" category implies createOrder() already
+        // resolved a real symbol alongside it.
+        if (!isDurablyClosedEntryPackageStatus(record.status)) {
+          return (
+            `record for ${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} has an empty ` +
+            `exchange_symbol under category ${record.exchange_category} but is not durably closed ` +
+            `(status=${record.status})`
+          );
+        }
+        continue;
+      }
+
       if (isDurablyClosedEntryPackageStatus(record.status)) {
         continue;
       }

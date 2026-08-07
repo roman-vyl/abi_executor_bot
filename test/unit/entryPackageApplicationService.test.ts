@@ -582,13 +582,23 @@ test("a failing first request releases the mutex so a subsequent request for the
   });
 });
 
+// Cross-pair scope tests deliberately vary both strategy_instance_id and
+// trade_cycle_id, not trade_cycle_id alone: the target V1 model is
+// "instance-A/cycle-A1 vs. instance-B/cycle-B1 both wanting BTCUSDT" —
+// two cycles under the *same* instance is a state Runtime's own external
+// invariant (at most one current trade cycle per strategy instance)
+// already rules out, so it is not the scenario this mechanism exists for.
+// ABI's own check only ever compares the full pair, but tests should read
+// as the real model, not as an incidental same-instance case
+// (position-scope-exclusivity design.md; two cycles sharing one instance
+// is explicitly not ABI's responsibility to additionally forbid).
 test("two different pairs racing the same scope: exactly one is claimed, the other fails closed before any exchange write", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
     const [first, second] = await Promise.all([
-      service.apply(makeCommand({ tradeCycleId: "cycle-1" })),
-      service.apply(makeCommand({ tradeCycleId: "cycle-2" })),
+      service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" })),
+      service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" })),
     ]);
 
     const results = [first, second];
@@ -607,8 +617,10 @@ test("two different pairs on different scopes both succeed independently", async
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
     const [btc, eth] = await Promise.all([
-      service.apply(makeCommand({ tradeCycleId: "cycle-1" })),
-      service.apply(makeCommand({ tradeCycleId: "cycle-2", ticker: "ETHUSDT.P" })),
+      service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" })),
+      service.apply(
+        makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1", ticker: "ETHUSDT.P" }),
+      ),
     ]);
 
     assertApplied(btc, "0.001");
@@ -620,15 +632,17 @@ test("two different pairs on different scopes both succeed independently", async
 test("a durably absent pair releases its scope for a different pair", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-    await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
 
     bybit.orderByLinkIdResponse = orderList([]);
     bybit.orderHistoryResponse = orderList([]);
-    const cancelled = await service.apply(makeCommand({ tradeCycleId: "cycle-1", desiredEntry: null }));
+    const cancelled = await service.apply(
+      makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1", desiredEntry: null }),
+    );
     assertAbsent(cancelled);
 
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-    const other = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    const other = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
     assertApplied(other, "0.001");
   });
 });
@@ -636,15 +650,15 @@ test("a durably absent pair releases its scope for a different pair", async () =
 test("a durably terminal-without-fill pair releases its scope for a different pair", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-    await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
 
     bybit.orderByLinkIdResponse = orderList([]);
     bybit.orderHistoryResponse = orderList([{ orderStatus: "Rejected", cumExecQty: "0" }]);
-    const terminal = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    const terminal = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
     assertInternalError(terminal);
 
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-    const other = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    const other = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
     assertApplied(other, "0.001");
   });
 });
@@ -655,10 +669,12 @@ test("a crash between the scope claim and the exchange call keeps the scope held
       throw new Error("transport failure");
     };
 
-    const failed = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    const failed = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
     assertInternalError(failed);
 
-    const otherPair = await service.apply(makeCommand({ tradeCycleId: "cycle-2" }));
+    const otherPair = await service.apply(
+      makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
+    );
     assertInternalError(otherPair);
     assert.equal(bybit.createOrderCalls.length, 0, "neither pair ever reached a working exchange call yet");
 
@@ -668,19 +684,29 @@ test("a crash between the scope claim and the exchange call keeps the scope held
     };
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
-    const ownerRetry = await service.apply(makeCommand({ tradeCycleId: "cycle-1" }));
+    const ownerRetry = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
     assertApplied(ownerRetry, "0.001");
   });
 });
 
-test("liveness: a mix of same-scope and different-scope pairs completes without deadlock", async () => {
+test("liveness: a mix of same-scope and different-scope pairs, each its own strategy instance, completes without deadlock", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
     const requests: Promise<EntryPackageHttpResult>[] = [];
     for (let index = 0; index < 5; index += 1) {
-      requests.push(service.apply(makeCommand({ tradeCycleId: `btc-cycle-${index}` })));
-      requests.push(service.apply(makeCommand({ tradeCycleId: `eth-cycle-${index}`, ticker: "ETHUSDT.P" })));
+      requests.push(
+        service.apply(makeCommand({ strategyInstanceId: `instance-btc-${index}`, tradeCycleId: `cycle-btc-${index}` })),
+      );
+      requests.push(
+        service.apply(
+          makeCommand({
+            strategyInstanceId: `instance-eth-${index}`,
+            tradeCycleId: `cycle-eth-${index}`,
+            ticker: "ETHUSDT.P",
+          }),
+        ),
+      );
     }
 
     const results = await Promise.all(requests);
@@ -700,7 +726,10 @@ test("scope ownership survives restart: a held-status record blocks a different 
     const replayResult = await repoAfterRestart.replay();
     assert.deepEqual(replayResult, { ok: true });
 
-    const result = await runServiceAgainstRepository(repoAfterRestart, makeCommand({ tradeCycleId: "cycle-2" }));
+    const result = await runServiceAgainstRepository(
+      repoAfterRestart,
+      makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
+    );
 
     assertInternalError(result.httpResult);
     assert.equal(result.bybit.createOrderCalls.length, 0, "the other pair never reaches the exchange after restart");
@@ -720,7 +749,10 @@ test("scope ownership survives restart: a durably closed record frees its scope 
     const replayResult = await repoAfterRestart.replay();
     assert.deepEqual(replayResult, { ok: true });
 
-    const result = await runServiceAgainstRepository(repoAfterRestart, makeCommand({ tradeCycleId: "cycle-2" }));
+    const result = await runServiceAgainstRepository(
+      repoAfterRestart,
+      makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
+    );
 
     assertApplied(result.httpResult, "0.001");
   } finally {
@@ -728,13 +760,16 @@ test("scope ownership survives restart: a durably closed record frees its scope 
   }
 });
 
+// The pre-restart record belongs to a different pair ("instance-A") than
+// the post-restart request each test above issues ("instance-B") —
+// matching the real target model (see the comment above the race test).
 function makeScopeTestRecord(
   overrides: Partial<{ status: EntryPackageExecutionStatus; orderLinkId: string | null }> = {},
 ): EntryPackageExecutionRecord {
   const orderLinkId = overrides.orderLinkId === undefined ? "restart-link-1" : overrides.orderLinkId;
   return {
-    strategy_instance_id: "instance-1",
-    trade_cycle_id: "cycle-1",
+    strategy_instance_id: "instance-A",
+    trade_cycle_id: "cycle-A1",
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",

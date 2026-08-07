@@ -32,11 +32,22 @@
       - Verify against the design.md Decision 8 counter-example directly in a test: pair A `applied`
         BTC (line 1), pair B `pending_create` BTC (line 2), pair A `absent` BTC (line 3) — replay
         must succeed with pair B as BTC's sole owner, never failing on account of line 2 alone.
+      - **Post-implementation review correction:** Phase 2 must also fail closed, not silently
+        `continue` past, a non-durably-closed record whose `exchange_category` is `""` or whose
+        `exchange_symbol` is empty under a real category — a schema-valid but semantically corrupted
+        shape `isValidEntryPackageExecutionRecord` does not itself reject (design.md Decision 8
+        addendum).
 - [x] 2.4 Unit tests for 2.1-2.3 in isolation (no HTTP layer), mirroring
       `test/unit/entryPackageCorrelationRepository.test.ts`'s existing style: live claim, live
       release, self-repeat non-conflict, the Decision 8 counter-example (intermediate line is not a
-      false-positive conflict), a genuine final-state conflict across two pairs' latest records, and
-      sequential reuse across replay is not a conflict.
+      false-positive conflict), a genuine final-state conflict across two pairs' latest records,
+      sequential reuse across replay is not a conflict, and the two corrupted-record fail-closed
+      cases from the review-correction bullet above (plus one confirming an empty `exchange_symbol`
+      does *not* fail closed when durably closed). Every cross-pair test in this file and in
+      `entryPackageApplicationService.test.ts` uses a distinct `strategy_instance_id` *and*
+      `trade_cycle_id` per pair (`instance-A`/`cycle-A1` vs. `instance-B`/`cycle-B1`), matching the
+      actual target conflict — not two cycles under one instance, a state Runtime's own external
+      invariant already rules out.
 
 ## 3. Scope-level serialization
 

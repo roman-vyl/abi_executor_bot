@@ -223,8 +223,18 @@ test("two different scopes are claimed independently", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
     const repo = new EntryPackageCorrelationRepository(path);
-    const btc = makeRecord({ tradeCycleId: "cycle-1", orderLinkId: "link-1", exchangeSymbol: "BTCUSDT" });
-    const eth = makeRecord({ tradeCycleId: "cycle-2", orderLinkId: "link-2", exchangeSymbol: "ETHUSDT" });
+    const btc = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-1",
+      exchangeSymbol: "BTCUSDT",
+    });
+    const eth = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-2",
+      exchangeSymbol: "ETHUSDT",
+    });
 
     await repo.save(btc);
     await repo.save(eth);
@@ -239,20 +249,37 @@ test("releasing a scope never deletes a different pair's own claim on it", async
     const path = join(dir, "correlation.jsonl");
     const repo = new EntryPackageCorrelationRepository(path);
 
-    const ownerRecord = makeRecord({ tradeCycleId: "cycle-owner", orderLinkId: "link-owner", status: "applied" });
+    const ownerRecord = makeRecord({
+      strategyInstanceId: "instance-owner",
+      tradeCycleId: "cycle-owner",
+      orderLinkId: "link-owner",
+      status: "applied",
+    });
     await repo.save(ownerRecord);
 
     // A different pair's own record durably closing must never remove
-    // cycle-owner's unrelated claim on the same scope, even though this
-    // shouldn't arise in practice once the acquisition guard is in place.
+    // instance-owner/cycle-owner's unrelated claim on the same scope, even
+    // though this shouldn't arise in practice once the acquisition guard
+    // is in place.
     await repo.save(
-      makeRecord({ tradeCycleId: "cycle-other", orderLinkId: null, status: "absent" }),
+      makeRecord({
+        strategyInstanceId: "instance-other",
+        tradeCycleId: "cycle-other",
+        orderLinkId: null,
+        status: "absent",
+      }),
     );
 
     assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), ownerRecord);
   });
 });
 
+// Cross-pair tests below deliberately vary both strategy_instance_id and
+// trade_cycle_id, not trade_cycle_id alone — the target V1 conflict is
+// "instance-A/cycle-A1 vs. instance-B/cycle-B1", two different strategy
+// instances contending for one scope. Two cycles under the *same*
+// instance is a state Runtime's own external invariant already rules
+// out, so it is not the scenario ownership reconstruction exists for.
 test("replay resolves a scope handed off between pairs without a false-positive intermediate conflict", async () => {
   // The position-scope-exclusivity design.md Decision 8 counter-example:
   // pair A holds BTC, pair B claims BTC while A is still open, then A's
@@ -260,9 +287,27 @@ test("replay resolves a scope handed off between pairs without a false-positive 
   // owns BTC; nothing here is a real conflict.
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
-    const line1 = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", generation: 1, status: "applied" });
-    const line2 = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", generation: 1, status: "pending_create" });
-    const line3 = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: null, generation: 1, status: "absent" });
+    const line1 = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-a1",
+      generation: 1,
+      status: "applied",
+    });
+    const line2 = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-b1",
+      generation: 1,
+      status: "pending_create",
+    });
+    const line3 = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: null,
+      generation: 1,
+      status: "absent",
+    });
     await writeFile(
       path,
       `${JSON.stringify(line1)}\n${JSON.stringify(line2)}\n${JSON.stringify(line3)}\n`,
@@ -280,8 +325,18 @@ test("replay resolves a scope handed off between pairs without a false-positive 
 test("replay fails closed when two different pairs' latest records both hold the same scope", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
-    const a = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", status: "applied" });
-    const b = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", status: "pending_create" });
+    const a = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-a1",
+      status: "applied",
+    });
+    const b = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-b1",
+      status: "pending_create",
+    });
     await writeFile(path, `${JSON.stringify(a)}\n${JSON.stringify(b)}\n`, "utf8");
 
     const repo = new EntryPackageCorrelationRepository(path);
@@ -294,9 +349,24 @@ test("replay fails closed when two different pairs' latest records both hold the
 test("replay treats sequential historical scope reuse as no conflict", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
-    const aApplied = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: "link-a1", status: "applied" });
-    const aAbsent = makeRecord({ tradeCycleId: "cycle-A", orderLinkId: null, status: "absent" });
-    const b = makeRecord({ tradeCycleId: "cycle-B", orderLinkId: "link-b1", status: "pending_create" });
+    const aApplied = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-a1",
+      status: "applied",
+    });
+    const aAbsent = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: null,
+      status: "absent",
+    });
+    const b = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-b1",
+      status: "pending_create",
+    });
     await writeFile(
       path,
       `${JSON.stringify(aApplied)}\n${JSON.stringify(aAbsent)}\n${JSON.stringify(b)}\n`,
@@ -320,6 +390,50 @@ test("a record with no real binding (exchange_category '') never claims a scope"
     await repo.save(neverBound);
 
     assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined);
+  });
+});
+
+test("replay fails closed on a non-durably-closed record with no real exchange binding", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    // A schema-valid but semantically corrupted line: exchange_category ""
+    // is only a valid shape for a durably-closed (never-bound) record, and
+    // "unknown" is not durably closed. The current write paths never
+    // produce this, but replay must fail closed rather than silently
+    // exclude it from ownership.
+    const corrupted = { ...makeRecord({ orderLinkId: null, status: "unknown" }), exchange_category: "" };
+    await writeFile(path, `${JSON.stringify(corrupted)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+test("replay fails closed on a non-durably-closed record with an empty exchange_symbol under a real category", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const corrupted = { ...makeRecord({ orderLinkId: "link-1", status: "pending_create" }), exchange_symbol: "" };
+    await writeFile(path, `${JSON.stringify(corrupted)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+test("replay does not fail closed on an empty exchange_symbol under a real category when durably closed", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const record = { ...makeRecord({ orderLinkId: null, status: "absent" }), exchange_symbol: "" };
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
   });
 });
 

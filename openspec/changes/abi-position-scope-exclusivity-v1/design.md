@@ -360,6 +360,24 @@ today — ownership is a pure, deterministic function of the replayed records pl
 Decision 7, so "the in-memory index was lost" and "the process just started" are indistinguishable
 inputs to the same two-phase reconstruction, by construction.
 
+**Phase 2 fails closed on a semantically corrupted active record, not just a shape-invalid one
+(post-implementation review correction).** `isValidEntryPackageExecutionRecord` accepts
+`exchange_category: ""` for *any* status — it only checks the field is one of `"", "linear",
+"spot"`, not that `""` co-occurs only with a durably-closed status the way
+`entryPackageExecutionRecord.ts`'s own comment describes (`""` only for a record that has never had
+a real binding, i.e. `persistAbsentNoHistory`, which always pairs it with `status: "absent"`). The
+original Phase 2 unconditionally `continue`d past any record whose `exchange_category` was not
+`"linear"`/`"spot"`, regardless of status — a schema-valid-but-semantically-corrupted line (`""` or
+an empty `exchange_symbol` under a real category, paired with a non-durably-closed status) would be
+silently excluded from ownership reconstruction instead of failing readiness, understating an actual
+held scope. No current write path produces this shape (`createOrder()` always sets a real
+`category`+`symbol` before any status other than `absent` is possible), but replay is this
+capability's correctness-critical path precisely for inputs the live paths don't produce, so Phase 2
+now treats it the same way `replay()` already treats shape-invalid JSON: `exchange_category` not
+`"linear"`/`"spot"`, or a `"linear"`/`"spot"` category with an empty `exchange_symbol`, is valid only
+when durably closed; found on a non-durably-closed record, it fails replay the same way a genuine
+cross-pair conflict does, rather than being silently skipped.
+
 ### 9. HTTP contract: unchanged; conflict reuses the existing `internal_error`
 
 A scope-acquisition conflict returns the existing `internalErrorResult()`
