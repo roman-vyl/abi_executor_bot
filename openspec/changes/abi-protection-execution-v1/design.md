@@ -44,6 +44,13 @@ on this endpoint is the numeric value `"0"`, not an empty string; `take_price: n
 `takeProfit: "0"`. Trigger price source reuses `config.bybitTriggerBy`. The old
 `SetTradingStopInput`/`BybitAdapter.setTradingStop` stub (wrong shape, zero real callers) is replaced.
 
+Because `"0"` is reserved internally as Bybit's own "remove this leg" value, the public request must
+never accept it as a real price — `validateProtectionCommand` is tightened from `isExactDecimalText`
+to the already-existing `isPositiveExactDecimalText` (`entryPackageApi.ts`, the same helper
+`abi-entry-package-api` and `abi-open-position-lookup-api` already use for their own positive-price
+fields) for both `stop_price` and a non-null `take_price`. This is the `abi-position-management-api`
+delta in this change's spec folder.
+
 ## Decision 6: Read-back is a bounded re-query treating numeric zero as "leg not set"
 
 A single immediate re-query risks observing stale state and reporting a false `internal_error` for a
