@@ -137,7 +137,10 @@ readiness rather than silently choosing one as the owner. A scope legitimately p
 pairs earlier in the log — one pair's record reaching `absent` or `terminal_unfilled` before a
 different pair's later record claims the same scope — SHALL NOT be treated as a conflict, even if an
 intermediate line in the log shows both pairs claiming that scope before the earlier pair's release
-is replayed.
+is replayed. A latest record that is not durably closed but carries no real exchange binding — an
+empty `exchange_category`, or a non-empty category with an empty `exchange_symbol` — SHALL be
+treated the same way a genuine cross-pair conflict is: ABI SHALL fail entry-package readiness rather
+than silently excluding that record from ownership reconstruction.
 
 #### Scenario: Two simultaneously active owners of one scope block readiness
 - **WHEN** correlation-store replay finds two different pairs' latest records both claiming the
@@ -158,6 +161,19 @@ is replayed.
   records, and ABI treats pair B as the scope's sole current owner
 - **AND** ABI does not fail readiness on account of the earlier, since-superseded moment where both
   pairs' records claimed the scope
+
+#### Scenario: A non-durably-closed record with no real exchange binding blocks readiness
+- **WHEN** correlation-store replay finds a pair's latest record whose status is not `absent` or
+  `terminal_unfilled` and whose `exchange_category` is empty, or whose `exchange_category` is
+  `linear` or `spot` but whose `exchange_symbol` is empty
+- **THEN** ABI reports entry-package readiness as not ready rather than excluding that record from
+  ownership reconstruction
+
+#### Scenario: The same empty-binding shape is valid when durably closed
+- **WHEN** correlation-store replay finds a pair's latest record whose status is `absent` or
+  `terminal_unfilled` and whose `exchange_category` or `exchange_symbol` is empty
+- **THEN** replay succeeds and that record is excluded from ownership reconstruction without failing
+  readiness
 
 ### Requirement: A pair's owned scope is exactly its own stored exchange category and symbol
 While a pair holds a physical position scope, that scope SHALL be exactly the `exchange_category`
