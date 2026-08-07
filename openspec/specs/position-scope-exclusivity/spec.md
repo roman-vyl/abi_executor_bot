@@ -24,8 +24,9 @@ scope).
 - **AND** neither pair's acquisition is made to wait on the other's by the scope-ownership mechanism
 
 #### Scenario: A second pair cannot acquire a scope another active pair already holds
-- **WHEN** pair A already holds scope BTCUSDT with a status other than `absent` or
-  `terminal_unfilled`, and pair B applies a desired entry that resolves to the same scope
+- **WHEN** pair A already holds scope BTCUSDT with a status other than `absent`,
+  `terminal_unfilled`, or `terminal_closed`, and pair B applies a desired entry that resolves to the
+  same scope
 - **THEN** ABI does not send any create, amend, or cancel request to the exchange for pair B's
   request
 - **AND** ABI returns a safe error for pair B's request
@@ -155,14 +156,15 @@ ownership reconstruction.
 - **AND** ABI does not process entry-package execution requests
 
 #### Scenario: Sequential historical reuse of a scope is not a conflict
-- **WHEN** correlation-store replay finds pair A's record reaching `absent` or `terminal_unfilled`
-  for a scope earlier in the log, followed later by pair B's record claiming the same scope
+- **WHEN** correlation-store replay finds pair A's record reaching `absent`, `terminal_unfilled`, or
+  `terminal_closed` for a scope earlier in the log, followed later by pair B's record claiming the
+  same scope
 - **THEN** replay succeeds and ABI treats pair B as the scope's current owner
 
 #### Scenario: An intermediate historical moment is not evaluated as a conflict
 - **WHEN** the correlation log contains, in order, pair A claiming a scope, then pair B claiming the
   same scope while pair A's record is not yet durably closed, then a later record for pair A
-  reaching `absent` or `terminal_unfilled` for that same scope
+  reaching `absent`, `terminal_unfilled`, or `terminal_closed` for that same scope
 - **THEN** replay succeeds, evaluating ownership only from pair A's and pair B's respective latest
   records, and ABI treats pair B as the scope's sole current owner
 - **AND** ABI does not fail readiness on account of the earlier, since-superseded moment where both
@@ -176,8 +178,9 @@ ownership reconstruction.
   ownership reconstruction
 
 #### Scenario: The same empty-binding shape is valid when durably closed
-- **WHEN** correlation-store replay finds a pair's latest record whose status is `absent` or
-  `terminal_unfilled` and whose `exchange_category` or `exchange_symbol` is empty
+- **WHEN** correlation-store replay finds a pair's latest record whose status is `absent`,
+  `terminal_unfilled`, or `terminal_closed`, and whose `exchange_category` or `exchange_symbol` is
+  empty
 - **THEN** replay succeeds and that record is excluded from ownership reconstruction without failing
   readiness
 
