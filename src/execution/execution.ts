@@ -1,5 +1,5 @@
 import type { AbiConfig } from "../config/config.js";
-import type { BybitAdapter } from "../exchange/bybitAdapter.js";
+import type { BybitAdapter, SetTradingStopInput } from "../exchange/bybitAdapter.js";
 import type {
   BybitAmendOrderPayload,
   BybitCancelOrderPayload,
@@ -116,6 +116,40 @@ export async function cancelEntryOrder(input: {
 
   return {
     status: "bybit_entry_order_cancel_accepted",
+    mode,
+    bybitResponse,
+  };
+}
+
+export type ProtectionUpdateExecutionResult =
+  | {
+      status: "skipped_live_execution";
+      mode: LiveExecutionMode;
+    }
+  | {
+      status: "bybit_protection_update_accepted";
+      mode: LiveExecutionMode;
+      bybitResponse: unknown;
+    };
+
+export async function executeProtectionUpdate(input: {
+  config: AbiConfig;
+  bybit: BybitAdapter;
+  payload: SetTradingStopInput;
+}): Promise<ProtectionUpdateExecutionResult> {
+  const mode = getLiveExecutionMode(input.config);
+
+  if (!mode.canExecuteLive) {
+    return {
+      status: "skipped_live_execution",
+      mode,
+    };
+  }
+
+  const bybitResponse = await input.bybit.setTradingStop(input.payload);
+
+  return {
+    status: "bybit_protection_update_accepted",
     mode,
     bybitResponse,
   };

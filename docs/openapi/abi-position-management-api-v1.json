@@ -90,7 +90,7 @@
                       "error": {
                         "code": "validation_failed",
                         "message": "request validation failed",
-                        "details": [{ "path": "/stop_price", "message": "stop_price must be exact-decimal text" }]
+                        "details": [{ "path": "/stop_price", "message": "stop_price must be strictly positive exact-decimal text" }]
                       }
                     }
                   },
@@ -226,9 +226,9 @@
         "additionalProperties": false,
         "required": ["stop_price", "take_price"],
         "properties": {
-          "stop_price": { "type": "string", "format": "exact-decimal" },
+          "stop_price": { "type": "string", "format": "positive-exact-decimal" },
           "take_price": {
-            "oneOf": [{ "type": "string", "format": "exact-decimal" }, { "type": "null" }]
+            "oneOf": [{ "type": "string", "format": "positive-exact-decimal" }, { "type": "null" }]
           }
         }
       },
@@ -240,9 +240,9 @@
           "strategy_instance_id": { "type": "string", "minLength": 1 },
           "trade_cycle_id": { "type": "string", "minLength": 1 },
           "status": { "const": "protection_applied" },
-          "stop_price": { "type": "string", "format": "exact-decimal" },
+          "stop_price": { "type": "string", "format": "positive-exact-decimal" },
           "take_price": {
-            "oneOf": [{ "type": "string", "format": "exact-decimal" }, { "type": "null" }]
+            "oneOf": [{ "type": "string", "format": "positive-exact-decimal" }, { "type": "null" }]
           }
         }
       },

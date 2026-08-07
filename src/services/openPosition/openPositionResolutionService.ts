@@ -1,5 +1,8 @@
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
-import type { EntryPackageExecutionStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import type {
+  EntryPackageExecutionRecord,
+  EntryPackageExecutionStatus,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import { isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
 import type { OpenPositionHttpResult } from "../../domain/openPositionApi.js";
@@ -23,6 +26,18 @@ export type OpenPositionResolutionServiceDeps = {
 };
 
 type StatusBucket = "durably_closed" | "live_query_admissible" | "unresolved";
+
+// The discriminated outcome of determining whether a given record's
+// physical scope currently holds a live position, independent of any HTTP
+// response shape — shared by this service's own GET .../open-position
+// wrapper (resolve()) and by protection-execution's live-position gate
+// (protection-execution design.md Decision 4), so Bybit position-envelope
+// validation and category/side-match rules are defined exactly once.
+export type PositionDetermination =
+  | { kind: "open"; firstFillAtMs: number; averageEntryPrice: string }
+  | { kind: "closed" }
+  | { kind: "unsupported_scope" }
+  | { kind: "error" };
 
 // Resolves a truthful, live current open-position answer for one
 // (strategy_instance_id, trade_cycle_id) pair (design.md Decisions 1-6).
@@ -50,18 +65,42 @@ export class OpenPositionResolutionService {
       return unknownTradeCycleBindingResult();
     }
 
+    const determination = await this.determine(record);
+
+    switch (determination.kind) {
+      case "closed":
+        return openPositionClosedResult();
+      case "unsupported_scope":
+        return unsupportedExchangeScopeResult();
+      case "error":
+        return internalErrorResult();
+      case "open":
+        return openPositionOpenResult({
+          firstFillAtMs: determination.firstFillAtMs,
+          averageEntryPrice: determination.averageEntryPrice,
+        });
+      default:
+        return exhaustiveDetermination(determination);
+    }
+  }
+
+  // The shared live-position determination other callers (protection
+  // execution) reuse directly against an already-resolved record, rather
+  // than going through resolve()'s HTTP-shaping and its own composite
+  // lookup a second time.
+  async determine(record: EntryPackageExecutionRecord): Promise<PositionDetermination> {
     const bucket = classifyStatus(record.status);
 
     if (bucket === "durably_closed") {
-      return openPositionClosedResult();
+      return { kind: "closed" };
     }
 
     if (bucket === "unresolved") {
-      return internalErrorResult();
+      return { kind: "error" };
     }
 
     if (record.exchange_category !== "linear") {
-      return unsupportedExchangeScopeResult();
+      return { kind: "unsupported_scope" };
     }
 
     const queryResult = await this.deps.bybit.queryPositionForInstrument({
@@ -70,21 +109,22 @@ export class OpenPositionResolutionService {
     });
 
     if (queryResult.kind === "failure") {
-      return internalErrorResult();
+      return { kind: "error" };
     }
 
     if (queryResult.kind === "no_position") {
-      return openPositionClosedResult();
+      return { kind: "closed" };
     }
 
     if (!sideMatches(queryResult.row.side, record.desired_entry)) {
-      return internalErrorResult();
+      return { kind: "error" };
     }
 
-    return openPositionOpenResult({
+    return {
+      kind: "open",
       firstFillAtMs: queryResult.row.openTime,
       averageEntryPrice: queryResult.row.avgPrice,
-    });
+    };
   }
 }
 
@@ -119,4 +159,8 @@ function sideMatches(rowSide: BybitOrderSide, desiredEntry: DesiredEntryDto | nu
 
 function exhaustive(value: never): never {
   throw new Error(`Unhandled EntryPackageExecutionStatus: ${JSON.stringify(value)}`);
+}
+
+function exhaustiveDetermination(value: never): never {
+  throw new Error(`Unhandled PositionDetermination: ${JSON.stringify(value)}`);
 }

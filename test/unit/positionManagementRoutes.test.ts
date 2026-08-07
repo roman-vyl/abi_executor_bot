@@ -3,18 +3,54 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 
+import type {
+  PositionManagementHttpResult,
+  ProtectionCommand,
+} from "../../src/domain/positionManagementApi.js";
 import { internalErrorResult } from "../../src/domain/positionManagementApi.js";
+import type { ProtectionApplicationServicePort } from "../../src/routes/positionManagementRoutes.js";
 import {
   handlePositionManagementRoutes,
   matchCloseRoute,
   matchProtectionRoute,
 } from "../../src/routes/positionManagementRoutes.js";
 
+// A route-level test never needs a real ProtectionApplicationService — only
+// something that satisfies the narrow port. Throws if called from a test
+// that expects the route to fail before ever dispatching to it.
+class FakeProtectionApplicationService implements ProtectionApplicationServicePort {
+  readonly calls: ProtectionCommand[] = [];
+  result: PositionManagementHttpResult = internalErrorResult();
+  private readonly shouldBeCalled: boolean;
+
+  constructor(shouldBeCalled = true) {
+    this.shouldBeCalled = shouldBeCalled;
+  }
+
+  async apply(command: ProtectionCommand): Promise<PositionManagementHttpResult> {
+    if (!this.shouldBeCalled) {
+      throw new Error("protectionApplicationService.apply must not be called for this test");
+    }
+    this.calls.push(command);
+    return this.result;
+  }
+}
+
+function routeDeps(overrides: {
+  protectionApplicationService?: ProtectionApplicationServicePort;
+  isReady?: () => boolean;
+} = {}): { protectionApplicationService: ProtectionApplicationServicePort; isReady: () => boolean } {
+  return {
+    protectionApplicationService: overrides.protectionApplicationService ?? new FakeProtectionApplicationService(false),
+    isReady: overrides.isReady ?? (() => true),
+  };
+}
+
 test("position-management routes ignore a different method or path", async () => {
   const request = makeRequest("GET", "/health", "", {});
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), false);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), false);
   assert.equal(response.status(), 0);
 });
 
@@ -76,7 +112,7 @@ test("unsupported media type on protection maps to 415", async () => {
   });
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 415);
   assert.equal(response.body().error.code, "unsupported_media_type");
 });
@@ -86,7 +122,7 @@ test("missing and malformed JSON on protection map to 400", async () => {
     const request = makeRequest("PUT", protectionRoute(), body, { "content-type": "application/json" });
     const response = makeResponse();
 
-    assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+    assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
     assert.equal(response.status(), 400);
     assert.equal(response.body().error.code, "malformed_json");
   }
@@ -101,7 +137,7 @@ test("invalid protection body maps to 422 with field details", async () => {
   );
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 422);
   assert.equal(response.body().error.code, "validation_failed");
   assert.equal(response.body().error.details[0].path, "/stop_price");
@@ -116,19 +152,58 @@ test("malformed protection path percent encoding maps to validation failure", as
   );
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 422);
   assert.equal(response.body().error.code, "validation_failed");
   assert.equal(response.body().error.details[0].path, "/path/strategy_instance_id");
 });
 
-test("a transport-valid protection request fails safe without a fabricated success", async () => {
+test("a transport-valid protection request is dispatched to the application service once ready", async () => {
+  const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
+    "content-type": "application/json",
+  });
+  const response = makeResponse();
+  const service = new FakeProtectionApplicationService();
+  service.result = {
+    statusCode: 200,
+    body: {
+      strategy_instance_id: "instance",
+      trade_cycle_id: "cycle",
+      status: "protection_applied",
+      stop_price: "99000",
+      take_price: "103000",
+    },
+  };
+
+  assert.equal(
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ protectionApplicationService: service }),
+    }),
+    true,
+  );
+  assert.equal(response.status(), 200);
+  assert.deepEqual(response.body(), service.result.body);
+  assert.deepEqual(service.calls, [
+    { strategyInstanceId: "instance", tradeCycleId: "cycle", stopPrice: "99000", takePrice: "103000" },
+  ]);
+});
+
+test("a transport-valid protection request fails safe without dispatching when not ready", async () => {
   const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
     "content-type": "application/json",
   });
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ isReady: () => false }),
+    }),
+    true,
+  );
   assert.equal(response.status(), 500);
   assert.deepEqual(response.body(), internalErrorResult().body);
 });
@@ -137,7 +212,7 @@ test("close accepts an empty body and fails safe without a fabricated success", 
   const request = makeRequest("DELETE", closeRoute(), "", {});
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 500);
   assert.deepEqual(response.body(), internalErrorResult().body);
 });
@@ -147,7 +222,7 @@ test("close rejects any non-empty body without acting on its content", async () 
     const request = makeRequest("DELETE", closeRoute(), body, {});
     const response = makeResponse();
 
-    assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+    assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
     assert.equal(response.status(), 422);
     assert.equal(response.body().error.code, "validation_failed");
     assert.deepEqual(response.body().error.details, [{ path: "/", message: "request body must be empty" }]);
@@ -158,7 +233,7 @@ test("malformed close path percent encoding maps to validation failure", async (
   const request = makeRequest("DELETE", "/v1/strategy-instances/%ZZ/trade-cycles/cycle/open-position", "", {});
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 422);
   assert.equal(response.body().error.code, "validation_failed");
   assert.equal(response.body().error.details[0].path, "/path/strategy_instance_id");
@@ -175,7 +250,7 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
   });
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response }), true);
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 500);
   assert.deepEqual(response.body(), internalErrorResult().body);
 });

@@ -33,6 +33,7 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
   readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
+  readonly setTradingStopCalls: SetTradingStopInput[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
@@ -51,6 +52,8 @@ export class FakeBybitAdapter implements BybitAdapter {
   orderHistoryResponseByLinkId = new Map<string, unknown>();
   position: BybitPosition | null = null;
   marketPrice = "61000.0";
+  setTradingStopResponse: unknown = { retCode: 0, result: {} };
+  setTradingStopError: Error | null = null;
 
   async getServerTime(): Promise<unknown> {
     return { retCode: 0, result: { timeSecond: "0" } };
@@ -137,8 +140,11 @@ export class FakeBybitAdapter implements BybitAdapter {
   }
 
   async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    void input;
-    return { retCode: 0, result: {} };
+    this.setTradingStopCalls.push(input);
+    if (this.setTradingStopError !== null) {
+      throw this.setTradingStopError;
+    }
+    return this.setTradingStopResponse;
   }
 }
 

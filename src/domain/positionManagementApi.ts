@@ -1,5 +1,5 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
-import { isExactDecimalText } from "./entryPackageApi.js";
+import { isPositiveExactDecimalText } from "./entryPackageApi.js";
 import { decimalEquals } from "./exactDecimal.js";
 
 export type ProtectionRequestBody = {
@@ -110,10 +110,10 @@ export function validateProtectionCommand(
   let stopPrice: string | undefined;
   if (Object.hasOwn(payload, "stop_price")) {
     const value = payload.stop_price;
-    if (typeof value !== "string" || !isExactDecimalText(value)) {
+    if (typeof value !== "string" || !isPositiveExactDecimalText(value)) {
       details.push({
         path: "/stop_price",
-        message: "stop_price must be exact-decimal text",
+        message: "stop_price must be strictly positive exact-decimal text",
       });
     } else {
       stopPrice = value;
@@ -125,10 +125,10 @@ export function validateProtectionCommand(
     const value = payload.take_price;
     if (value === null) {
       takePrice = null;
-    } else if (typeof value !== "string" || !isExactDecimalText(value)) {
+    } else if (typeof value !== "string" || !isPositiveExactDecimalText(value)) {
       details.push({
         path: "/take_price",
-        message: "take_price must be exact-decimal text or null",
+        message: "take_price must be strictly positive exact-decimal text or null",
       });
     } else {
       takePrice = value;
@@ -216,10 +216,10 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
     !input.verificationSucceeded ||
     input.strategyInstanceId.length === 0 ||
     input.tradeCycleId.length === 0 ||
-    !isExactDecimalText(input.acceptedStopPrice) ||
-    !isExactDecimalText(input.confirmedStopPrice) ||
-    (input.acceptedTakePrice !== null && !isExactDecimalText(input.acceptedTakePrice)) ||
-    (input.confirmedTakePrice !== null && !isExactDecimalText(input.confirmedTakePrice)) ||
+    !isPositiveExactDecimalText(input.acceptedStopPrice) ||
+    !isPositiveExactDecimalText(input.confirmedStopPrice) ||
+    (input.acceptedTakePrice !== null && !isPositiveExactDecimalText(input.acceptedTakePrice)) ||
+    (input.confirmedTakePrice !== null && !isPositiveExactDecimalText(input.confirmedTakePrice)) ||
     (input.acceptedTakePrice === null) !== (input.confirmedTakePrice === null) ||
     !isNumericallyEqualExactDecimal(input.acceptedStopPrice, input.confirmedStopPrice) ||
     (input.acceptedTakePrice !== null &&

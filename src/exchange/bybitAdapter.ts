@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import type { AbiConfig } from "../config/config.js";
-import { classifyExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
+import { classifyExactDecimalText, isExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
 import type {
   BybitAmendOrderPayload,
   BybitCancelOrderPayload,
@@ -35,6 +35,17 @@ export type ValidatedOpenPositionRow = {
   positionIdx: 0;
   avgPrice: string;
   openTime: number;
+  // Raw exact-decimal strings, present only when Bybit's response carries a
+  // syntactically valid value — never required, and never validated for
+  // sign/positivity the way avgPrice is: an unset protection leg is
+  // legitimately reported as a numeric zero (e.g. "0.00"), so a strict
+  // positivity check here would wrongly fail this query for any position
+  // without protection set. A missing or malformed value is simply omitted
+  // rather than failing the whole row; only protection-execution's own
+  // read-back reads these fields today (protection-execution design.md
+  // Decision 6).
+  stopLoss?: string;
+  takeProfit?: string;
 };
 
 export type PositionQueryFailureReason =
@@ -63,10 +74,17 @@ export type PlaceMarketOrderInput = {
   orderLinkId: string;
 };
 
+// Both legs are always present: a protection write is a full-state replace,
+// never a partial patch (position-management-api's contract requires
+// stop_price on every request and take_price null-or-positive). "0" is
+// Bybit's own convention on this endpoint for "remove this leg" — callers
+// pass it explicitly rather than an optional/absent field (protection-
+// execution design.md Decision 5).
 export type SetTradingStopInput = {
+  category: string;
   symbol: string;
-  stopLoss?: string;
-  takeProfit?: string;
+  stopLoss: string;
+  takeProfit: string;
 };
 
 export interface BybitAdapter {
@@ -244,8 +262,21 @@ export class RestBybitAdapter implements BybitAdapter {
     return stub("placeMarketOrder", input);
   }
 
+  // Position-level protection write, not an order amend — replaces the
+  // whole current stop-loss/take-profit state for the position
+  // (positionIdx=0, tpslMode=Full), never a delta (protection-execution
+  // design.md Decision 5).
   async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    return stub("setTradingStop", input);
+    return this.signedPost("/v5/position/trading-stop", {
+      category: input.category,
+      symbol: input.symbol,
+      positionIdx: 0,
+      tpslMode: "Full",
+      stopLoss: input.stopLoss,
+      takeProfit: input.takeProfit,
+      tpTriggerBy: this.config.bybitTriggerBy,
+      slTriggerBy: this.config.bybitTriggerBy,
+    });
   }
 
   private async signedGet(path: string, params: URLSearchParams): Promise<unknown> {
@@ -531,10 +562,26 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
     return { kind: "failure", reason: "invalid_open_time" };
   }
 
-  return {
-    kind: "position",
-    row: { symbol: itemSymbol, side, size: size as string, positionIdx: 0, avgPrice, openTime },
+  const row: ValidatedOpenPositionRow = {
+    symbol: itemSymbol,
+    side,
+    size: size as string,
+    positionIdx: 0,
+    avgPrice,
+    openTime,
   };
+
+  // Assigned only when present and syntactically valid, never as an
+  // explicit `undefined` key — keeps every existing caller's exact-shape
+  // comparison of a row without protection fields unaffected.
+  if (typeof record.stopLoss === "string" && isExactDecimalText(record.stopLoss)) {
+    row.stopLoss = record.stopLoss;
+  }
+  if (typeof record.takeProfit === "string" && isExactDecimalText(record.takeProfit)) {
+    row.takeProfit = record.takeProfit;
+  }
+
+  return { kind: "position", row };
 }
 
 function readTickerLastPrice(response: unknown): string {

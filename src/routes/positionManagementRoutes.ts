@@ -12,7 +12,15 @@ import {
   validateProtectionCommand,
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
-import type { PositionManagementHttpResult } from "../domain/positionManagementApi.js";
+import type { PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
+
+// Narrow structural port, not the concrete class: this route must not touch
+// correlation state, Bybit, or the mutex directly — it only knows how to
+// hand a validated command to something that can apply() it (mirrors
+// entryPackageRoutes.ts's EntryPackageApplicationServicePort split).
+export type ProtectionApplicationServicePort = {
+  apply(command: ProtectionCommand): Promise<PositionManagementHttpResult>;
+};
 
 export type PositionManagementRouteMatch =
   | {
@@ -28,10 +36,12 @@ export type PositionManagementRouteMatch =
 export async function handlePositionManagementRoutes(input: {
   request: IncomingMessage;
   response: ServerResponse;
+  protectionApplicationService: ProtectionApplicationServicePort;
+  isReady: () => boolean;
 }): Promise<boolean> {
-  const { request, response } = input;
+  const { request, response, protectionApplicationService, isReady } = input;
   try {
-    return await handlePositionManagementRoutesSafely(request, response);
+    return await handlePositionManagementRoutesSafely(request, response, protectionApplicationService, isReady);
   } catch {
     writeResult(response, internalErrorResult());
     return true;
@@ -41,10 +51,12 @@ export async function handlePositionManagementRoutes(input: {
 async function handlePositionManagementRoutesSafely(
   request: IncomingMessage,
   response: ServerResponse,
+  protectionApplicationService: ProtectionApplicationServicePort,
+  isReady: () => boolean,
 ): Promise<boolean> {
   const protectionMatch = matchProtectionRoute(request.method, request.url);
   if (protectionMatch.matched) {
-    await handleProtection(request, response, protectionMatch);
+    await handleProtection(request, response, protectionMatch, protectionApplicationService, isReady);
     return true;
   }
 
@@ -61,6 +73,8 @@ async function handleProtection(
   request: IncomingMessage,
   response: ServerResponse,
   match: Extract<PositionManagementRouteMatch, { matched: true }>,
+  protectionApplicationService: ProtectionApplicationServicePort,
+  isReady: () => boolean,
 ): Promise<void> {
   if (!isSupportedJsonContentType(request.headers["content-type"])) {
     writeResult(response, unsupportedMediaTypeResult());
@@ -93,11 +107,16 @@ async function handleProtection(
     return;
   }
 
-  // Scope resolution, exchange confirmation, and position_not_open are
-  // deferred to a later execution change (proposal.md non-goal): a
-  // transport-valid command fails safe rather than fabricating success.
-  void validation.command;
-  writeResult(response, internalErrorResult());
+  if (!isReady()) {
+    // Correlation-store replay hasn't completed (or failed) yet — fail
+    // closed rather than risk acting before durable state is recovered
+    // (mirrors entryPackageRoutes.ts's readiness gate).
+    writeResult(response, internalErrorResult());
+    return;
+  }
+
+  const result = await protectionApplicationService.apply(validation.command);
+  writeResult(response, result);
 }
 
 async function handleClose(
