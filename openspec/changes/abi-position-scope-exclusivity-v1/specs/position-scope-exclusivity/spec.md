@@ -12,12 +12,16 @@ existing correlation state, and the currently conservative conditions under whic
 ABI SHALL ensure that at any point in time, for a given physical position scope (`category` +
 `symbol`, under the single configured account, `positionIdx = 0`), at most one trade cycle pair
 `(strategy_instance_id, trade_cycle_id)` holds it. Different pairs whose resolved scopes differ
-SHALL be able to acquire and hold their own scopes fully concurrently.
+SHALL be able to acquire and hold their own scopes without being serialized against each other by
+the scope-ownership mechanism (this does not override any unrelated, pre-existing serialization —
+such as the correlation store's own single-writer append ordering — that applies regardless of
+scope).
 
 #### Scenario: Two different scopes are acquired independently
 - **WHEN** pair A applies a desired entry that resolves to scope BTCUSDT and pair B applies a
   desired entry that resolves to scope ETHUSDT, concurrently
-- **THEN** both acquisitions succeed and neither pair's processing is blocked by the other's
+- **THEN** both acquisitions succeed
+- **AND** neither pair's acquisition is made to wait on the other's by the scope-ownership mechanism
 
 #### Scenario: A second pair cannot acquire a scope another active pair already holds
 - **WHEN** pair A already holds scope BTCUSDT with a status other than `absent` or
@@ -123,14 +127,20 @@ the pre-restart in-memory ownership index SHALL NOT cause ABI to treat a still-o
   `terminal_unfilled` for a given scope, with no other pair holding it
 - **THEN** a different pair's post-restart acquisition attempt on that scope succeeds
 
-### Requirement: Conflicting durable scope ownership fails startup readiness closed
-If correlation-store replay discovers two different pairs whose most recent durable record each
-claims the same physical position scope and neither is `absent` or `terminal_unfilled`, ABI SHALL
-fail entry-package readiness rather than silently choosing one as the owner. Sequential historical
-use of the same scope by pairs that have since durably closed SHALL NOT be treated as a conflict.
+### Requirement: Conflicting durable scope ownership fails startup readiness closed, evaluated on final state only
+ABI SHALL evaluate scope-ownership conflicts during correlation-store replay only against each
+pair's latest (most recently replayed) durable record — never against an intermediate historical
+record for a pair that a later record for that same pair has since superseded. If, after every
+valid line has been replayed, two different pairs' latest records both claim the same physical
+position scope and neither is `absent` nor `terminal_unfilled`, ABI SHALL fail entry-package
+readiness rather than silently choosing one as the owner. A scope legitimately passing between
+pairs earlier in the log — one pair's record reaching `absent` or `terminal_unfilled` before a
+different pair's later record claims the same scope — SHALL NOT be treated as a conflict, even if an
+intermediate line in the log shows both pairs claiming that scope before the earlier pair's release
+is replayed.
 
 #### Scenario: Two simultaneously active owners of one scope block readiness
-- **WHEN** correlation-store replay finds two different pairs' most recent records both claiming the
+- **WHEN** correlation-store replay finds two different pairs' latest records both claiming the
   same scope with neither status `absent` nor `terminal_unfilled`
 - **THEN** ABI reports entry-package readiness as not ready
 - **AND** ABI does not process entry-package execution requests
@@ -139,6 +149,15 @@ use of the same scope by pairs that have since durably closed SHALL NOT be treat
 - **WHEN** correlation-store replay finds pair A's record reaching `absent` or `terminal_unfilled`
   for a scope earlier in the log, followed later by pair B's record claiming the same scope
 - **THEN** replay succeeds and ABI treats pair B as the scope's current owner
+
+#### Scenario: An intermediate historical moment is not evaluated as a conflict
+- **WHEN** the correlation log contains, in order, pair A claiming a scope, then pair B claiming the
+  same scope while pair A's record is not yet durably closed, then a later record for pair A
+  reaching `absent` or `terminal_unfilled` for that same scope
+- **THEN** replay succeeds, evaluating ownership only from pair A's and pair B's respective latest
+  records, and ABI treats pair B as the scope's sole current owner
+- **AND** ABI does not fail readiness on account of the earlier, since-superseded moment where both
+  pairs' records claimed the scope
 
 ### Requirement: A pair's owned scope is exactly its own stored exchange category and symbol
 While a pair holds a physical position scope, that scope SHALL be exactly the `exchange_category`

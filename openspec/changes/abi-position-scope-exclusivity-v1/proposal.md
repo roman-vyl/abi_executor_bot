@@ -30,9 +30,12 @@ Bybit:    physical scope
            positionIdx=0)           -> at most one ABI-owned active trade cycle (this change, V1)
 ```
 
-Two different pairs may still trade two different scopes fully concurrently (`instance A / cycle
-A1 -> BTCUSDT` and `instance B / cycle B1 -> ETHUSDT` at the same time is unaffected and remains
-allowed). What changes is that a second pair attempting to acquire a scope another active pair
+Two different pairs may still trade two different scopes without being serialized against each
+other by the new scope-ownership lock (`instance A / cycle A1 -> BTCUSDT` and `instance B / cycle
+B1 -> ETHUSDT` at the same time is unaffected and remains allowed). This is unaffected by, and does
+not change, `EntryPackageCorrelationRepository`'s existing single-writer append queue for the shared
+correlation file, which continues to serialize physical writes regardless of scope exactly as it
+does today. What changes is that a second pair attempting to acquire a scope another active pair
 already holds (`instance A / cycle A1 -> BTCUSDT` and `instance B / cycle B1 -> BTCUSDT`
 simultaneously) now fails closed before any exchange write, instead of silently racing.
 
@@ -49,17 +52,24 @@ transport stub for protection/close execution).
   correlation-record fields, no schema migration.
 - Add a second, scope-keyed serialization primitive (reusing the existing `KeyedMutex` class) so
   that acquisition of a scope by two different pairs is atomic, while acquisition attempts on two
-  different scopes remain fully independent (no cross-scope blocking).
+  different scopes are never serialized against each other by this new lock.
 - Gate `EntryPackageApplicationService.createOrder()` — the single point where a pair first binds to
   a physical scope — behind an ownership check performed under the new scope lock, immediately
   before the existing durable "provisional record before any exchange call" write. A conflicting
   claim fails closed (no correlation write for the losing pair's new binding, no exchange call) and
   reuses the existing `internal_error` response; the current owner's own repeat/retry commands are
   always permitted.
-- Extend correlation-store replay to rebuild scope ownership from the latest durable state of every
-  pair and fail startup readiness closed if replay discovers two simultaneously active (not
-  durably-closed) records claiming the same scope. Sequential historical use of a scope by pairs
-  that have since durably closed is not a conflict.
+- Extend correlation-store replay with an explicit second pass that computes scope ownership only
+  from each pair's latest (most recently replayed) durable record — never from an intermediate
+  historical record a later line for the same pair has since superseded — and fail startup readiness
+  closed if that pass finds two different pairs' latest records both claiming the same scope while
+  neither is durably closed. Sequential historical use of a scope by pairs that have since durably
+  closed is not a conflict.
+- Extract the two-status "durably proven to admit no position" predicate (`absent` /
+  `terminal_unfilled`), currently spelled out only inside
+  `OpenPositionResolutionService.classifyStatus()`, into one shared helper reused by both that
+  existing classification and this change's new scope-release rule — one domain fact, one
+  definition, not two independently-maintained copies.
 - Define scope release conservatively: a scope is freed only when its owning pair's record reaches
   one of the two states ABI can already durably prove mean "no position exists and none can still
   arrive from this binding" — `absent` or `terminal_unfilled`. Every other status (`pending_create`,
@@ -89,6 +99,10 @@ None. `entry-package-execution`'s existing requirements (order identity, confirm
 serialization, replay-gated readiness) are unchanged in their own text; this change adds a
 cross-cutting precondition enforced at the same integration point (`createOrder()`) without altering
 any of entry-package-execution's documented behavior for a single pair acting alone.
+`open-position-resolution`'s implementation file (`openPositionResolutionService.ts`) is touched to
+call the shared predicate extracted per the bullet above, but its own inputs, outputs, and every
+existing test are unchanged — a same-behavior extraction, not a capability change, so no MODIFIED
+entry is added for it either.
 
 ## Impact
 
@@ -101,9 +115,14 @@ any of entry-package-execution's documented behavior for a single pair acting al
 - Concurrency: a new scope-keyed lock is introduced alongside the existing pair-keyed
   `KeyedMutex`, always acquired in a fixed pair-lock-outer / scope-lock-inner order and held only for
   the short check-and-claim step, never across an exchange call.
-- Startup readiness: correlation replay gains one new fail-closed condition (conflicting concurrent
-  scope ownership across pairs); this reuses the existing `entryPackageReady` gate, no new readiness
-  signal.
+- Startup readiness: correlation replay gains one new fail-closed condition, evaluated after replay
+  has determined every pair's latest record (conflicting ownership of one scope across two
+  different pairs' final states); this reuses the existing `entryPackageReady` gate, no new
+  readiness signal.
+- Shared domain logic: one new predicate (`isDurablyClosedEntryPackageStatus`) replaces two
+  independently-spelled-out copies of the same two-status check, one of them in
+  `OpenPositionResolutionService.classifyStatus()` — no behavior change there, verified by its
+  existing test suite passing unchanged.
 - Trading safety: closes the concrete gap where two trade cycles could both send a create order for
   the same physical scope concurrently. Does not change behavior for a scope that already has a
   live position from a fill — that scope remains held exactly as conservatively as today's status

@@ -1,25 +1,42 @@
-## 1. Physical position scope type
+## 1. Shared primitives
 
 - [ ] 1.1 Add `src/domain/positionScope.ts`: `PositionScope` type (`category`, `symbol`) and
       `positionScopeKey(category, symbol)`. Document account and `positionIdx = 0` as implicit V1
       constants, not key dimensions (design.md Decision 1).
+- [ ] 1.2 Add `isDurablyClosedEntryPackageStatus(status)` to
+      `src/correlation/entryPackageExecutionRecord.ts` (design.md Decision 10). Update
+      `OpenPositionResolutionService.classifyStatus()`'s `durably_closed` branch to call it instead
+      of spelling out `{"absent", "terminal_unfilled"}` independently. Run
+      `test/unit/openPositionResolutionService.test.ts` unchanged to confirm no behavior change.
 
 ## 2. Ownership index on the existing correlation repository
 
 - [ ] 2.1 Add `byScope: Map<string, EntryPackageExecutionRecord>` and
       `findOwnerByScope(category, symbol)` to `EntryPackageCorrelationRepository`.
-- [ ] 2.2 Extend `indexRecord()` with the claim/release logic from design.md Decision 2 (claim when
-      the record has a real `exchange_category` and a non-durably-closed `status`; release only when
-      the currently-indexed owner for that scope is this same pair and the record is now `absent` or
-      `terminal_unfilled`).
-- [ ] 2.3 Extend `replay()` to detect and fail closed on conflicting simultaneous ownership of one
-      scope by two different pairs (design.md Decision 8), returning `{ok: false, reason: ...}` the
-      same way existing structural/schema corruption already does. Sequential historical reuse of a
-      scope (an earlier pair durably closed before a later pair claims it) must not trigger this.
+- [ ] 2.2 Extend `indexRecord()`'s **live-write path only** (i.e. as called from `save()`) with the
+      claim/release logic from design.md Decision 2, using `isDurablyClosedEntryPackageStatus` from
+      1.2: claim when the record has a real `exchange_category` and a non-durably-closed `status`;
+      release only when the currently-indexed owner for that scope is this same pair and the record
+      is now durably closed. Do **not** wire this same per-line step into `replay()` — see 2.3.
+- [ ] 2.3 Implement `replay()`'s scope-ownership reconstruction as the two explicit phases from
+      design.md Decision 8, decoupled from 2.2's live path:
+      - Phase 1 (unchanged from today): replay every valid line in order, updating
+        `byCompositeKey`/`byOrderLinkId`/`byOrderId` exactly as today; do not touch `byScope` in this
+        phase.
+      - Phase 2 (new, runs once after Phase 1 completes): clear `byScope`, then iterate
+        `byCompositeKey.values()` — each pair's single latest record — and for every record that is
+        not durably closed, attempt to claim its scope; if the scope is already claimed by a
+        *different* pair's latest record, fail replay closed (`{ok: false, reason: ...}`) the same
+        way existing structural/schema corruption already does, instead of silently overwriting the
+        existing claim.
+      - Verify against the design.md Decision 8 counter-example directly in a test: pair A `applied`
+        BTC (line 1), pair B `pending_create` BTC (line 2), pair A `absent` BTC (line 3) — replay
+        must succeed with pair B as BTC's sole owner, never failing on account of line 2 alone.
 - [ ] 2.4 Unit tests for 2.1-2.3 in isolation (no HTTP layer), mirroring
-      `test/unit/entryPackageCorrelationRepository.test.ts`'s existing style: claim, release,
-      self-repeat non-conflict, cross-pair conflict detection during replay, sequential reuse across
-      replay is not a conflict.
+      `test/unit/entryPackageCorrelationRepository.test.ts`'s existing style: live claim, live
+      release, self-repeat non-conflict, the Decision 8 counter-example (intermediate line is not a
+      false-positive conflict), a genuine final-state conflict across two pairs' latest records, and
+      sequential reuse across replay is not a conflict.
 
 ## 3. Scope-level serialization
 
@@ -51,8 +68,9 @@
       reaches `bybit.createOrderCalls`, the other returns a safe error with zero exchange calls and
       no durable claim (extends the pattern in
       `test/unit/entryPackageApplicationService.test.ts:517-559`).
-- [ ] 5.2 Two different pairs, different resolved scopes, concurrent `apply()` — both succeed,
-      neither blocks the other.
+- [ ] 5.2 Two different pairs, different resolved scopes, concurrent `apply()` — both succeed, and
+      neither pair's scope acquisition is made to wait on the other's scope lock (the pre-existing
+      single-writer correlation-file write queue is unaffected and out of scope for this assertion).
 - [ ] 5.3 Repeat/retry from the current owner (existing regression tests around
       `entryPackageApplicationService.test.ts:26-49` and the crash-recovery test at `:561-579`) still
       pass unchanged with the guard in place.
@@ -96,8 +114,14 @@ non-goals — listed here only so it is not mistaken for done:
   this change.
 - Any shared ownership of one physical scope by multiple trade cycles / virtual position ledger
   (GitHub Issue #3).
-- Extracting a shared `isDurablyClosedStatus` helper to remove the duplication between
-  `OpenPositionResolutionService.classifyStatus()` and this capability's release predicate
-  (design.md Open Question 2).
-- A distinguishable public error code for a scope-acquisition conflict, if ever justified
-  (design.md Open Question 1).
+
+Reviewed and decided against for this change (not open, listed for traceability — design.md Review
+Resolutions):
+
+- A distinguishable public error code for a scope-acquisition conflict. Resolved: reuse
+  `internal_error`.
+- A dedicated `PositionScopeGuard` class. Resolved: not needed at this size.
+- An explicit `accountId` field on `PositionScope` now. Resolved: out of scope while one process
+  means one account.
+- A non-locked early ownership check before position sizing. Resolved: minor optimization, not
+  worth the added code path at V1.

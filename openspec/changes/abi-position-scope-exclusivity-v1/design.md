@@ -35,7 +35,8 @@ Current repository state relevant to this design:
   openPositionResolutionService.ts:90-106`) already partitions the same status enum into
   `durably_closed = {absent, terminal_unfilled}`, `live_query_admissible = {applied,
   pending_replace, pending_cancel}`, `unresolved = {pending_create, create_failed, unknown}`. This
-  is the exact partition this change reuses for scope release (Decision 6).
+  is the exact partition this change reuses for scope release (Decision 7), extracting the shared
+  `durably_closed` predicate the two features have in common (Decision 10).
 - `abi-position-management-api`'s existing spec already states both `PUT .../protection` and
   `DELETE .../open-position` must resolve "exactly one unambiguous, supported exchange position
   scope" before any write, and its own design.md defers "how ABI internally... resolves a position"
@@ -123,11 +124,25 @@ else if scope exists:
         byScope.delete(scope)
 ```
 
-This runs on every `save()` (live writes) and on every replayed line during `replay()` — the exact
-same code path, so there is no separate "rebuild ownership on startup" routine to keep in sync with
-the live path. Ownership is a pure function of "the latest durably-written record per pair", which
-is already what `byCompositeKey` holds; `byScope` is simply an additional index over the same facts,
-never a second source of truth.
+This claim/release step runs immediately, in write order, for every **live** `save()` call. It is
+correct there specifically because live `save()` calls are already strictly ordered by both the
+pair-lock and the scope-lock (Decisions 4-5): by the time any given `save()`'s `indexRecord()` runs,
+`byScope` already reflects the actual current state, never a stale intermediate snapshot — there is
+no "future" write still to come that could change the right answer.
+
+**Startup replay does not reuse this same incremental per-line update for `byScope`.** Applying the
+claim/release step to every historical line in isolation, in file order, is unsound for replay:
+an intermediate line can legitimately show two different pairs both "holding" the same scope one
+after another (pair A applied, then pair B pending_create, then — later in the file — pair A goes
+absent), and reacting to that intermediate moment as either a conflict or a silent overwrite gives
+the wrong answer either way. See Decision 8 for the two-phase algorithm replay uses instead, which
+evaluates ownership only over each pair's final, latest durable record. `byCompositeKey`,
+`byOrderLinkId`, and `byOrderId` are unaffected by this distinction: they have no release semantics
+(a composite key simply always holds its pair's latest record; the order-id indexes are
+append-only), so per-line updates during both live writes and replay remain exactly as they are
+today. Only `byScope` needs the two different construction rules for the two different contexts —
+ownership itself is still a pure function of "the latest durably-written record per pair" in both
+cases, and `byScope` is still simply an index over those same facts, never a second source of truth.
 
 **Why not a new repository or reservation store:** every fact needed to answer "who owns this
 scope" — `exchange_category`, `exchange_symbol`, `status` — already exists on
@@ -167,6 +182,15 @@ A second `KeyedMutex` instance, `scopeMutex`, keyed by `positionScopeKey(...)`, 
 | Held for | the entire `process()` call for one pair's command | only the read-check-decide-write step immediately preceding the existing provisional `correlationRepository.save()` inside `createOrder()` |
 | Purpose | one trade cycle's own commands never interleave with each other | two *different* pairs never both decide "scope is free" from a stale snapshot |
 | Acquired in | `EntryPackageApplicationService.apply()` | `EntryPackageApplicationService.createOrder()`, nested inside an already-held pair-lock |
+
+Precisely stated: **different scopes are not serialized against each other by the scope-ownership
+lock** — the scope-lock never makes pair A wait on pair B (or vice versa) when they resolve to
+different scopes. This is distinct from, and unaffected by, `EntryPackageCorrelationRepository`'s
+existing single-writer FIFO `writeQueue` (`entryPackageCorrelationRepository.ts:20-23`), which
+already serializes the *physical append* to the one shared JSONL file across every key, scope or
+pair alike, before and after this change. This change does not remove, add to, or otherwise touch
+that pre-existing queue; two different scopes' acquisitions are not serialized by the mechanism this
+change introduces, not literally executed in parallel at the I/O layer.
 
 The scope-lock is never held across a Bybit call or a confirmation retry loop (which includes
 `sleep()`s in `packageConfirmation.ts`) — repeating the exact mistake already found and fixed once
@@ -209,7 +233,7 @@ is restructured only by moving the ownership decision to wrap the existing `save
 ```
 await scopeMutex.withKeyLock(positionScopeKey(identity), async () => {
   const owner = correlationRepository.findOwnerByScope(identity.category, identity.symbol);
-  if (owner !== undefined && !isSamePair(owner, command) && !isDurablyClosed(owner.status)) {
+  if (owner !== undefined && !isSamePair(owner, command) && !isDurablyClosedEntryPackageStatus(owner.status)) {
     return { kind: "conflict" };
   }
   await correlationRepository.save(provisional);   // this write both claims the scope
@@ -234,8 +258,9 @@ value is introduced. Every other status — including `unknown` (an exception du
 call whose Bybit-side outcome is genuinely unproven), `pending_cancel`/`pending_replace`
 (live-query-admissible; a position may exist), and the `applied` status a full or partial fill
 resolves to — keeps the scope held. This is deliberately the same predicate already implicit in
-`classifyStatus`, not a new parallel judgment that could silently diverge from it over time; a
-follow-up (see Open Questions) considers extracting it into one shared helper.
+`classifyStatus`, not a new parallel judgment that could silently diverge from it over time —
+Decision 10 extracts it into one shared helper consumed by both, rather than leaving two
+independently-maintained lists of the same two statuses.
 
 **What this change explicitly does not attempt:** once a pair's status is `applied` because a fill
 was observed (full or partial), nothing in this change ever releases that pair's scope again — there
@@ -252,33 +277,88 @@ proof requirements, and which of `close`/`protection` execution or a new reconci
 produces it — is explicitly deferred to the position-management changes this change is a
 prerequisite for, not decided here.
 
-### 8. Replay/restart semantics: ownership is rebuilt, not remembered; conflicting durable state fails closed
+### 8. Replay/restart semantics: two explicit phases — effective state first, ownership second
 
-`EntryPackageCorrelationRepository.replay()` already indexes every valid line via the same
-`indexRecord()` used by `save()` (Decision 2), so `byScope` is reconstructed automatically as a side
-effect of existing replay — no new "reconciliation pass" is added. What *is* new: `indexRecord()`,
-when called during `replay()`, additionally checks that claiming a scope for the record currently
-being indexed does not silently overwrite a **different**, still-active pair's existing claim in
-`byScope`. Because replay processes the log in append order and every legitimate release is written
-before any legitimate re-acquisition of the same scope (guaranteed by Decision 6 for live writes),
-seeing two different pairs both non-durably-closed for the same scope at the end of replay is only
-possible if the durable log itself contains a genuine invariant violation (a bug predating this
-change, manual file edits, or a hypothetical multi-writer accident). In that case `replay()` returns
-`{ok: false, reason: "..."}`, which is already wired to `EntryPackageReadiness.markNotReady()` — the
-service starts, legacy/account routes keep working, but `entryPackageReady` (and therefore this
-change's own acquisition path) stays false until the conflict is manually resolved. This is an
+**Rejected approach (caught in review): incremental per-line `byScope` update during replay.**
+An earlier draft of this design had `replay()` reuse Decision 2's live claim/release step on every
+line, in file order, exactly as `save()` does. This is unsound, not merely imprecise: an
+intermediate line in the middle of the file can legitimately show a scope moving between pairs
+*before* the file reaches its final state, and reacting to that intermediate moment produces the
+wrong answer whichever way it is handled. Concrete counter-example:
+
+```
+line 1: A/A1  BTC  applied            <- A is holding BTC at this point in the file
+line 2: B/B1  BTC  pending_create     <- if replay reacts to *this line* as "current" state,
+                                          it must either (a) treat this as an immediate
+                                          cross-pair conflict and fail closed, even though the
+                                          file goes on to resolve it cleanly two lines later, or
+                                          (b) silently overwrite A's claim with B's without ever
+                                          checking whether A ever legitimately released it
+line 3: A/A1  BTC  absent             <- A's real, final state: released
+```
+
+The correct final answer for this file is unambiguous — pair A is durably closed, pair B is the
+sole current owner of BTC, no conflict exists — but only if ownership is evaluated from each pair's
+**latest** record, never from an intermediate one a later line for the same pair has since
+superseded. Line-by-line incremental replay cannot tell "intermediate" from "final" without looking
+ahead, so it is the wrong tool for this job even though it is exactly the right tool for live writes
+(Decision 2), where there is no "later line" yet to arrive.
+
+**Adopted approach: two explicit phases, decoupled from the live write path.**
+
+```
+Phase 1 — effective state per pair (unchanged from today's replay)
+  read every valid line in file order
+  byCompositeKey.set(pair, record)     for every line   -> final value = each pair's LATEST record
+  byOrderLinkId / byOrderId updated exactly as today (append-only, unaffected)
+  (byScope is not touched in this phase at all)
+
+Phase 2 — ownership, computed once, only from the results of Phase 1
+  byScope.clear()
+  for each record in byCompositeKey.values():     // exactly one record per pair: its latest
+      if record is durably closed (Decision 7 predicate): skip — this pair holds no scope
+      else:
+          scope = positionScopeKey(record)
+          existingOwner = byScope.get(scope)
+          if existingOwner is undefined:            byScope.set(scope, record)   // claim
+          else if existingOwner.pair == record.pair: byScope.set(scope, record)  // same pair, ok
+          else:                                      FAIL replay: conflicting owners for `scope`
+```
+
+Phase 2 answers the counter-example correctly: `byCompositeKey` ends Phase 1 holding pair A's
+*line-3* record (`absent`) and pair B's *line-2* record (`pending_create`) — line 1 was already
+superseded within Phase 1 by the ordinary "last write wins" semantics `byCompositeKey` already has
+today. Phase 2 then sees exactly one durably-open record for BTC (pair B's) and zero conflict.
+
+Live writes (Decision 2) and replay (this decision) now intentionally use two different procedures
+to reach the same kind of answer, but there is still exactly one source of truth: `byCompositeKey`'s
+"latest record per pair" is what both procedures ultimately act on — live writes just don't need a
+separate phase because, by construction (pair-lock + scope-lock ordering, Decisions 4-5), a live
+`save()` call's record is *always* already the latest one for its pair the instant it is written,
+so there is no "line 2 vs. line 3" ambiguity to resolve for live traffic in the first place. Only
+historical replay ever needs to look at more than one record per pair before deciding.
+
+**Genuine conflict, not sequencing.** With Phase 2, `replay()` reports a conflict — returns `{ok:
+false, reason: "..."}` — only when two *different* pairs' **latest** records both claim the same
+scope and neither is durably closed. This is already wired to
+`EntryPackageReadiness.markNotReady()` — the service starts, legacy/account routes keep working, but
+`entryPackageReady` (and therefore this change's own acquisition path) stays false until the
+conflict is manually resolved. Because this can now only happen when the durable log's *final* state
+is genuinely contradictory (a bug predating this change, manual file edits, or a hypothetical
+multi-writer accident), not merely because of an intermediate historical moment, this is an
 extension of the existing "fail readiness on any non-final corruption" policy to a new class of
-corruption (semantic/cross-record, not just structural/shape), not a new readiness mechanism.
+corruption (semantic/cross-record, evaluated on final state), not a new readiness mechanism and not
+a source of false positives from ordinary sequential scope reuse.
 
 Sequential historical reuse of one scope by pairs that have since durably closed is explicitly *not*
-a conflict: pair A's record reaching `absent` before pair B's first `pending_create` record for the
-same scope appears later in the log replays cleanly (A releases, then B claims), exactly like the
-live-write path.
+a conflict, exactly per the counter-example above: pair A's record reaching `absent` before pair B's
+`pending_create` record for the same scope appears later in the log resolves cleanly in Phase 2,
+because Phase 1 already reduced pair A to its final `absent` record before Phase 2 ever runs.
 
 No additional state needs to be persisted for restart recovery beyond what `save()` already writes
 today — ownership is a pure, deterministic function of the replayed records plus the release rule in
 Decision 7, so "the in-memory index was lost" and "the process just started" are indistinguishable
-inputs to the same reconstruction, by construction.
+inputs to the same two-phase reconstruction, by construction.
 
 ### 9. HTTP contract: unchanged; conflict reuses the existing `internal_error`
 
@@ -289,16 +369,41 @@ terminal-without-fill reentry, and every other "fail before any exchange call" o
 is a deliberate trade-off (see Risks) in favor of "public HTTP contract does not change" over
 "Runtime can distinguish a scope conflict from other internal failures by error code alone."
 
+### 10. One shared `isDurablyClosedEntryPackageStatus` predicate, not two independent lists
+
+`{"absent", "terminal_unfilled"}` is not an incidental coincidence between two features — it is one
+domain fact ("this pair's binding is durably proven to admit no position") that both
+`OpenPositionResolutionService.classifyStatus()`'s `durably_closed` bucket and this change's scope
+release rule (Decision 7) need. Reviewed and decided: extract it once, in
+`src/correlation/entryPackageExecutionRecord.ts` next to the status type it classifies:
+
+```ts
+export function isDurablyClosedEntryPackageStatus(status: EntryPackageExecutionStatus): boolean {
+  return status === "absent" || status === "terminal_unfilled";
+}
+```
+
+`OpenPositionResolutionService.classifyStatus()`'s `durably_closed` branch and the new scope
+claim/release logic (Decisions 2 and 8) both call this function instead of each spelling out the
+same two-element set independently. This is a same-behavior extraction, not a redesign of
+`open-position-resolution`: `classifyStatus()`'s inputs, outputs, and every existing test for it are
+unchanged — only where the literal set is spelled out moves from two places to one. Because the
+observable behavior of `open-position-resolution` does not change, this does not need a MODIFIED
+capability entry in `proposal.md`; it is disclosed there as a small touched-file, not a behavior
+change.
+
 ## Risks / Trade-offs
 
 - [Reusing `internal_error` for a scope conflict gives Runtime no way to distinguish "another cycle
   already owns this symbol" from an unrelated internal failure by response code alone] → Accepted
-  for this change per the stated goal of not touching the public contract; revisit only if Runtime
-  demonstrates a concrete need to branch on this specific case (see Open Questions).
-- [The scope-release predicate (`absent`/`terminal_unfilled`) duplicates, rather than shares, the
-  list already encoded in `OpenPositionResolutionService.classifyStatus()`] → Accepted for this
-  change to avoid an unrelated refactor of `openPositionResolutionService.ts`; both lists must be
-  kept in sync if the status enum ever changes (flagged in Open Questions, not fixed here).
+  for this change per the stated goal of not touching the public contract (see Review Resolutions
+  §1): a scope conflict signals a V1 operating-boundary violation Runtime has no legitimate
+  business-logic branch for, not a new case it should react to differently.
+- [An earlier draft of this design reused the live per-line claim/release step for `byScope`
+  reconstruction during replay] → Not accepted, corrected in Decision 8: this was unsound (an
+  intermediate historical line can show a scope legitimately mid-transfer between pairs before the
+  file's final state resolves it), not merely imprecise. Fixed by evaluating ownership only from
+  each pair's latest record (two explicit phases), never from an intermediate one.
 - [Holding a scope conservatively forever after any fill, with no release path designed yet, could
   in principle let a single stuck `applied` record block a symbol indefinitely if a future close
   path is delayed] → Accepted and explicit: correctness (never letting a second cycle collide with a
@@ -321,31 +426,35 @@ already-present data. Rollback is a plain revert of the composition-root wiring 
 `EntryPackageApplicationService` guard; no data migration or backward-incompatible state is created
 in either direction.
 
-## Open Questions
+## Review Resolutions
 
-These do not change the invariant, the approach, or this change's boundary — each has a stated
-default this design proceeds with, listed here for explicit review sign-off before
-implementation:
+This design went through one review pass before implementation. The blocking finding (replay
+correctness) is fixed in place in Decision 8 above, not merely noted here — the version of Decision
+8 in this document is already the corrected one. The five points raised alongside it are closed
+with an explicit decision each, so none remain open:
 
-1. **Should a scope-acquisition conflict get its own public error code** (e.g. distinguishable from
-   generic `internal_error`) instead of reusing the existing one? Default: reuse `internal_error`
-   (Decision 9) — flag if Runtime-side product requirements demand otherwise.
-2. **Should the release predicate be extracted into one shared helper** (e.g.
-   `isDurablyClosedStatus(status)` in `entryPackageExecutionRecord.ts`) consumed by both
-   `OpenPositionResolutionService.classifyStatus()` and the new scope-release logic, instead of two
-   independently-maintained lists of the same two statuses? Default: duplicate for this change
-   (smallest diff); revisit as a follow-up, not blocking.
-3. **Should acquisition/ownership logic live in a small dedicated class** (e.g.
-   `PositionScopeGuard`) rather than as a method addition to `EntryPackageCorrelationRepository`
-   plus inline logic in `createOrder()`? Default: no new class for V1 — the logic is a single
-   decision function plus two repository methods; a dedicated class can be introduced later without
-   changing the invariant if protection/close need a shared call surface. Flag if code review
-   prefers the extraction now.
-4. **Should `PositionScope` include an explicit (currently-constant) account field now**, to avoid a
-   key-shape change if ABI is ever configured for multiple Bybit accounts per process? Default: no
-   — out of scope per "no general refactor", and additive later regardless (Decision 1).
-5. **Is a non-locked, best-effort early ownership check worth adding before the (network-bound)
-   position-sizing call**, purely to avoid wasted work on the losing pair, given the authoritative
-   check still happens under the scope lock right before the durable write regardless? Default: no
-   for V1 (simplicity over a minor efficiency gain); explicitly considered and deferred, not an
-   oversight.
+1. **Public error code for a scope-acquisition conflict?** Resolved: no. Stays `internal_error`
+   (Decision 9). A scope conflict is a V1 operating-boundary violation, not a case Runtime should
+   have its own branch for.
+2. **Shared release-predicate helper instead of two independent lists?** Resolved: yes — implemented
+   in this change (Decision 10), not deferred. `{"absent", "terminal_unfilled"}` is one domain fact
+   with two consumers, not two coincidentally-identical lists; `open-position-resolution`'s own
+   behavior and spec are unchanged by this extraction.
+3. **Dedicated `PositionScopeGuard` class?** Resolved: no. `PositionScope` (Decision 1) +
+   `findOwnerByScope` (Decision 2) + `scopeMutex` (Decision 4) + the inline decision step in
+   `createOrder()` (Decision 6) is the full mechanism; a class would add a name and wiring without
+   adding architectural value at V1's scope.
+4. **`accountId` in `PositionScope` now?** Resolved: no. One ABI process is already exactly one
+   configured Bybit account; adding a field for a dimension that cannot currently vary is scope
+   creep. Additive later if ABI ever supports multiple accounts per process (Decision 1).
+5. **Non-locked early ownership check before the position-sizing call?** Resolved: no. It is a minor
+   efficiency optimization (saves one wasted network round-trip for the losing pair), not a
+   correctness requirement — the authoritative check under the scope lock is unconditionally
+   required regardless of whether this optimization exists. Not worth the added code path at V1.
+
+One wording correction from the same review, applied throughout this document, `proposal.md`, and
+the capability spec: this change does not make different scopes execute "fully concurrently" or
+"in parallel" — it specifically ensures the new scope-ownership lock does not serialize them against
+each other. `EntryPackageCorrelationRepository`'s existing single-writer append queue for the shared
+JSONL file (`entryPackageCorrelationRepository.ts:20-23`) is untouched by this change and continues
+to serialize physical writes regardless of scope, exactly as it does today.
