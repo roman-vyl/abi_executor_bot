@@ -9,18 +9,23 @@ export type EntryPackageExecutionStatus =
   | "absent"
   | "create_failed"
   | "unknown"
-  | "terminal_unfilled";
+  | "terminal_unfilled"
+  | "terminal_closed";
 
 // The one domain fact both open-position resolution (its `durably_closed`
-// bucket) and physical-scope release share: a binding in either of these
-// two statuses is durably proven to admit no position and no order that
+// bucket) and physical-scope release share: a binding in any of these
+// statuses is durably proven to admit no position and no order that
 // could still produce one, without needing a live exchange query. Shared
-// here rather than left as two independently-maintained two-element sets
-// (position-scope-exclusivity design.md Decision 10).
+// here rather than left as independently-maintained sets
+// (position-scope-exclusivity design.md Decision 10). `terminal_closed`
+// (abi-close-execution-v1) additionally means the trade cycle was
+// explicitly and provably ended by a close request — unlike `absent` and
+// `terminal_unfilled`, entry-package execution never lets it be resurrected
+// by a later entry-package request for the same pair.
 export function isDurablyClosedEntryPackageStatus(
   status: EntryPackageExecutionStatus,
-): status is "absent" | "terminal_unfilled" {
-  return status === "absent" || status === "terminal_unfilled";
+): status is "absent" | "terminal_unfilled" | "terminal_closed" {
+  return status === "absent" || status === "terminal_unfilled" || status === "terminal_closed";
 }
 
 // Which external command was last dispatched (or is about to be) for the
@@ -96,6 +101,7 @@ const STATUSES: ReadonlySet<EntryPackageExecutionStatus> = new Set([
   "create_failed",
   "unknown",
   "terminal_unfilled",
+  "terminal_closed",
 ]);
 
 const PENDING_ACTIONS: ReadonlySet<EntryPackagePendingAction> = new Set([

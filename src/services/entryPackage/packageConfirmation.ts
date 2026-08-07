@@ -209,6 +209,112 @@ export async function confirmEntryPackageCancelled(input: {
   return { kind: "ambiguous" };
 }
 
+// abi-close-execution-v1: close's neutralization needs a strictly different
+// question than confirmEntryPackageCancelled answers. That function folds
+// any observed fill — full or partial — into "filled_before_cancel",
+// correct for entry-package's own null-desired-entry (CANCEL) flow, which
+// must refuse to fabricate absence once any fill is observed regardless of
+// the order's own status. Close needs "can no further quantity fill,"
+// which for the order type ABI creates is answered by the order's own
+// terminal-vs-live status alone: a terminal status (fully filled, or
+// cancelled/rejected/deactivated) has no live remainder no matter how much
+// quantity executed before it got there; only a live status (new/
+// untriggered/triggered, or a still-open partially-filled state) can still
+// add exposure. This reuses the same query/decode building blocks above
+// rather than a second confirmation architecture, and does not change
+// confirmEntryPackageCancelled or its callers.
+export type EntryOrderTerminality = { kind: "terminal" } | { kind: "live" } | { kind: "ambiguous" };
+
+function isTerminalOrderStatus(orderStatus: string): boolean {
+  return FILLED_STATUSES.has(orderStatus) || TERMINAL_WITHOUT_FILL_STATUSES.has(orderStatus);
+}
+
+function isLiveOrderStatus(orderStatus: string): boolean {
+  return LIVE_UNFILLED_STATUSES.has(orderStatus) || PARTIAL_FILL_STATUSES.has(orderStatus);
+}
+
+// Single fresh classification of the current entry order's terminal-vs-live
+// status. Never sends a cancel itself — the caller decides whether and when
+// to cancel, and checks the live-execution guard, exactly as every other
+// exchange write in this codebase does at its own call site.
+export async function classifyEntryOrderTerminality(input: {
+  bybit: BybitAdapter;
+  getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
+  getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+}): Promise<EntryOrderTerminality> {
+  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+
+  const realtime = await queryOrderView(
+    () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
+    realtimeIdentity,
+  );
+
+  if (realtime.status === "found") {
+    if (isTerminalOrderStatus(realtime.item.orderStatus)) {
+      return { kind: "terminal" };
+    }
+    if (isLiveOrderStatus(realtime.item.orderStatus)) {
+      return { kind: "live" };
+    }
+    // An unrecognized realtime status falls through to history, the same
+    // pattern confirmEntryPackage already uses for an inconclusive realtime
+    // finding.
+  }
+
+  if (realtime.status === "query_failed") {
+    return { kind: "ambiguous" };
+  }
+
+  const history = await queryOrderView(
+    () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
+    historyIdentity,
+  );
+
+  if (history.status === "query_failed") {
+    return { kind: "ambiguous" };
+  }
+
+  if (history.status === "found") {
+    return isTerminalOrderStatus(history.item.orderStatus) ? { kind: "terminal" } : { kind: "ambiguous" };
+  }
+
+  if (realtime.status === "not_found") {
+    // Genuinely absent from both realtime and history — the same
+    // clean-absence condition confirmEntryPackageCancelled already treats
+    // as confirmed non-live.
+    return { kind: "terminal" };
+  }
+
+  // Realtime positively found the order in an unrecognized state, and
+  // history cleanly reports it absent: a positively found order must never
+  // be discarded as terminal solely because history is clean-empty.
+  return { kind: "ambiguous" };
+}
+
+// Bounded re-classification after a cancel has already been sent for a
+// live order — re-queries only, never resends anything. Reuses the same
+// bounded-retry shape (attempt count and delay) confirmEntryPackage and
+// confirmEntryPackageCancelled already use.
+export async function confirmEntryOrderNeutralized(input: {
+  bybit: BybitAdapter;
+  getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
+  getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+}): Promise<"neutralized" | "ambiguous"> {
+  for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
+    const classification = await classifyEntryOrderTerminality(input);
+    if (classification.kind === "terminal") {
+      return "neutralized";
+    }
+
+    if (attempt < CONFIRMATION_ATTEMPTS - 1) {
+      await sleep(CONFIRMATION_RETRY_DELAY_MS);
+    }
+  }
+
+  return "ambiguous";
+}
+
 function confirmsAbsenceOrTerminal(result: QueryResult): boolean {
   if (result.status === "not_found") {
     return true;

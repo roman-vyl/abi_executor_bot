@@ -12,7 +12,7 @@ import {
   validateProtectionCommand,
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
-import type { PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
+import type { CloseCommand, PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
 
 // Narrow structural port, not the concrete class: this route must not touch
 // correlation state, Bybit, or the mutex directly — it only knows how to
@@ -20,6 +20,12 @@ import type { PositionManagementHttpResult, ProtectionCommand } from "../domain/
 // entryPackageRoutes.ts's EntryPackageApplicationServicePort split).
 export type ProtectionApplicationServicePort = {
   apply(command: ProtectionCommand): Promise<PositionManagementHttpResult>;
+};
+
+// Same narrow-port split as ProtectionApplicationServicePort above, for the
+// close pipeline (close-execution).
+export type CloseApplicationServicePort = {
+  apply(command: CloseCommand): Promise<PositionManagementHttpResult>;
 };
 
 export type PositionManagementRouteMatch =
@@ -37,11 +43,18 @@ export async function handlePositionManagementRoutes(input: {
   request: IncomingMessage;
   response: ServerResponse;
   protectionApplicationService: ProtectionApplicationServicePort;
+  closeApplicationService: CloseApplicationServicePort;
   isReady: () => boolean;
 }): Promise<boolean> {
-  const { request, response, protectionApplicationService, isReady } = input;
+  const { request, response, protectionApplicationService, closeApplicationService, isReady } = input;
   try {
-    return await handlePositionManagementRoutesSafely(request, response, protectionApplicationService, isReady);
+    return await handlePositionManagementRoutesSafely(
+      request,
+      response,
+      protectionApplicationService,
+      closeApplicationService,
+      isReady,
+    );
   } catch {
     writeResult(response, internalErrorResult());
     return true;
@@ -52,6 +65,7 @@ async function handlePositionManagementRoutesSafely(
   request: IncomingMessage,
   response: ServerResponse,
   protectionApplicationService: ProtectionApplicationServicePort,
+  closeApplicationService: CloseApplicationServicePort,
   isReady: () => boolean,
 ): Promise<boolean> {
   const protectionMatch = matchProtectionRoute(request.method, request.url);
@@ -62,7 +76,7 @@ async function handlePositionManagementRoutesSafely(
 
   const closeMatch = matchCloseRoute(request.method, request.url);
   if (closeMatch.matched) {
-    await handleClose(request, response, closeMatch);
+    await handleClose(request, response, closeMatch, closeApplicationService, isReady);
     return true;
   }
 
@@ -123,6 +137,8 @@ async function handleClose(
   request: IncomingMessage,
   response: ServerResponse,
   match: Extract<PositionManagementRouteMatch, { matched: true }>,
+  closeApplicationService: CloseApplicationServicePort,
+  isReady: () => boolean,
 ): Promise<void> {
   if (match.details !== undefined) {
     writeResult(response, validationFailedResult(match.details));
@@ -148,11 +164,16 @@ async function handleClose(
     return;
   }
 
-  // Scope resolution, order cleanup, and postcondition verification are
-  // deferred to a later execution change (proposal.md non-goal): a
-  // transport-valid command fails safe rather than fabricating success.
-  void validation.command;
-  writeResult(response, internalErrorResult());
+  if (!isReady()) {
+    // Correlation-store replay hasn't completed (or failed) yet — fail
+    // closed rather than risk acting before durable state is recovered
+    // (mirrors handleProtection's identical readiness gate).
+    writeResult(response, internalErrorResult());
+    return;
+  }
+
+  const result = await closeApplicationService.apply(validation.command);
+  writeResult(response, result);
 }
 
 export function matchProtectionRoute(

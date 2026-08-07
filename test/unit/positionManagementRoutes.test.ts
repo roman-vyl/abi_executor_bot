@@ -4,11 +4,15 @@ import { Readable } from "node:stream";
 import test from "node:test";
 
 import type {
+  CloseCommand,
   PositionManagementHttpResult,
   ProtectionCommand,
 } from "../../src/domain/positionManagementApi.js";
 import { internalErrorResult } from "../../src/domain/positionManagementApi.js";
-import type { ProtectionApplicationServicePort } from "../../src/routes/positionManagementRoutes.js";
+import type {
+  CloseApplicationServicePort,
+  ProtectionApplicationServicePort,
+} from "../../src/routes/positionManagementRoutes.js";
 import {
   handlePositionManagementRoutes,
   matchCloseRoute,
@@ -36,12 +40,37 @@ class FakeProtectionApplicationService implements ProtectionApplicationServicePo
   }
 }
 
+// Same shape as FakeProtectionApplicationService, for the close port.
+class FakeCloseApplicationService implements CloseApplicationServicePort {
+  readonly calls: CloseCommand[] = [];
+  result: PositionManagementHttpResult = internalErrorResult();
+  private readonly shouldBeCalled: boolean;
+
+  constructor(shouldBeCalled = true) {
+    this.shouldBeCalled = shouldBeCalled;
+  }
+
+  async apply(command: CloseCommand): Promise<PositionManagementHttpResult> {
+    if (!this.shouldBeCalled) {
+      throw new Error("closeApplicationService.apply must not be called for this test");
+    }
+    this.calls.push(command);
+    return this.result;
+  }
+}
+
 function routeDeps(overrides: {
   protectionApplicationService?: ProtectionApplicationServicePort;
+  closeApplicationService?: CloseApplicationServicePort;
   isReady?: () => boolean;
-} = {}): { protectionApplicationService: ProtectionApplicationServicePort; isReady: () => boolean } {
+} = {}): {
+  protectionApplicationService: ProtectionApplicationServicePort;
+  closeApplicationService: CloseApplicationServicePort;
+  isReady: () => boolean;
+} {
   return {
     protectionApplicationService: overrides.protectionApplicationService ?? new FakeProtectionApplicationService(false),
+    closeApplicationService: overrides.closeApplicationService ?? new FakeCloseApplicationService(false),
     isReady: overrides.isReady ?? (() => true),
   };
 }
@@ -208,11 +237,40 @@ test("a transport-valid protection request fails safe without dispatching when n
   assert.deepEqual(response.body(), internalErrorResult().body);
 });
 
-test("close accepts an empty body and fails safe without a fabricated success", async () => {
+test("a transport-valid close request is dispatched to the application service once ready", async () => {
+  const request = makeRequest("DELETE", closeRoute(), "", {});
+  const response = makeResponse();
+  const service = new FakeCloseApplicationService();
+  service.result = {
+    statusCode: 200,
+    body: { strategy_instance_id: "instance", trade_cycle_id: "cycle", status: "trade_cycle_closed" },
+  };
+
+  assert.equal(
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ closeApplicationService: service }),
+    }),
+    true,
+  );
+  assert.equal(response.status(), 200);
+  assert.deepEqual(response.body(), service.result.body);
+  assert.deepEqual(service.calls, [{ strategyInstanceId: "instance", tradeCycleId: "cycle" }]);
+});
+
+test("a transport-valid close request fails safe without dispatching when not ready", async () => {
   const request = makeRequest("DELETE", closeRoute(), "", {});
   const response = makeResponse();
 
-  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+  assert.equal(
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ isReady: () => false }),
+    }),
+    true,
+  );
   assert.equal(response.status(), 500);
   assert.deepEqual(response.body(), internalErrorResult().body);
 });

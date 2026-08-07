@@ -472,6 +472,35 @@ test("terminal-without-fill fail-closed, then CANCEL, then a fresh CREATE gets a
   });
 });
 
+// abi-close-execution-v1: a trade cycle close-execution has durably closed
+// as terminal_closed must never be resurrected by a later entry-package
+// request for the same pair (entry-package-execution's own ADDED
+// requirement) — the same protection terminal_unfilled already has, but
+// covering the distinct terminal_closed status this change introduces.
+test("a terminal_closed trade cycle rejects a new non-null desiredEntry without creating an order", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeTerminalClosedRecord());
+
+    const result = await service.apply(makeCommand());
+
+    assertInternalError(result);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+  });
+});
+
+test("a terminal_closed trade cycle acknowledges a null desiredEntry without altering the record or contacting the exchange", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeTerminalClosedRecord());
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+  });
+});
+
 test("a changed ticker within an existing trade cycle is rejected without contacting the exchange", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -760,6 +789,32 @@ test("scope ownership survives restart: a durably closed record frees its scope 
   }
 });
 
+// abi-close-execution-v1: terminal_closed joins absent/terminal_unfilled in
+// the durably-closed set replay uses to reconstruct scope ownership — a
+// different pair can acquire the freed scope after restart exactly as it
+// can for an absent record.
+test("scope ownership survives restart: a terminal_closed record frees its scope after replay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-terminal-closed-"));
+  try {
+    const path = join(dir, "correlation.jsonl");
+    const repoBeforeRestart = new EntryPackageCorrelationRepository(path);
+    await repoBeforeRestart.save(makeScopeTestRecord({ status: "terminal_closed" }));
+
+    const repoAfterRestart = new EntryPackageCorrelationRepository(path);
+    const replayResult = await repoAfterRestart.replay();
+    assert.deepEqual(replayResult, { ok: true });
+
+    const result = await runServiceAgainstRepository(
+      repoAfterRestart,
+      makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
+    );
+
+    assertApplied(result.httpResult, "0.001");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // The pre-restart record belongs to a different pair ("instance-A") than
 // the post-restart request each test above issues ("instance-B") —
 // matching the real target model (see the comment above the race test).
@@ -786,6 +841,32 @@ function makeScopeTestRecord(
     binding_history: [],
     pending_action: orderLinkId === null ? null : "create",
     current_binding_started_at: orderLinkId === null ? null : "2026-01-01T00:00:00.000Z",
+  };
+}
+
+// A terminal_closed record matching makeCommand()'s default pair (unlike
+// makeScopeTestRecord's fixed "instance-A"/"cycle-A1", used elsewhere for
+// scope tests against a *different* pair's command).
+function makeTerminalClosedRecord(): EntryPackageExecutionRecord {
+  return {
+    strategy_instance_id: "instance-1",
+    trade_cycle_id: "cycle-1",
+    ticker: "BTCUSDT.P",
+    exchange_symbol: "BTCUSDT",
+    exchange_category: "linear",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    desired_entry: null,
+    risk_multiplier: "1",
+    calculated_quantity: "0.001",
+    order_link_id: "closed-link-1",
+    order_id: "closed-order-1",
+    generation: 1,
+    status: "terminal_closed",
+    early_execution_observation: null,
+    binding_history: [],
+    pending_action: null,
+    current_binding_started_at: null,
   };
 }
 

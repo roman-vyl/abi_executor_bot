@@ -7,6 +7,7 @@ import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
+import { CloseApplicationService } from "../services/close/closeApplicationService.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
@@ -60,6 +61,17 @@ export function startServer(config: AbiConfig): void {
     openPositionResolutionService,
   });
 
+  // Reuses the same pair-level `mutex`, never `scopeMutex` — release of a
+  // pair's own scope happens as a side effect of its durable terminal write,
+  // not through the scope-acquisition lock (close-execution design.md
+  // Decision 8).
+  const closeApplicationService = new CloseApplicationService({
+    config,
+    bybit,
+    correlationRepository,
+    mutex,
+  });
+
   // Correlation-store replay runs asynchronously and must not delay
   // server.listen() for account routes (design.md §13).
   void correlationRepository
@@ -111,6 +123,7 @@ export function startServer(config: AbiConfig): void {
         request,
         response,
         protectionApplicationService,
+        closeApplicationService,
         isReady: () => readiness.isReady,
       })
     ) {

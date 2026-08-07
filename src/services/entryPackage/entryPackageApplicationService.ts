@@ -101,6 +101,15 @@ export class EntryPackageApplicationService {
       return this.absentResult(command);
     }
 
+    // A trade cycle close-execution has terminally closed is not downgraded
+    // back to absent by a cancel-intent request — that would strip the
+    // resurrection protection its terminal_closed status exists to provide
+    // (abi-close-execution-v1 design.md Decision 6). No order exists to
+    // cancel either way, so this only ever acknowledges absence.
+    if (record.status === "terminal_closed") {
+      return this.absentResult(command);
+    }
+
     if (record.status === "terminal_unfilled" || record.order_link_id === null) {
       await this.persistTransitionToAbsent(record);
       return this.absentResult(command);
@@ -118,7 +127,7 @@ export class EntryPackageApplicationService {
       return this.createOrder(command, desiredEntry, undefined, 1);
     }
 
-    if (record.status === "terminal_unfilled") {
+    if (record.status === "terminal_unfilled" || record.status === "terminal_closed") {
       return internalErrorResult();
     }
 
