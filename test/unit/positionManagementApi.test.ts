@@ -70,6 +70,25 @@ test("missing or malformed stop_price is rejected", () => {
   }
 });
 
+// Zero is Bybit's own "remove this leg" sentinel for /v5/position/trading-stop
+// (design.md Decision 5) — accepting it as a real price here would let a
+// caller silently strip protection while ABI still reports
+// protection_applied, so both zero and negative values must be rejected the
+// same way any other malformed price is.
+test("zero and negative stop_price are rejected", () => {
+  for (const stopPrice of ["0", "-1", "-99000"]) {
+    const result = validateProtectionCommand(
+      { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+      { stop_price: stopPrice, take_price: null },
+    );
+
+    assert.equal(result.ok, false, stopPrice);
+    if (!result.ok) {
+      assert.ok(result.details.some((detail) => detail.path === "/stop_price"), stopPrice);
+    }
+  }
+});
+
 test("malformed non-null take_price is rejected", () => {
   const result = validateProtectionCommand(
     { strategyInstanceId: "instance", tradeCycleId: "cycle" },
@@ -79,6 +98,20 @@ test("malformed non-null take_price is rejected", () => {
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.ok(result.details.some((detail) => detail.path === "/take_price"));
+  }
+});
+
+test("zero and negative take_price are rejected", () => {
+  for (const takePrice of ["0", "-1", "-103000"]) {
+    const result = validateProtectionCommand(
+      { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+      { stop_price: "99000", take_price: takePrice },
+    );
+
+    assert.equal(result.ok, false, takePrice);
+    if (!result.ok) {
+      assert.ok(result.details.some((detail) => detail.path === "/take_price"), takePrice);
+    }
   }
 });
 

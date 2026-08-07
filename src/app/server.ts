@@ -9,6 +9,7 @@ import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradi
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
+import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import { writeJson } from "./http.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
@@ -45,6 +46,18 @@ export function startServer(config: AbiConfig): void {
   const openPositionResolutionService = new OpenPositionResolutionService({
     correlationRepository,
     bybit,
+  });
+
+  // Reuses the same pair-level `mutex` (not `scopeMutex`) and the same
+  // live-position determination as openPositionResolutionService — see
+  // protectionApplicationService.ts's own deps comments
+  // (protection-execution design.md Decisions 4, 7).
+  const protectionApplicationService = new ProtectionApplicationService({
+    config,
+    bybit,
+    correlationRepository,
+    mutex,
+    openPositionResolutionService,
   });
 
   // Correlation-store replay runs asynchronously and must not delay
@@ -93,7 +106,14 @@ export function startServer(config: AbiConfig): void {
       return;
     }
 
-    if (await handlePositionManagementRoutes({ request, response })) {
+    if (
+      await handlePositionManagementRoutes({
+        request,
+        response,
+        protectionApplicationService,
+        isReady: () => readiness.isReady,
+      })
+    ) {
       return;
     }
 
