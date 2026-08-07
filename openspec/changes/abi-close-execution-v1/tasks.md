@@ -39,12 +39,12 @@
 
 ## 4. `CloseApplicationService`
 
-- [ ] 4.1 Add `src/services/close/closeApplicationService.ts` implementing two paths from pair
+- [ ] 4.1 Add `src/services/close/closeApplicationService.ts` implementing three paths from pair
       classification (design.md Decision 6):
-      - `terminal_unfilled` or already `terminal_closed` → return `trade_cycle_closed` directly, no
-        write, no exchange call.
-      - `absent` → durably write `status: "terminal_closed"` (no exchange call needed — both
-        postconditions already durably hold), then return `trade_cycle_closed`.
+      - already `terminal_closed` → return `trade_cycle_closed` directly, no write, no exchange call.
+      - `absent` or `terminal_unfilled` → durably write `status: "terminal_closed"` (no exchange call
+        needed — both postconditions already durably hold), then return `trade_cycle_closed`. Both
+        statuses get identical treatment; neither is a no-write shortcut.
       - every other status → ownership re-check → a record with no `order_link_id` fails as
         contradictory correlation (`internal_error`, design.md Decision 5) → entry-order
         neutralization (2.2) → live position read (3.1) → close write when size > 0 (3.2), gated by
@@ -83,20 +83,22 @@
 ## 7. Tests
 
 - [ ] 7.1 `CloseApplicationService` unit tests covering: unknown pair; already `terminal_closed` pair
-      (no exchange write); an `absent` pair is durably promoted to `terminal_closed` before
-      `trade_cycle_closed` is returned, with no exchange call; ownership mismatch; unsupported scope; a
-      non-durably-closed record with no `order_link_id` fails as contradictory correlation before any
-      exchange call; live unfilled entry order cancelled and confirmed non-live before the position
-      query runs; a cancelled order with nonzero executed quantity is still treated as neutralized
-      (design.md Decision 2); a still-live partially-filled order is not treated as neutralized merely
-      because a fill was observed; cancel ambiguity blocks the whole close with no market-close sent;
-      position already zero sends no market-close; an unexpected live position side is still closed
-      using the actual side; close quantity equals the actual live remainder, not
-      `calculated_quantity`; live-execution guard disabled on either the cancel or the close write;
-      market-close write failure; bounded position confirmation succeeding only on a later attempt;
-      confirmation exhaustion without a match; final pre-terminalization check failing when the entry
-      order is not confirmed non-live even though the position reads zero; no scope release observable
-      before either terminal write; scope release observable once either terminal write completes.
+      (no exchange write, no further write); an `absent` pair is durably promoted to `terminal_closed`
+      before `trade_cycle_closed` is returned, with no exchange call; a `terminal_unfilled` pair is
+      durably promoted to `terminal_closed` before `trade_cycle_closed` is returned, with no exchange
+      call; ownership mismatch; unsupported scope; a non-durably-closed record with no `order_link_id`
+      fails as contradictory correlation before any exchange call; live unfilled entry order cancelled
+      and confirmed non-live before the position query runs; a cancelled order with nonzero executed
+      quantity is still treated as neutralized (design.md Decision 2); a still-live partially-filled
+      order is not treated as neutralized merely because a fill was observed; cancel ambiguity blocks
+      the whole close with no market-close sent; position already zero sends no market-close; an
+      unexpected live position side is still closed using the actual side; close quantity equals the
+      actual live remainder, not `calculated_quantity`; live-execution guard disabled on either the
+      cancel or the close write; market-close write failure; bounded position confirmation succeeding
+      only on a later attempt; confirmation exhaustion without a match; final pre-terminalization check
+      failing when the entry order is not confirmed non-live even though the position reads zero; no
+      scope release observable before any of the three terminal-write paths; scope release observable
+      once any of them completes.
 - [ ] 7.2 `position-scope-exclusivity`-facing tests: a new entry request for a former `terminal_closed`
       pair's scope succeeds once that scope is released; replay reconstructs `terminal_closed` as
       durably closed and releases the scope on restart.
@@ -104,12 +106,16 @@
       `terminal_closed` pair fails closed without creating an order; a null `desired_entry` request
       against a `terminal_closed` pair acknowledges absence without altering the record; a non-null
       `desired_entry` request against a pair that was `absent` and then closed via `DELETE` fails
-      closed the same way (the resurrection case design.md Decision 6 exists to prevent).
+      closed the same way; a non-null `desired_entry` request against a pair that was `terminal_unfilled`
+      and then closed via `DELETE` fails closed the same way — this is the specific resurrection chain
+      (`terminal_unfilled` → stale null PUT → `absent` → stale non-null PUT → new generation)
+      design.md Decision 6 exists to break.
 - [ ] 7.4 `open-position-resolution`-facing test: `GET .../open-position` for a `terminal_closed` pair
       returns `position_open: false` without querying the exchange.
-- [ ] 7.5 Idempotency tests: a repeated `DELETE` after `terminal_closed` (via either path) performs no
-      exchange write and returns `trade_cycle_closed`; a repeated `DELETE` mid-close does not resend a
-      cancel or close order for a fact already confirmed true.
+- [ ] 7.5 Idempotency tests: a repeated `DELETE` after `terminal_closed` — reached via the full
+      pipeline, the `absent` promotion, or the `terminal_unfilled` promotion — performs no exchange
+      write and no further correlation write, and returns `trade_cycle_closed`; a repeated `DELETE`
+      mid-close does not resend a cancel or close order for a fact already confirmed true.
 - [ ] 7.6 Concurrency tests: a close command and a concurrent entry-package or protection command for
       the same pair never interleave; close commands for two different pairs are not serialized by any
       lock this capability introduces or reuses (do not assert full global concurrency, since the
@@ -124,9 +130,9 @@
       and confirm it is unchanged (no public contract change in this OpenSpec).
 - [ ] 8.3 Run `git diff --check`.
 - [ ] 8.4 Review the diff: no new public DTO, route, or error code; no account-wide/symbol-wide cancel
-      call anywhere in the new code path; both terminal-write paths (full pipeline and `absent`
-      promotion) are the only places scope release can occur for a close request; no identity field is
-      cleared without a corresponding `binding_history` entry.
+      call anywhere in the new code path; the three terminal-write paths (full pipeline, `absent`
+      promotion, `terminal_unfilled` promotion) are the only places scope release can occur for a close
+      request; no identity field is cleared without a corresponding `binding_history` entry.
 
 ## Deferred follow-up (not this change's scope)
 

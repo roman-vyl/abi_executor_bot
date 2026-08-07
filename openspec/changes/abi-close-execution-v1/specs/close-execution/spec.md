@@ -11,28 +11,30 @@ physical scope only as a consequence of that durable write, before reporting suc
 
 ### Requirement: The pair is classified before any exchange call
 ABI SHALL resolve, in this order and before any exchange call: an unknown pair returns
-`unknown_trade_cycle_binding`. A pair whose record status is already `terminal_unfilled` or
-`terminal_closed` returns `trade_cycle_closed` directly, with no exchange call and no further durable
-write — both already durably prove this capability's postconditions. A pair whose record status is
-`absent` also already durably proves both postconditions, but has not itself been committed as a
-terminally closed trade cycle; ABI SHALL durably commit it as `terminal_closed` — no exchange call is
-needed to do so — before returning `trade_cycle_closed`, so the same pair cannot later be resurrected
-by a new entry-package request. Every other pair SHALL have its ownership of the scope its own record
-names independently reconfirmed via the current scope-ownership state `position-scope-exclusivity`
-maintains; any outcome other than this exact pair owning that scope returns `internal_error`. A
-resolved scope outside this capability's supported exchange category returns
-`unsupported_exchange_scope` before any further step.
+`unknown_trade_cycle_binding`. A pair whose record status is already `terminal_closed` returns
+`trade_cycle_closed` directly, with no exchange call and no further durable write — it already
+durably proves this capability's postconditions and already durably records that Runtime asked to
+end it. A pair whose record status is `absent` or `terminal_unfilled` also already durably proves
+both postconditions, but has not itself been committed as a terminally closed trade cycle; ABI SHALL
+durably commit it as `terminal_closed` — no exchange call is needed to do so — before returning
+`trade_cycle_closed`, so the same pair cannot later be resurrected by a new entry-package request.
+`terminal_closed` is the only status this requirement treats as a pure shortcut requiring no further
+write: every other durably-closed status still requires this promotion. Every other pair SHALL have
+its ownership of the scope its own record names independently reconfirmed via the current
+scope-ownership state `position-scope-exclusivity` maintains; any outcome other than this exact pair
+owning that scope returns `internal_error`. A resolved scope outside this capability's supported
+exchange category returns `unsupported_exchange_scope` before any further step.
 
 #### Scenario: Unknown pair fails closed
 - **WHEN** no correlation record exists for the requested pair
 - **THEN** ABI returns `unknown_trade_cycle_binding`
 
 #### Scenario: An already terminally closed trade cycle is acknowledged idempotently
-- **WHEN** the requested pair's record status is already `terminal_unfilled` or `terminal_closed`
+- **WHEN** the requested pair's record status is already `terminal_closed`
 - **THEN** ABI returns `trade_cycle_closed` without querying the exchange or writing anything further
 
-#### Scenario: A trade cycle that never held exposure is durably terminalized, not merely acknowledged
-- **WHEN** the requested pair's record status is `absent`
+#### Scenario: A trade cycle that never held exposure, or ended without a fill, is durably terminalized, not merely acknowledged
+- **WHEN** the requested pair's record status is `absent` or `terminal_unfilled`
 - **THEN** ABI durably commits that record as `terminal_closed` without any exchange call, and only
   then returns `trade_cycle_closed`
 
@@ -135,9 +137,9 @@ both that the live position size is zero and that the pair's current entry order
 remainder, confirmed at this point in the pipeline rather than assumed from an earlier step alone.
 Exhausting the bounded attempts without confirming either fails the entire close closed. The pair's
 physical scope SHALL be released only as a consequence of the terminal write completing — for this
-path or the `absent` shortcut alike — never before it; a crash or failure at any point before it
-completes SHALL leave the scope held by the same pair, exactly as if the close request had not been
-attempted.
+path or the `absent`/`terminal_unfilled` promotion alike — never before it; a crash or failure at any
+point before it completes SHALL leave the scope held by the same pair, exactly as if the close request
+had not been attempted.
 
 #### Scenario: A close order that only takes effect on a later bounded attempt still succeeds
 - **WHEN** a bounded verification attempt after the last one finds the position at zero, though an
@@ -165,8 +167,8 @@ ABI SHALL re-derive every fact this pipeline needs from durable state and live q
 request, rather than presuming a fact already established by an earlier attempt.
 
 #### Scenario: Repeating after a completed close performs no exchange write
-- **WHEN** a `DELETE` request is repeated for a pair already `terminal_closed` (whether reached via
-  the full pipeline or the `absent` promotion) or `terminal_unfilled`
+- **WHEN** a `DELETE` request is repeated for a pair already `terminal_closed`, whether reached via
+  the full pipeline, the `absent` promotion, or the `terminal_unfilled` promotion
 - **THEN** ABI returns `trade_cycle_closed` without sending any cancel or close order, and without
   writing anything further
 

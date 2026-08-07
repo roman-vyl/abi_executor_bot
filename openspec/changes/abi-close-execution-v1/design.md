@@ -72,40 +72,44 @@ identity, before any exchange call for it is made. A record that reaches close's
 Treating a missing identity as a benign no-op would let such a record slip through to a position close
 and a fabricated `trade_cycle_closed`.
 
-## Decision 6: `terminal_closed` means "explicitly and provably ended by a close request," not "once had exposure" — and `absent` is promoted into it, not shortcut past it
+## Decision 6: `terminal_closed` means "explicitly and provably ended by a close request," not "once had exposure" — and every other durably-closed status is promoted into it, never shortcut past it
 
 Reusing `absent` for a trade cycle this pipeline ends would be wrong regardless of whether the trade
 cycle ever held real exposure: `absent` is, by entry-package execution's own existing contract,
 eligible for a brand-new entry. A `terminal_closed` status distinct from `absent` is what makes "Runtime
 explicitly asked to end this trade cycle, and ABI proved it done" permanent and non-resurrectable.
 
-That requirement applies even when the pair's record is already `absent` at the moment `DELETE`
-arrives: `absent` already durably proves both of this capability's postconditions (no exposure, no
-live order — the same durable-absence condition `position-scope-exclusivity` and
-`open-position-resolution` already rely on), but it does not itself durably record that Runtime asked
-to end the trade cycle. Treating an `absent` record as an idempotent shortcut to `trade_cycle_closed`
-without writing `terminal_closed` would leave the pair `absent` — still eligible, by entry-package
-execution's existing contract, for a later non-null `desired_entry` request to open a brand-new
-position under the same trade cycle identity, silently resurrecting a trade cycle Runtime believed
-closed. The fix is that `absent` gets the same durable promotion to `terminal_closed` as a pair that
-actually went through the full pipeline — no exchange call is needed to justify it, since both facts
-are already proven, but the write itself is not optional. Only `terminal_unfilled` and an already-
-`terminal_closed` record are true no-write shortcuts, because both are already the permanent,
-non-resurrectable state this pipeline exists to produce.
+The same reasoning applies to `terminal_unfilled`, not only to `absent`. Both already durably prove
+this capability's postconditions (no exposure, no live order — the same durable-absence condition
+`position-scope-exclusivity` and `open-position-resolution` already rely on), but neither durably
+records that Runtime asked to end the trade cycle via a close request. Treating either as an idempotent
+shortcut to `trade_cycle_closed` without writing `terminal_closed` leaves it resurrectable:
+entry-package execution's own null-desired-entry handling already turns a `terminal_unfilled` record
+into `absent` on the next cancel-intent request, and an `absent` record accepts a brand-new entry —
+so `terminal_unfilled → (stale null PUT) → absent → (stale non-null PUT) → new generation` is a real
+path back to life for a trade cycle ABI already told Runtime was closed, exactly the same shape of bug
+as leaving `absent` unpromoted. The fix is that both `absent` and `terminal_unfilled` get the identical
+durable promotion to `terminal_closed` a pair that actually went through the full pipeline gets — no
+exchange call is needed to justify either, since both facts are already proven, but the write itself is
+not optional for either. Only an already-`terminal_closed` record is a true no-write shortcut, because
+it alone is already the permanent, non-resurrectable state this pipeline exists to produce.
 
 One consequence for entry-package execution: a null-`desired_entry` (cancel-intent) request against an
 already `terminal_closed` pair must acknowledge absence without reverting the record to `absent` or
 attempting to cancel an order that no longer exists — the existing null-desired-entry path's
-fallback-to-cancel branch must not be allowed to downgrade a terminal-closed record.
+fallback-to-cancel branch must not be allowed to downgrade a terminal-closed record. No further change
+to entry-package execution is needed beyond that: once a record is `terminal_closed`, the ADDED
+requirement already in that capability's delta blocks resurrection regardless of which status this
+pipeline promoted it from.
 
 ## Decision 7: The durable terminal write is the scope-release point, not a separate step
 
 Physical scope release already happens as a side effect of durably saving a record whose status is in
 the durably-closed set — no separate release step or lock exists today, and none is introduced. This
-applies identically to the `absent`-promotion write and the full-pipeline write in Decision 6: writing
-either any earlier would risk releasing the scope before both facts are proven (moot for the
-already-proven `absent` case, but load-bearing for the full pipeline), and writing it any later would
-report success without the release a different pair's future acquisition depends on.
+applies identically to the `absent`/`terminal_unfilled` promotion write and the full-pipeline write in
+Decision 6: writing either any earlier would risk releasing the scope before both facts are proven
+(moot for the already-proven promotion case, but load-bearing for the full pipeline), and writing it
+any later would report success without the release a different pair's future acquisition depends on.
 
 ## Decision 8: The existing per-pair lock is reused; no new cross-pair serialization is introduced
 
@@ -133,9 +137,10 @@ bounded read-back.
 Close introduces no pending-close correlation status and no command ID. Every fact the pipeline needs
 — is the entry order still live, is the position still open, is the record already terminal — is
 either already durable or freshly re-queried on every attempt, so a repeated `DELETE` after a crash or
-timeout naturally skips whatever step's fact is already established true (including the `absent`
-promotion itself, which Decision 6's terminal-shortcut scenario already makes idempotent) and fails
-closed on whatever remains genuinely ambiguous, without needing to remember which step it was on.
+timeout naturally skips whatever step's fact is already established true (including either promotion
+in Decision 6, since a repeat sees the record already `terminal_closed` and takes the pure shortcut)
+and fails closed on whatever remains genuinely ambiguous, without needing to remember which step it
+was on.
 
 ## Non-goals restated
 
