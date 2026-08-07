@@ -20,7 +20,7 @@ ABI SHALL resolve the requested pair using the existing `EntryPackageCorrelation
 ### Requirement: Record status is classified into durably-closed, live-query-admissible, and unresolved buckets
 ABI SHALL classify a found record's `status` into exactly one of three buckets before taking any further action:
 
-- Durably closed (`absent`, `terminal_unfilled`): no live exchange query is made; the response is `position_open: false` directly.
+- Durably closed (`absent`, `terminal_unfilled`, `terminal_closed`): no live exchange query is made; the response is `position_open: false` directly.
 - Live-query-admissible (`applied`, `pending_replace`, `pending_cancel`): a live Bybit query is required.
 - Unresolved (`pending_create`, `create_failed`, `unknown`): ABI fails closed without attempting a live query.
 
@@ -31,6 +31,11 @@ ABI SHALL classify a found record's `status` into exactly one of three buckets b
 
 #### Scenario: Terminal-without-fill durably proves no exposure
 - **WHEN** the record's status is `terminal_unfilled`
+- **THEN** ABI returns `position_open: false` with both facts `null`
+- **AND** ABI does not query the exchange
+
+#### Scenario: Terminally-closed durably proves no exposure
+- **WHEN** the record's status is `terminal_closed`
 - **THEN** ABI returns `position_open: false` with both facts `null`
 - **AND** ABI does not query the exchange
 

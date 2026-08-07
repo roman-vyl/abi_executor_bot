@@ -12,7 +12,7 @@ import type {
 import { OpenPositionResolutionService } from "../../src/services/openPosition/openPositionResolutionService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
-const DURABLY_CLOSED: EntryPackageExecutionStatus[] = ["absent", "terminal_unfilled"];
+const DURABLY_CLOSED: EntryPackageExecutionStatus[] = ["absent", "terminal_unfilled", "terminal_closed"];
 const LIVE_QUERY_ADMISSIBLE: EntryPackageExecutionStatus[] = ["applied", "pending_replace", "pending_cancel"];
 const UNRESOLVED: EntryPackageExecutionStatus[] = ["pending_create", "create_failed", "unknown"];
 

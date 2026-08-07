@@ -100,3 +100,17 @@ the pre-restart in-memory ownership index SHALL NOT cause ABI to treat a still-o
 - **WHEN** ABI restarts and replays a correlation record whose status is `absent`,
   `terminal_unfilled`, or `terminal_closed` for a given scope, with no other pair holding it
 - **THEN** a different pair's post-restart acquisition attempt on that scope succeeds
+
+### Requirement: V1 scope excludes shared same-symbol exposure; post-fill scope release is implemented by close-execution
+This capability's documentation SHALL state that it does not implement shared ownership of one
+physical scope by multiple trade cycles (deferred to the virtual position ledger tracked as a
+separate backlog item). Releasing a scope after it has held a real filled position is no longer
+undocumented or deferred: `close-execution` implements it via the `terminal_closed` durably-closed
+status this capability now releases a scope for, per the requirement above.
+
+#### Scenario: Shared ownership remains disclosed as deferred; post-fill release is no longer undocumented
+- **WHEN** this capability's behavior is documented
+- **THEN** the documentation states that multiple trade cycles sharing one physical scope is out of
+  scope and tracked separately
+- **AND** the documentation does not claim that releasing a scope after a fill is unimplemented or
+  left to a future capability
