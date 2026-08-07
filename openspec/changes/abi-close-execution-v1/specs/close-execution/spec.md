@@ -4,58 +4,65 @@
 Define how ABI executes a validated `DELETE .../open-position` command for one Runtime-owned
 `(strategy_instance_id, trade_cycle_id)` pair: proving its current entry order can no longer add
 exposure, closing whatever live position remainder actually exists, and durably terminalizing the
-trade cycle — releasing its physical scope only as a consequence of that durable write — before
-reporting success.
+trade cycle as `terminal_closed` — whether or not it ever actually held exposure — releasing its
+physical scope only as a consequence of that durable write, before reporting success.
 
 ## ADDED Requirements
 
 ### Requirement: The pair is classified before any exchange call
 ABI SHALL resolve, in this order and before any exchange call: an unknown pair returns
-`unknown_trade_cycle_binding`; a pair whose record is already durably closed — the same durably-closed
-condition `position-scope-exclusivity` uses to release a scope — returns `trade_cycle_closed` directly,
-with no exchange call and no ownership check. Every other pair SHALL have its ownership of the scope
-its own record names independently reconfirmed via the current scope-ownership state
-`position-scope-exclusivity` maintains; any outcome other than this exact pair owning that scope
-returns `internal_error`. A resolved scope outside this capability's supported exchange category
-returns `unsupported_exchange_scope` before any further step.
+`unknown_trade_cycle_binding`. A pair whose record status is already `terminal_unfilled` or
+`terminal_closed` returns `trade_cycle_closed` directly, with no exchange call and no further durable
+write — both already durably prove this capability's postconditions. A pair whose record status is
+`absent` also already durably proves both postconditions, but has not itself been committed as a
+terminally closed trade cycle; ABI SHALL durably commit it as `terminal_closed` — no exchange call is
+needed to do so — before returning `trade_cycle_closed`, so the same pair cannot later be resurrected
+by a new entry-package request. Every other pair SHALL have its ownership of the scope its own record
+names independently reconfirmed via the current scope-ownership state `position-scope-exclusivity`
+maintains; any outcome other than this exact pair owning that scope returns `internal_error`. A
+resolved scope outside this capability's supported exchange category returns
+`unsupported_exchange_scope` before any further step.
 
 #### Scenario: Unknown pair fails closed
 - **WHEN** no correlation record exists for the requested pair
 - **THEN** ABI returns `unknown_trade_cycle_binding`
 
-#### Scenario: A trade cycle that never held exposure is acknowledged without any exchange call
-- **WHEN** the requested pair's record durably proves no position was ever established
-- **THEN** ABI returns `trade_cycle_closed` without querying or writing to the exchange
-
 #### Scenario: An already terminally closed trade cycle is acknowledged idempotently
-- **WHEN** the requested pair's record is already durably terminally closed by a previous successful
-  close
-- **THEN** ABI returns `trade_cycle_closed` without querying or writing to the exchange
+- **WHEN** the requested pair's record status is already `terminal_unfilled` or `terminal_closed`
+- **THEN** ABI returns `trade_cycle_closed` without querying the exchange or writing anything further
+
+#### Scenario: A trade cycle that never held exposure is durably terminalized, not merely acknowledged
+- **WHEN** the requested pair's record status is `absent`
+- **THEN** ABI durably commits that record as `terminal_closed` without any exchange call, and only
+  then returns `trade_cycle_closed`
 
 #### Scenario: Confirmed self-ownership proceeds
-- **WHEN** a non-durably-closed pair currently owns the scope its own record names
+- **WHEN** a pair whose record is none of `absent`, `terminal_unfilled`, or `terminal_closed`
+  currently owns the scope its own record names
 - **THEN** ABI proceeds to neutralize its current entry order
 
 #### Scenario: An ownership mismatch fails closed
-- **WHEN** the scope named by a non-durably-closed pair's record is owned by a different pair, or by
-  no pair
+- **WHEN** the scope named by such a pair's record is owned by a different pair, or by no pair
 - **THEN** ABI returns `internal_error`
 
 ### Requirement: The pair's current entry order must be proven unable to increase the position before ABI measures or closes it
-Before reading or closing the live position, ABI SHALL establish that the pair's current entry
-order — if one is recorded — can no longer add to that position. When no current entry order is
-recorded, or it is already known terminal or fully filled, this is established without sending a
-cancel. When it is live, unfilled, or partially filled, ABI SHALL send a cancel and then confirm, over
-a bounded number of fresh attempts, that no live remainder of that order exists; a fill observed
-during that confirmation is not itself a failure. ABI SHALL NOT proceed to read or close the position
-while this remains unconfirmed, and any query failure or unresolved outcome within the bounded
-attempts fails the entire close request closed. ABI SHALL NOT cancel, query, or otherwise act on any
-order it cannot attribute to the requested pair's own current entry order, and SHALL NOT use an
-account-wide or symbol-wide cancel operation to establish this.
+For a pair that reaches this step, ABI SHALL treat a missing current entry order identity as
+contradictory correlation and fail the entire close request closed, since every record reaching this
+step is expected to carry one. When the current entry order is already known terminal or fully
+filled, ABI proceeds without sending a cancel. When it is live, unfilled, or partially filled, ABI
+SHALL send a cancel and then confirm, over a bounded number of fresh attempts, that no live remainder
+exists. That determination SHALL be made from the order's own terminal-or-live status, never from
+whether any quantity had filled before it reached that status — an order that reaches a terminal
+status with a nonzero executed quantity has no live remainder, exactly like one that reaches the same
+terminal status with none. ABI SHALL NOT proceed to read or close the position while this remains
+unconfirmed, and any query failure or unresolved outcome within the bounded attempts fails the entire
+close request closed. ABI SHALL NOT cancel, query, or otherwise act on any order it cannot attribute
+to the requested pair's own current entry order, and SHALL NOT use an account-wide or symbol-wide
+cancel operation to establish this.
 
-#### Scenario: No current entry order needs no cancel
-- **WHEN** the requested pair's record has no current entry order
-- **THEN** ABI proceeds directly to reading the live position
+#### Scenario: A missing current entry order identity is contradictory correlation
+- **WHEN** a pair reaches this step with no current entry order recorded
+- **THEN** ABI returns `internal_error` and does not read or close the live position
 
 #### Scenario: An already terminal or fully filled entry order needs no cancel
 - **WHEN** the current entry order is already known terminal or fully filled
@@ -63,24 +70,25 @@ account-wide or symbol-wide cancel operation to establish this.
 
 #### Scenario: A live or partially filled entry order is neutralized before ABI proceeds
 - **WHEN** the current entry order is live, unfilled, or partially filled
-- **THEN** ABI sends a cancel and confirms, before proceeding, that no live remainder of that order
-  exists
+- **THEN** ABI sends a cancel and confirms, before proceeding, that the order has reached a terminal
+  status with no live remainder
 
-#### Scenario: A fill observed during the cancel race does not block proceeding
-- **WHEN** the current entry order fills, fully or partially, while ABI is confirming its
-  cancellation
-- **THEN** ABI treats this as a fact to account for when it later reads the live position, not as a
-  failure of neutralization by itself
+#### Scenario: A terminal status with executed quantity still counts as neutralized
+- **WHEN** the current entry order's confirmed status is terminal but its executed quantity is
+  nonzero
+- **THEN** ABI treats it as having no live remainder, the same as a terminal status with no executed
+  quantity, and proceeds
 
 #### Scenario: Ambiguous neutralization blocks the entire close
-- **WHEN** ABI cannot confirm, within its bounded attempts, that the current entry order has no live
-  remainder
+- **WHEN** ABI cannot confirm, within its bounded attempts, that the current entry order has reached
+  a terminal status
 - **THEN** ABI returns `internal_error` and does not read or close the live position
 
 #### Scenario: Close never affects another pair's order
 - **WHEN** ABI neutralizes the requested pair's current entry order
 - **THEN** ABI does not cancel, query, or otherwise act on any order it cannot attribute to that exact
-  pair, even one sharing the same symbol or account
+  pair, even one sharing the same symbol or account, and does not use an account-wide or symbol-wide
+  cancel operation
 
 ### Requirement: The live position is read directly against the pair's owned scope, without a side-match restriction
 Once the current entry order is proven unable to increase the position, ABI SHALL determine the live
@@ -100,8 +108,8 @@ position on the pair's owned scope is in scope for closing regardless of its sid
 ### Requirement: Closing acts on the exact live remainder, or sends no write when none exists
 When the live position size is zero, ABI SHALL NOT send any close order. When it is greater than
 zero, ABI SHALL close exactly that live size, on that live side, as a reduce-only order against the
-pair's owned scope. ABI SHALL NOT source the close quantity or side from the trade cycle's originally
-intended entry or from any quantity ABI itself calculated at entry time.
+pair's owned scope, never a size or side sourced from the trade cycle's originally intended entry or
+from any quantity ABI itself calculated at entry time.
 
 #### Scenario: An already-zero position sends no close order
 - **WHEN** the live position size is zero
@@ -109,12 +117,8 @@ intended entry or from any quantity ABI itself calculated at entry time.
 
 #### Scenario: A live remainder is closed at its actual size and side
 - **WHEN** the live position size is greater than zero
-- **THEN** ABI sends a reduce-only close order for exactly that live size and that live side
-
-#### Scenario: The recorded intent never governs what is closed
-- **WHEN** the live position's size or side differs from the trade cycle's originally intended entry
-  or its calculated quantity
-- **THEN** ABI still closes exactly the live size and side, never the originally intended values
+- **THEN** ABI sends a reduce-only close order for exactly that live size and that live side, even
+  when it differs from the trade cycle's originally intended entry or calculated quantity
 
 ### Requirement: No write in this pipeline is acknowledged without passing the live-execution guard
 ABI SHALL NOT report `trade_cycle_closed` when the cancel of the current entry order, or the close
@@ -124,12 +128,16 @@ order, was skipped by the existing live-execution guard rather than actually sen
 - **WHEN** the live-execution guard reports that a cancel or close write was skipped rather than sent
 - **THEN** ABI returns `internal_error` and does not return `trade_cycle_closed`
 
-### Requirement: Success requires both postconditions freshly confirmed immediately before the terminal write
-ABI SHALL NOT perform the durable terminal write, and SHALL NOT report `trade_cycle_closed`, until it
-has confirmed — over a bounded number of fresh attempts, never by resending the close order — both
-that the live position size is zero and that the pair's current entry order has no live remainder,
-confirmed at this point in the pipeline rather than assumed from an earlier step alone. Exhausting the
-bounded attempts without confirming either fact fails the entire close closed.
+### Requirement: The durable terminal write is gated on freshly confirmed postconditions and precedes physical scope release
+Immediately before durably recording a pair reached through the full pipeline as `terminal_closed`,
+ABI SHALL confirm — over a bounded number of fresh attempts, never by resending the close order —
+both that the live position size is zero and that the pair's current entry order has no live
+remainder, confirmed at this point in the pipeline rather than assumed from an earlier step alone.
+Exhausting the bounded attempts without confirming either fails the entire close closed. The pair's
+physical scope SHALL be released only as a consequence of the terminal write completing — for this
+path or the `absent` shortcut alike — never before it; a crash or failure at any point before it
+completes SHALL leave the scope held by the same pair, exactly as if the close request had not been
+attempted.
 
 #### Scenario: A close order that only takes effect on a later bounded attempt still succeeds
 - **WHEN** a bounded verification attempt after the last one finds the position at zero, though an
@@ -141,25 +149,10 @@ bounded attempts without confirming either fact fails the entire close closed.
   verification query itself fails
 - **THEN** ABI does not return `trade_cycle_closed` or any other `2xx`
 
-#### Scenario: Bare order acceptance is not proof of the resulting position
-- **WHEN** the exchange has accepted the close order but ABI has not yet verified the resulting
-  position size
-- **THEN** ABI does not return `trade_cycle_closed`
-
-### Requirement: The durable terminal write precedes and gates physical scope release
-ABI SHALL durably record the trade cycle as terminally closed only after both postconditions in the
-preceding requirement are confirmed. The pair's physical scope SHALL be released only as a
-consequence of that durable write completing, never before it. A crash or failure at any point before
-that durable write completes SHALL leave the scope held by the same pair, exactly as if the close
-request had not been attempted.
-
-#### Scenario: Scope is not released before the durable write
+#### Scenario: Scope release never precedes the terminal write
 - **WHEN** both postconditions are confirmed but the durable terminal write has not yet completed
-- **THEN** the pair's physical scope is still held by that pair
-
-#### Scenario: Scope is released once the durable write completes
-- **WHEN** the durable terminal write completes
-- **THEN** the pair's physical scope becomes available to a different pair
+- **THEN** the pair's physical scope is still held by that pair; once the write completes, the scope
+  becomes available to a different pair
 
 #### Scenario: A crash before the durable write leaves the trade cycle re-closeable
 - **WHEN** ABI fails or restarts after confirming both postconditions but before the durable terminal
@@ -169,38 +162,36 @@ request had not been attempted.
 
 ### Requirement: A repeated close request is safely re-drivable without duplicating exchange effect
 ABI SHALL re-derive every fact this pipeline needs from durable state and live queries on every close
-request, rather than presuming a fact already established by an earlier attempt. A repeated request
-for a pair already terminally closed returns `trade_cycle_closed` from durable state alone; a repeated
-request for a pair still mid-close does not resend a cancel or a close order once the corresponding
-fact is already confirmed true, and fails closed rather than presuming success on genuine ambiguity.
+request, rather than presuming a fact already established by an earlier attempt.
 
 #### Scenario: Repeating after a completed close performs no exchange write
-- **WHEN** a `DELETE` request is repeated for a pair already terminally closed
-- **THEN** ABI returns `trade_cycle_closed` without sending any cancel or close order
+- **WHEN** a `DELETE` request is repeated for a pair already `terminal_closed` (whether reached via
+  the full pipeline or the `absent` promotion) or `terminal_unfilled`
+- **THEN** ABI returns `trade_cycle_closed` without sending any cancel or close order, and without
+  writing anything further
 
-#### Scenario: Repeating after a confirmed cancel does not cancel again
+#### Scenario: Repeating mid-close does not repeat an already-confirmed step
 - **WHEN** a `DELETE` request is repeated after the current entry order was already confirmed to have
-  no live remainder
-- **THEN** ABI does not send another cancel for that order
-
-#### Scenario: Repeating after a confirmed zero position does not send another close order
-- **WHEN** a `DELETE` request is repeated after the live position was already confirmed zero
-- **THEN** ABI does not send another close order
+  no live remainder, or after the live position was already confirmed zero
+- **THEN** ABI does not resend the corresponding cancel or close order for that already-confirmed fact
 
 #### Scenario: Genuine ambiguity on a repeat still fails closed
 - **WHEN** a repeated request cannot confirm a required fact within its bounded attempts
 - **THEN** ABI returns `internal_error` rather than presuming a prior attempt succeeded
 
-### Requirement: Same-pair commands are serialized; different pairs remain independent
-ABI SHALL serialize a close command against any concurrent entry-package or protection command for the
-same pair, so none observes another's partial state. Close commands for different pairs SHALL NOT be
-serialized against each other.
+### Requirement: Close introduces no new cross-pair serialization
+ABI SHALL NOT introduce any new lock or queue that serializes a close command for one pair against a
+command for a different pair. The existing per-pair lock this capability reuses (see the entry-package
+and protection commands it also serializes against) SHALL only ever hold across commands for the same
+pair. This does not override any unrelated, pre-existing serialization — such as the correlation
+store's own single-writer append ordering — that applies regardless of pair.
 
 #### Scenario: Same-pair commands never interleave
 - **WHEN** a close command and an entry-package or protection command for the same pair are submitted
   concurrently
 - **THEN** ABI processes them one at a time for that pair
 
-#### Scenario: Different pairs proceed independently
+#### Scenario: A different pair is not held by this capability's own locking
 - **WHEN** close commands for two pairs whose scopes differ are submitted concurrently
-- **THEN** neither pair's processing is made to wait on the other's by this capability
+- **THEN** neither pair's processing is made to wait on the other's by any lock this capability
+  introduces or reuses for per-pair serialization
