@@ -1,0 +1,403 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ABI Position Management API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/protection": {
+      "put": {
+        "operationId": "applyPositionProtection",
+        "summary": "Replace the protective stop/take state of an already-open, Runtime-owned trade cycle position",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProtectionRequest" },
+              "examples": {
+                "withTake": {
+                  "value": { "stop_price": "99000", "take_price": "103000" }
+                },
+                "stopOnly": {
+                  "value": { "stop_price": "99000", "take_price": null }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The requested protection has been verified as the position's actual current protection",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProtectionAppliedResponse" },
+                "examples": {
+                  "applied": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "protection_applied",
+                      "stop_price": "99000",
+                      "take_price": "103000"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MalformedJsonError" },
+                "example": { "error": { "code": "malformed_json", "message": "request body must be valid JSON" } }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UnsupportedMediaTypeError" },
+                "example": {
+                  "error": { "code": "unsupported_media_type", "message": "content-type must be application/json" }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Transport validation failed, no correlation record exists for the pair, the resolved scope's exchange category is out of scope, or the pair has no live position to protect",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProtectionBusinessError" },
+                "examples": {
+                  "validation_failed": {
+                    "value": {
+                      "error": {
+                        "code": "validation_failed",
+                        "message": "request validation failed",
+                        "details": [{ "path": "/stop_price", "message": "stop_price must be exact-decimal text" }]
+                      }
+                    }
+                  },
+                  "unknown_trade_cycle_binding": {
+                    "value": {
+                      "error": {
+                        "code": "unknown_trade_cycle_binding",
+                        "message": "no correlation record exists for the requested pair"
+                      }
+                    }
+                  },
+                  "unsupported_exchange_scope": {
+                    "value": {
+                      "error": {
+                        "code": "unsupported_exchange_scope",
+                        "message": "resolved position's exchange category is not supported"
+                      }
+                    }
+                  },
+                  "position_not_open": {
+                    "value": {
+                      "error": {
+                        "code": "position_not_open",
+                        "message": "no live position exists for the requested pair"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Ambiguous ownership, or the write could not be safely verified",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InternalError" },
+                "example": { "error": { "code": "internal_error", "message": "internal error" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position": {
+      "delete": {
+        "operationId": "closeTradeCyclePosition",
+        "summary": "Close 100% of the current remainder of an already-open, Runtime-owned trade cycle position",
+        "description": "Accepts no request body and no quantity, percentage, or close-fraction field of any kind: closing always means the full current remainder, as ABI determines it from the exchange, plus every order ABI attributes to the pair.",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pair's open position size is verified zero and no order ABI attributes to the pair remains active",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TradeCycleClosedResponse" },
+                "examples": {
+                  "closed": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "trade_cycle_closed"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A non-empty request body was sent, no correlation record exists for the pair, or the resolved scope's exchange category is out of scope",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CloseBusinessError" },
+                "examples": {
+                  "validation_failed": {
+                    "value": {
+                      "error": {
+                        "code": "validation_failed",
+                        "message": "request validation failed",
+                        "details": [{ "path": "/", "message": "request body must be empty" }]
+                      }
+                    }
+                  },
+                  "unknown_trade_cycle_binding": {
+                    "value": {
+                      "error": {
+                        "code": "unknown_trade_cycle_binding",
+                        "message": "no correlation record exists for the requested pair"
+                      }
+                    }
+                  },
+                  "unsupported_exchange_scope": {
+                    "value": {
+                      "error": {
+                        "code": "unsupported_exchange_scope",
+                        "message": "resolved position's exchange category is not supported"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Ambiguous ownership, incomplete or contradictory pair correlation, or the close could not be safely verified",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InternalError" },
+                "example": { "error": { "code": "internal_error", "message": "internal error" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ProtectionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stop_price", "take_price"],
+        "properties": {
+          "stop_price": { "type": "string", "format": "exact-decimal" },
+          "take_price": {
+            "oneOf": [{ "type": "string", "format": "exact-decimal" }, { "type": "null" }]
+          }
+        }
+      },
+      "ProtectionAppliedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["strategy_instance_id", "trade_cycle_id", "status", "stop_price", "take_price"],
+        "properties": {
+          "strategy_instance_id": { "type": "string", "minLength": 1 },
+          "trade_cycle_id": { "type": "string", "minLength": 1 },
+          "status": { "const": "protection_applied" },
+          "stop_price": { "type": "string", "format": "exact-decimal" },
+          "take_price": {
+            "oneOf": [{ "type": "string", "format": "exact-decimal" }, { "type": "null" }]
+          }
+        }
+      },
+      "TradeCycleClosedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["strategy_instance_id", "trade_cycle_id", "status"],
+        "properties": {
+          "strategy_instance_id": { "type": "string", "minLength": 1 },
+          "trade_cycle_id": { "type": "string", "minLength": 1 },
+          "status": { "const": "trade_cycle_closed" }
+        }
+      },
+      "ValidationDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "message"],
+        "properties": {
+          "path": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "MalformedJsonError": { "$ref": "#/components/schemas/MalformedJsonErrorEnvelope" },
+      "MalformedJsonErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "malformed_json" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "UnsupportedMediaTypeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "unsupported_media_type" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "ValidationFailedError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message", "details"],
+            "properties": {
+              "code": { "const": "validation_failed" },
+              "message": { "type": "string", "minLength": 1 },
+              "details": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/components/schemas/ValidationDetail" }
+              }
+            }
+          }
+        }
+      },
+      "UnknownTradeCycleBindingError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "unknown_trade_cycle_binding" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "UnsupportedExchangeScopeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "unsupported_exchange_scope" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "PositionNotOpenError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "position_not_open" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "ProtectionBusinessError": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ValidationFailedError" },
+          { "$ref": "#/components/schemas/UnknownTradeCycleBindingError" },
+          { "$ref": "#/components/schemas/UnsupportedExchangeScopeError" },
+          { "$ref": "#/components/schemas/PositionNotOpenError" }
+        ]
+      },
+      "CloseBusinessError": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ValidationFailedError" },
+          { "$ref": "#/components/schemas/UnknownTradeCycleBindingError" },
+          { "$ref": "#/components/schemas/UnsupportedExchangeScopeError" }
+        ]
+      },
+      "InternalError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "internal_error" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

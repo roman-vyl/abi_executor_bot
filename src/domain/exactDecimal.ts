@@ -117,3 +117,82 @@ export function compareDecimal(aText: string, bText: string): number {
   }
   return scaledA > scaledB ? 1 : -1;
 }
+
+// A canonical (sign, significant-digits, exponent) triple with no leading or
+// trailing zeros in the digit string — two exact-decimal strings denote the
+// same value iff their canonical triples are identical. Unlike parseDecimal,
+// this never scales one operand up to match the other's magnitude (no
+// `10n ** BigInt(hugeExponent)`), so it stays cheap no matter how large the
+// text's exponent field is: only the exponent *number* grows, never a
+// materialized power of ten.
+type ExactDecimalCanonicalForm =
+  | { zero: true }
+  | { zero: false; negative: boolean; digits: string; exponent: number };
+
+function canonicalizeExactDecimal(text: string): ExactDecimalCanonicalForm | undefined {
+  const match = EXACT_DECIMAL.exec(text);
+  const integerPart = match?.[2] ?? "";
+  const fractionPart = match?.[3] ?? "";
+
+  if (match === null || (integerPart === "" && fractionPart === "")) {
+    return undefined;
+  }
+
+  const negative = match[1] === "-";
+
+  let exponent = -fractionPart.length;
+  const exponentText = match[4];
+  if (exponentText !== undefined) {
+    const exponentField = Number.parseInt(exponentText, 10);
+    if (!Number.isSafeInteger(exponentField)) {
+      return undefined;
+    }
+    exponent += exponentField;
+  }
+
+  let digits = integerPart + fractionPart;
+  if (/^0*$/.test(digits)) {
+    return { zero: true };
+  }
+
+  let start = 0;
+  while (start < digits.length - 1 && digits[start] === "0") {
+    start += 1;
+  }
+  digits = digits.slice(start);
+
+  let end = digits.length;
+  while (end > 1 && digits[end - 1] === "0") {
+    end -= 1;
+    exponent += 1;
+  }
+  digits = digits.slice(0, end);
+
+  if (!Number.isSafeInteger(exponent)) {
+    return undefined;
+  }
+
+  return { zero: false, negative, digits, exponent };
+}
+
+// Total (never throws) numeric equality over the full exact-decimal grammar
+// isExactDecimalText accepts, including exponents far outside
+// MAX_ABS_EXPONENT's arithmetic bound — comparison never needs to scale
+// either operand by 10^exponent, so no such bound applies here. Formatting
+// differences (trailing zeros, a leading '+', an equivalent exponent form)
+// never affect the result; a malformed or unparseable operand makes the
+// comparison false rather than throwing.
+export function decimalEquals(aText: string, bText: string): boolean {
+  const a = canonicalizeExactDecimal(aText);
+  const b = canonicalizeExactDecimal(bText);
+
+  if (a === undefined || b === undefined) {
+    return false;
+  }
+
+  if (a.zero || b.zero) {
+    return a.zero && b.zero;
+  }
+
+  return a.negative === b.negative && a.digits === b.digits && a.exponent === b.exponent;
+}
