@@ -1,5 +1,8 @@
 import type { Server } from "node:http";
 
+import type { EventLevel } from "../observability/events.js";
+import { emitEvent } from "../observability/events.js";
+
 type ProcessSignal = "SIGTERM" | "SIGINT";
 
 type ProcessLike = {
@@ -7,18 +10,15 @@ type ProcessLike = {
   exit(code?: number): never;
 };
 
-type LoggerLike = {
-  log(message: string): void;
-  error(message: string): void;
-};
+type EmitLike = (level: EventLevel, event: string, fields?: Record<string, unknown>) => void;
 
 export function installShutdownHandlers(input: {
   server: Pick<Server, "close">;
   processLike?: ProcessLike;
-  logger?: LoggerLike;
+  emit?: EmitLike;
 }): void {
   const processLike = input.processLike ?? process;
-  const logger = input.logger ?? console;
+  const emit = input.emit ?? emitEvent;
   let shuttingDown = false;
 
   const shutdown = (signal: ProcessSignal): void => {
@@ -27,14 +27,14 @@ export function installShutdownHandlers(input: {
     }
 
     shuttingDown = true;
-    logger.log(`Received ${signal}; shutting down Abi HTTP server`);
+    emit("info", "shutdown_started", { signal });
     input.server.close((error?: Error) => {
       if (error) {
-        logger.error(`Abi HTTP server shutdown failed: ${error.message}`);
+        emit("error", "shutdown_failed", { signal, reason: error.message });
         processLike.exit(1);
       }
 
-      logger.log("Abi HTTP server closed");
+      emit("info", "shutdown_completed", { signal });
       processLike.exit(0);
     });
   };

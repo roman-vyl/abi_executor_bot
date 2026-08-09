@@ -3,10 +3,16 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 
-import { internalErrorResult, openPositionClosedResult } from "../../src/domain/openPositionApi.js";
+import {
+  internalErrorResult,
+  openPositionClosedResult,
+  openPositionOpenResult,
+  unknownTradeCycleBindingResult,
+} from "../../src/domain/openPositionApi.js";
 import type { OpenPositionHttpResult } from "../../src/domain/openPositionApi.js";
 import type { OpenPositionResolutionServicePort } from "../../src/routes/openPositionRoutes.js";
 import { handleOpenPositionRoutes, matchOpenPositionRoute } from "../../src/routes/openPositionRoutes.js";
+import { captureWrites, parseEvents } from "../fakes/captureProcessWrites.js";
 
 const notReadyResolutionService: OpenPositionResolutionServicePort = {
   resolve(): Promise<OpenPositionHttpResult> {
@@ -146,6 +152,103 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
   );
   assert.deepEqual(response.body(), internalErrorResult().body);
   assert.equal(response.status(), 500);
+});
+
+test("an open position result emits operation_started then operation_completed with outcome position_open, both info", async () => {
+  const resolutionService: OpenPositionResolutionServicePort = {
+    async resolve(): Promise<OpenPositionHttpResult> {
+      return openPositionOpenResult({ firstFillAtMs: 1, averageEntryPrice: "100" });
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handleOpenPositionRoutes({
+      request: makeRequest("GET", route()),
+      response: makeResponse().response,
+      resolutionService,
+      isReady: () => true,
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0);
+  const events = parseEvents(stdout.lines);
+  assert.deepEqual(
+    events.map((event) => event.event),
+    ["operation_started", "operation_completed"],
+  );
+  assert.equal(events[0].operation, "open_position");
+  assert.equal(events[0].strategy_instance_id, "instance");
+  assert.equal(events[0].trade_cycle_id, "cycle");
+  assert.equal(events[1].level, "info");
+  assert.equal(events[1].outcome, "position_open");
+  assert.equal(events[1].strategy_instance_id, "instance");
+  assert.equal(events[1].trade_cycle_id, "cycle");
+});
+
+test("a handled business-negative result (unknown_trade_cycle_binding) stays operation_completed, not failed", async () => {
+  const resolutionService: OpenPositionResolutionServicePort = {
+    async resolve(): Promise<OpenPositionHttpResult> {
+      return unknownTradeCycleBindingResult();
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handleOpenPositionRoutes({
+      request: makeRequest("GET", route()),
+      response: makeResponse().response,
+      resolutionService,
+      isReady: () => true,
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0, "no error-level event for a handled business-negative outcome");
+  const events = parseEvents(stdout.lines);
+  const terminal = events.find((event) => event.event === "operation_completed" || event.event === "operation_failed");
+  assert.equal(terminal?.event, "operation_completed");
+  assert.equal(terminal?.outcome, "unknown_trade_cycle_binding");
+});
+
+test("an uncaught exception from resolve() emits operation_failed at error level and is still mapped to a safe internal_error response", async () => {
+  const resolutionService: OpenPositionResolutionServicePort = {
+    async resolve(): Promise<OpenPositionHttpResult> {
+      throw new Error("unexpected boom");
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  const response = makeResponse();
+  try {
+    await handleOpenPositionRoutes({
+      request: makeRequest("GET", route()),
+      response: response.response,
+      resolutionService,
+      isReady: () => true,
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(response.status(), 500);
+  assert.deepEqual(response.body(), internalErrorResult().body);
+
+  assert.equal(parseEvents(stdout.lines).length, 1, "only operation_started goes to stdout");
+  const failedEvents = parseEvents(stderr.lines);
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0].event, "operation_failed");
+  assert.equal(failedEvents[0].level, "error");
+  assert.equal(failedEvents[0].outcome, "internal_error");
 });
 
 function route(): string {

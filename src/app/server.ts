@@ -6,6 +6,7 @@ import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCo
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
+import { emitEvent } from "../observability/events.js";
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
 import { CloseApplicationService } from "../services/close/closeApplicationService.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
@@ -13,6 +14,7 @@ import { OpenPositionResolutionService } from "../services/openPosition/openPosi
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import { writeJson } from "./http.js";
+import { replayCorrelationStore } from "./lifecycleEvents.js";
 import { installShutdownHandlers } from "./shutdown.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
@@ -74,18 +76,7 @@ export function startServer(config: AbiConfig): void {
   // Correlation-store replay runs asynchronously so account/system routes can
   // come up before entry-package state is ready; entry-package and position
   // management routes fail closed until readiness flips true.
-  void correlationRepository
-    .replay()
-    .then((result) => {
-      if (result.ok) {
-        readiness.markReady();
-      } else {
-        readiness.markNotReady(result.reason);
-      }
-    })
-    .catch((error: unknown) => {
-      readiness.markNotReady(error instanceof Error ? error.message : "correlation replay failed");
-    });
+  void replayCorrelationStore(correlationRepository, readiness);
 
   const server = createServer(async (request, response) => {
     if (await handleSystemRoutes({ request, response, config, entryPackageReady: readiness.isReady })) {
@@ -136,7 +127,7 @@ export function startServer(config: AbiConfig): void {
   });
 
   server.listen(config.port, config.host, () => {
-    console.log(`Abi service listening on ${config.host}:${config.port}`);
+    emitEvent("info", "server_listening", { host: config.host, port: config.port });
   });
 
   installShutdownHandlers({ server });

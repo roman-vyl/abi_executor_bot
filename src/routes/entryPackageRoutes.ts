@@ -10,6 +10,7 @@ import {
   validationFailedResult,
 } from "../domain/entryPackageApi.js";
 import type { EntryPackageCommand, EntryPackageHttpResult, EntryPackageValidationDetail } from "../domain/entryPackageApi.js";
+import { classifyStatusResult, withOperationEvents } from "../observability/events.js";
 
 // Narrow structural port, not the concrete class: entryPackageRoutes.ts must
 // not touch correlation state, Bybit, or the mutex directly — it only knows
@@ -95,7 +96,15 @@ async function handleEntryPackageRoutesSafely(
     return true;
   }
 
-  const result = await applicationService.apply(validation.command);
+  const result = await withOperationEvents(
+    {
+      operation: "entry_package",
+      strategyInstanceId: validation.command.strategyInstanceId,
+      tradeCycleId: validation.command.tradeCycleId,
+    },
+    () => applicationService.apply(validation.command),
+    (httpResult) => classifyStatusResult(httpResult.body),
+  );
   writeResult(response, result);
   return true;
 }

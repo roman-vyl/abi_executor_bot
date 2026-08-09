@@ -18,6 +18,7 @@ import {
   matchCloseRoute,
   matchProtectionRoute,
 } from "../../src/routes/positionManagementRoutes.js";
+import { captureWrites, parseEvents } from "../fakes/captureProcessWrites.js";
 
 // A route-level test never needs a real ProtectionApplicationService — only
 // something that satisfies the narrow port. Throws if called from a test
@@ -311,6 +312,142 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
   assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
   assert.equal(response.status(), 500);
   assert.deepEqual(response.body(), internalErrorResult().body);
+});
+
+test("a successful protection apply() emits operation_started then operation_completed, both info, with identifiers", async () => {
+  const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
+    "content-type": "application/json",
+  });
+  const response = makeResponse();
+  const service = new FakeProtectionApplicationService();
+  service.result = {
+    statusCode: 200,
+    body: {
+      strategy_instance_id: "instance",
+      trade_cycle_id: "cycle",
+      status: "protection_applied",
+      stop_price: "99000",
+      take_price: "103000",
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ protectionApplicationService: service }),
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0);
+  const events = parseEvents(stdout.lines);
+  assert.deepEqual(
+    events.map((event) => event.event),
+    ["operation_started", "operation_completed"],
+  );
+  assert.equal(events[0].operation, "protection");
+  assert.equal(events[0].strategy_instance_id, "instance");
+  assert.equal(events[0].trade_cycle_id, "cycle");
+  assert.equal(events[1].level, "info");
+  assert.equal(events[1].outcome, "protection_applied");
+});
+
+test("a handled business-negative protection result (position_not_open) stays operation_completed, not failed", async () => {
+  const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
+    "content-type": "application/json",
+  });
+  const response = makeResponse();
+  const service = new FakeProtectionApplicationService();
+  service.result = {
+    statusCode: 422,
+    body: { error: { code: "position_not_open", message: "no live position exists for the requested pair" } },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ protectionApplicationService: service }),
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0, "no error-level event for a handled business-negative outcome");
+  const terminal = parseEvents(stdout.lines).find(
+    (event) => event.event === "operation_completed" || event.event === "operation_failed",
+  );
+  assert.equal(terminal?.event, "operation_completed");
+  assert.equal(terminal?.outcome, "position_not_open");
+});
+
+test("a typed, normally-returned internal_error protection result emits operation_failed at error level", async () => {
+  const request = makeRequest("PUT", protectionRoute(), JSON.stringify(validProtectionBody()), {
+    "content-type": "application/json",
+  });
+  const response = makeResponse();
+  const service = new FakeProtectionApplicationService();
+  service.result = internalErrorResult();
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ protectionApplicationService: service }),
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stdout.lines).length, 1, "only operation_started goes to stdout");
+  const failedEvents = parseEvents(stderr.lines);
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0].event, "operation_failed");
+  assert.equal(failedEvents[0].level, "error");
+  assert.equal(failedEvents[0].outcome, "internal_error");
+});
+
+test("a successful close apply() emits operation_started then operation_completed with outcome trade_cycle_closed", async () => {
+  const request = makeRequest("DELETE", closeRoute(), "", {});
+  const response = makeResponse();
+  const service = new FakeCloseApplicationService();
+  service.result = {
+    statusCode: 200,
+    body: { strategy_instance_id: "instance", trade_cycle_id: "cycle", status: "trade_cycle_closed" },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ closeApplicationService: service }),
+    });
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0);
+  const events = parseEvents(stdout.lines);
+  assert.deepEqual(
+    events.map((event) => event.event),
+    ["operation_started", "operation_completed"],
+  );
+  assert.equal(events[0].operation, "close_position");
+  assert.equal(events[1].outcome, "trade_cycle_closed");
 });
 
 function protectionRoute(): string {

@@ -4,6 +4,7 @@ import { writeJson } from "../app/http.js";
 import type { EntryPackageValidationDetail } from "../domain/entryPackageApi.js";
 import { decodeOpaquePathValue, internalErrorResult, validationFailedResult } from "../domain/openPositionApi.js";
 import type { OpenPositionHttpResult } from "../domain/openPositionApi.js";
+import { classifyOpenPositionResult, withOperationEvents } from "../observability/events.js";
 
 // Narrow structural port, not the concrete class: openPositionRoutes.ts must
 // not touch correlation state or Bybit directly — it only knows how to hand
@@ -66,10 +67,13 @@ async function handleOpenPositionRoutesSafely(
     return true;
   }
 
-  const result = await resolutionService.resolve({
-    strategyInstanceId: match.strategyInstanceId as string,
-    tradeCycleId: match.tradeCycleId as string,
-  });
+  const strategyInstanceId = match.strategyInstanceId as string;
+  const tradeCycleId = match.tradeCycleId as string;
+  const result = await withOperationEvents(
+    { operation: "open_position", strategyInstanceId, tradeCycleId },
+    () => resolutionService.resolve({ strategyInstanceId, tradeCycleId }),
+    (httpResult) => classifyOpenPositionResult(httpResult.body),
+  );
   writeResult(response, result);
   return true;
 }

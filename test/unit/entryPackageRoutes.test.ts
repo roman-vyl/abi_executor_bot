@@ -10,6 +10,7 @@ import {
   handleEntryPackageRoutes,
   matchEntryPackageRoute,
 } from "../../src/routes/entryPackageRoutes.js";
+import { captureWrites, parseEvents } from "../fakes/captureProcessWrites.js";
 
 const notReadyApplicationService: EntryPackageApplicationServicePort = {
   apply(): Promise<EntryPackageHttpResult> {
@@ -281,6 +282,68 @@ test("applicationService failures still map through internalErrorResult when ret
 
   assert.equal(response.status(), 500);
   assert.equal(response.body().error.code, "internal_error");
+});
+
+test("a successful apply() emits operation_started then operation_completed, both info, with strategy/trade-cycle identifiers", async () => {
+  const applicationService: EntryPackageApplicationServicePort = {
+    async apply(command: EntryPackageCommand): Promise<EntryPackageHttpResult> {
+      return {
+        statusCode: 200,
+        body: {
+          strategy_instance_id: command.strategyInstanceId,
+          trade_cycle_id: command.tradeCycleId,
+          status: "entry_package_absent",
+        },
+      };
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await invokeRoute({ ticker: "BTCUSDT.P", desired_entry: null, risk_multiplier: "1" }, undefined, applicationService, () => true);
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stderr.lines).length, 0);
+  const events = parseEvents(stdout.lines);
+  assert.deepEqual(
+    events.map((event) => event.event),
+    ["operation_started", "operation_completed"],
+  );
+  assert.equal(events[0].operation, "entry_package");
+  assert.equal(events[0].strategy_instance_id, "instance");
+  assert.equal(events[0].trade_cycle_id, "cycle");
+  assert.equal(events[1].level, "info");
+  assert.equal(events[1].outcome, "entry_package_absent");
+  assert.equal(events[1].strategy_instance_id, "instance");
+  assert.equal(events[1].trade_cycle_id, "cycle");
+});
+
+test("a typed, normally-returned internal_error result from apply() emits operation_failed at error level, not operation_completed", async () => {
+  const applicationService: EntryPackageApplicationServicePort = {
+    async apply(): Promise<EntryPackageHttpResult> {
+      return internalErrorResult();
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    await invokeRoute(makePackagePayload(), undefined, applicationService, () => true);
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(parseEvents(stdout.lines).length, 1, "only operation_started goes to stdout");
+  const failedEvents = parseEvents(stderr.lines);
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0].event, "operation_failed");
+  assert.equal(failedEvents[0].level, "error");
+  assert.equal(failedEvents[0].outcome, "internal_error");
 });
 
 async function invokeRoute(

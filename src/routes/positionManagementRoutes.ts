@@ -13,6 +13,7 @@ import {
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
 import type { CloseCommand, PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
+import { classifyStatusResult, withOperationEvents } from "../observability/events.js";
 
 // Narrow structural port, not the concrete class: this route must not touch
 // correlation state, Bybit, or the mutex directly — it only knows how to
@@ -129,7 +130,15 @@ async function handleProtection(
     return;
   }
 
-  const result = await protectionApplicationService.apply(validation.command);
+  const result = await withOperationEvents(
+    {
+      operation: "protection",
+      strategyInstanceId: validation.command.strategyInstanceId,
+      tradeCycleId: validation.command.tradeCycleId,
+    },
+    () => protectionApplicationService.apply(validation.command),
+    (httpResult) => classifyStatusResult(httpResult.body),
+  );
   writeResult(response, result);
 }
 
@@ -172,7 +181,15 @@ async function handleClose(
     return;
   }
 
-  const result = await closeApplicationService.apply(validation.command);
+  const result = await withOperationEvents(
+    {
+      operation: "close_position",
+      strategyInstanceId: validation.command.strategyInstanceId,
+      tradeCycleId: validation.command.tradeCycleId,
+    },
+    () => closeApplicationService.apply(validation.command),
+    (httpResult) => classifyStatusResult(httpResult.body),
+  );
   writeResult(response, result);
 }
 
