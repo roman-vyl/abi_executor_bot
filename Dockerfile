@@ -24,4 +24,4 @@ RUN mkdir -p /app/var
 
 EXPOSE 8787
 
-CMD ["npm", "run", "start:prod"]
+CMD ["node", "dist/app/index.js"]
