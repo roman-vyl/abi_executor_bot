@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyCloseResult,
+  classifyEntryPackageResult,
   classifyOpenPositionResult,
-  classifyStatusResult,
+  classifyProtectionResult,
   emitEvent,
   withOperationEvents,
 } from "../../src/observability/events.js";
@@ -76,19 +78,85 @@ test("error events go to stderr, not stdout", () => {
   assert.equal(parsed.level, "error");
 });
 
-test("classifyStatusResult: a status body is completed, never failed", () => {
-  const result = classifyStatusResult({ status: "entry_package_applied" });
+test("caller-supplied reserved fields never override the canonical envelope at runtime", () => {
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    // A real caller cannot express this — the TypeScript boundary rejects
+    // reserved keys in `fields` (see events.typeTests.ts). This proves the
+    // runtime guarantee holds independently, for any value that reaches
+    // emitEvent by bypassing that boundary (an `any`-typed or externally
+    // sourced object).
+    const hostileFields = {
+      timestamp: "1999-01-01T00:00:00.000Z",
+      level: "info",
+      service: "not_abi_executor_bot",
+      event: "hijacked_event",
+      outcome: "internal_error",
+    } as unknown as Record<string, never>;
+
+    emitEvent("error", "operation_failed", hostileFields);
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(stdout.lines.length, 0, "canonical level=error must route to stderr, never stdout");
+  assert.equal(stderr.lines.length, 1);
+
+  const parsed = JSON.parse(stderr.lines[0]) as Record<string, unknown>;
+  assert.equal(parsed.level, "error", "canonical level wins over the caller-supplied level");
+  assert.equal(parsed.service, "abi_executor_bot", "canonical service wins over the caller-supplied service");
+  assert.equal(parsed.event, "operation_failed", "canonical event wins over the caller-supplied event");
+  assert.notEqual(parsed.timestamp, "1999-01-01T00:00:00.000Z", "canonical timestamp wins over the caller-supplied one");
+  assert.equal(parsed.outcome, "internal_error", "non-reserved fields still pass through");
+});
+
+test("a hostile fields object claiming level=error cannot smuggle a fake error event onto stdout", () => {
+  const stdout = captureWrites(process.stdout);
+  const stderr = captureWrites(process.stderr);
+  try {
+    const hostileFields = { level: "error" } as unknown as Record<string, never>;
+    emitEvent("info", "operation_completed", hostileFields);
+  } finally {
+    stdout.restore();
+    stderr.restore();
+  }
+
+  assert.equal(stderr.lines.length, 0, "canonical level=info must route to stdout, never stderr");
+  assert.equal(stdout.lines.length, 1);
+  const parsed = JSON.parse(stdout.lines[0]) as Record<string, unknown>;
+  assert.equal(parsed.level, "info");
+});
+
+test("classifyEntryPackageResult: a status body is completed, never failed", () => {
+  const result = classifyEntryPackageResult({ status: "entry_package_applied" });
   assert.deepEqual(result, { outcome: "entry_package_applied", failed: false });
 });
 
-test("classifyStatusResult: an internal_error error body is failed", () => {
-  const result = classifyStatusResult({ error: { code: "internal_error" } });
+test("classifyEntryPackageResult: an internal_error error body is failed", () => {
+  const result = classifyEntryPackageResult({ error: { code: "internal_error" } });
   assert.deepEqual(result, { outcome: "internal_error", failed: true });
 });
 
-test("classifyStatusResult: a handled business-negative error body stays completed", () => {
-  const result = classifyStatusResult({ error: { code: "position_not_open" } });
+test("classifyProtectionResult: a handled business-negative error body stays completed", () => {
+  const result = classifyProtectionResult({ error: { code: "position_not_open" } });
   assert.deepEqual(result, { outcome: "position_not_open", failed: false });
+});
+
+test("classifyProtectionResult: protection_applied is completed", () => {
+  const result = classifyProtectionResult({ status: "protection_applied" });
+  assert.deepEqual(result, { outcome: "protection_applied", failed: false });
+});
+
+test("classifyCloseResult: trade_cycle_closed is completed", () => {
+  const result = classifyCloseResult({ status: "trade_cycle_closed" });
+  assert.deepEqual(result, { outcome: "trade_cycle_closed", failed: false });
+});
+
+test("classifyCloseResult: unsupported_exchange_scope stays completed, not failed", () => {
+  const result = classifyCloseResult({ error: { code: "unsupported_exchange_scope" } });
+  assert.deepEqual(result, { outcome: "unsupported_exchange_scope", failed: false });
 });
 
 test("classifyOpenPositionResult maps the boolean success body to position_open/position_closed", () => {
@@ -109,7 +177,7 @@ test("withOperationEvents: success emits started then exactly one completed, bot
     const result = await withOperationEvents(
       { operation: "entry_package", strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" },
       async () => ({ status: "entry_package_applied" as const }),
-      classifyStatusResult,
+      classifyEntryPackageResult,
     );
     assert.deepEqual(result, { status: "entry_package_applied" });
   } finally {
@@ -140,7 +208,7 @@ test("withOperationEvents: a typed, normally-returned internal_error result is o
     await withOperationEvents(
       { operation: "protection", strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" },
       async () => ({ error: { code: "internal_error" } as const }),
-      classifyStatusResult,
+      classifyProtectionResult,
     );
   } finally {
     stdout.restore();
@@ -162,7 +230,7 @@ test("withOperationEvents: a handled business-negative typed result stays operat
     await withOperationEvents(
       { operation: "protection", strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" },
       async () => ({ error: { code: "position_not_open" } as const }),
-      classifyStatusResult,
+      classifyProtectionResult,
     );
   } finally {
     stdout.restore();
@@ -211,7 +279,7 @@ test("withOperationEvents: never emits both operation_completed and operation_fa
     await withOperationEvents(
       { operation: "close_position", strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" },
       async () => ({ status: "trade_cycle_closed" as const }),
-      classifyStatusResult,
+      classifyCloseResult,
     );
   } finally {
     stdout.restore();

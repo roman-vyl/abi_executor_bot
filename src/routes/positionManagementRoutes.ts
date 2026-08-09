@@ -13,7 +13,7 @@ import {
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
 import type { CloseCommand, PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
-import { classifyStatusResult, withOperationEvents } from "../observability/events.js";
+import { classifyCloseResult, classifyProtectionResult, withOperationEvents } from "../observability/events.js";
 
 // Narrow structural port, not the concrete class: this route must not touch
 // correlation state, Bybit, or the mutex directly — it only knows how to
@@ -137,7 +137,7 @@ async function handleProtection(
       tradeCycleId: validation.command.tradeCycleId,
     },
     () => protectionApplicationService.apply(validation.command),
-    (httpResult) => classifyStatusResult(httpResult.body),
+    (httpResult) => classifyProtectionResult(httpResult.body),
   );
   writeResult(response, result);
 }
@@ -188,7 +188,7 @@ async function handleClose(
       tradeCycleId: validation.command.tradeCycleId,
     },
     () => closeApplicationService.apply(validation.command),
-    (httpResult) => classifyStatusResult(httpResult.body),
+    (httpResult) => classifyCloseResult(httpResult.body),
   );
   writeResult(response, result);
 }
