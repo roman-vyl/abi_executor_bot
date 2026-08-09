@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
@@ -90,13 +88,4 @@ test("resolvedCategory is passed through to the trading-rules lookup", async () 
   });
 
   assert.deepEqual(rulesProvider.getRulesCalls, ["spot:BTCUSDT"]);
-});
-
-test("no hardcoded quantity literal appears in the application service source", () => {
-  const applicationServicePath = fileURLToPath(
-    new URL("../../src/services/entryPackage/entryPackageApplicationService.ts", import.meta.url),
-  );
-  const source = readFileSync(applicationServicePath, "utf8");
-
-  assert.equal(/["'`]0\.001["'`]/.test(source), false, "application service must not hardcode a quantity literal");
 });

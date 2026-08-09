@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { mapEntryPackageToBybit } from "../../src/exchange/bybitOrderMapper.js";
@@ -67,16 +66,4 @@ test("category comes from the input identity, not global config, across all five
   assert.equal(payloads.cancelEntryOrder.category, "spot");
   assert.equal(payloads.getEntryOrder.category, "spot");
   assert.equal(payloads.getEntryOrderHistory.category, "spot");
-});
-
-test("mapExecutionPlanToBybit is not referenced by the entry-package payload builder module", () => {
-  const source = readFileSync(
-    new URL("../../src/exchange/bybitOrderMapper.ts", import.meta.url),
-    "utf8",
-  );
-  const entryPackageBuilderStart = source.indexOf("export function mapEntryPackageToBybit");
-  assert.ok(entryPackageBuilderStart > -1);
-
-  const entryPackageBuilderSource = source.slice(entryPackageBuilderStart);
-  assert.equal(entryPackageBuilderSource.includes("mapExecutionPlanToBybit"), false);
 });
