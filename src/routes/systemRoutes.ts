@@ -13,8 +13,8 @@ export async function handleSystemRoutes(input: {
   const { request, response, config, entryPackageReady } = input;
 
   if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, {
-      ok: true,
+    writeJson(response, entryPackageReady ? 200 : 503, {
+      ok: entryPackageReady,
       host: config.host,
       port: config.port,
       dryRun: config.dryRun,

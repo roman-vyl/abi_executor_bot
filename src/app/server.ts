@@ -13,6 +13,7 @@ import { OpenPositionResolutionService } from "../services/openPosition/openPosi
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import { writeJson } from "./http.js";
+import { installShutdownHandlers } from "./shutdown.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
 import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
@@ -138,4 +139,6 @@ export function startServer(config: AbiConfig): void {
   server.listen(config.port, config.host, () => {
     console.log(`Abi service listening on ${config.host}:${config.port}`);
   });
+
+  installShutdownHandlers({ server });
 }
