@@ -41,9 +41,8 @@ export type ValidatedOpenPositionRow = {
   // legitimately reported as a numeric zero (e.g. "0.00"), so a strict
   // positivity check here would wrongly fail this query for any position
   // without protection set. A missing or malformed value is simply omitted
-  // rather than failing the whole row; only protection-execution's own
-  // read-back reads these fields today (protection-execution design.md
-  // Decision 6).
+  // rather than failing the whole row; protection read-back is the only
+  // current caller that consumes these fields.
   stopLoss?: string;
   takeProfit?: string;
 };
@@ -78,8 +77,7 @@ export type PlaceMarketOrderInput = {
 // never a partial patch (position-management-api's contract requires
 // stop_price on every request and take_price null-or-positive). "0" is
 // Bybit's own convention on this endpoint for "remove this leg" — callers
-// pass it explicitly rather than an optional/absent field (protection-
-// execution design.md Decision 5).
+// pass it explicitly rather than an optional/absent field.
 export type SetTradingStopInput = {
   category: string;
   symbol: string;
@@ -172,7 +170,7 @@ export class RestBybitAdapter implements BybitAdapter {
   // Explicit { category, symbol } in, a structurally valid one-way row, "no
   // position", or a typed failure out — never `position_open: false` on a
   // query failure. Does not know or check any trade-specific desired side;
-  // that plausibility check belongs to the caller (design.md Decision 4/5).
+  // that plausibility check belongs to the caller.
   async queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult> {
     let response: unknown;
     try {
@@ -215,7 +213,7 @@ export class RestBybitAdapter implements BybitAdapter {
   // getOrderByLinkId's /v5/order/realtime cannot see an order that has
   // already fully filled and closed, been rejected, or been terminated by
   // the exchange — those leave the realtime set. This queries the durable
-  // order-history endpoint instead (design.md §10).
+  // order-history endpoint instead.
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     return this.signedGet(
       "/v5/order/history",
@@ -229,7 +227,7 @@ export class RestBybitAdapter implements BybitAdapter {
   }
 
   // Public, unauthenticated — unlike every other bybitAdapter.ts method, this
-  // one is intentionally not signed (design.md §7).
+  // one is intentionally not signed.
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
     const params = new URLSearchParams({
       category,
@@ -264,8 +262,7 @@ export class RestBybitAdapter implements BybitAdapter {
 
   // Position-level protection write, not an order amend — replaces the
   // whole current stop-loss/take-profit state for the position
-  // (positionIdx=0, tpslMode=Full), never a delta (protection-execution
-  // design.md Decision 5).
+  // (positionIdx=0, tpslMode=Full), never a delta.
   async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
     return this.signedPost("/v5/position/trading-stop", {
       category: input.category,
@@ -469,10 +466,10 @@ function readOpenPosition(response: unknown): BybitPosition | null {
 }
 
 // Strictly validates Bybit's documented /v5/position/list envelope for
-// queryPositionForInstrument (design.md Decision 4). Deliberately does not
-// reuse readBybitList()'s lenient fallback-to-[] behavior, which would let a
-// genuinely malformed response silently masquerade as "no position" — the
-// exact failure mode this function exists to prevent.
+// queryPositionForInstrument. Deliberately does not reuse readBybitList()'s
+// lenient fallback-to-[] behavior, which would let a genuinely malformed
+// response silently masquerade as "no position" — the exact failure mode this
+// function exists to prevent.
 //
 // A symbol-scoped, one-way-mode V1 query is expected to return exactly one
 // row for the queried instrument (Bybit's flat-position placeholder row when

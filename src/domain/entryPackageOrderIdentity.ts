@@ -4,7 +4,7 @@ export type EntryPackageOrderRole = "entry";
 
 // Bybit documents a 36-character limit on orderLinkId. The `abi-ep-` prefix
 // (7 chars) + a 20-character hex digest stays comfortably under that limit,
-// matching the pattern already used by the legacy buildOrderLinkId.
+// while keeping the identifier deterministic from pair, role, and generation.
 export function buildEntryPackageOrderLinkId(
   strategyInstanceId: string,
   tradeCycleId: string,

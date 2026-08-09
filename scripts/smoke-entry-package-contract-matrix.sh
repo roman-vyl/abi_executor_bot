@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Additive entry-package smoke script, mirroring smoke-contract-matrix-fake.sh's
-# structure (start a fake server, drive a request sequence, verify the
-# expected event log) without modifying that file or any legacy script.
+# Entry-package smoke script: start a fake server, drive a request sequence,
+# and verify the expected event log without touching a real Bybit account.
 #
-# Runs against the fake entry-package smoke server, not a real Bybit account:
-# production Bybit calls for entry-package remain blocked on the
-# abi-exchange-instrument-identity-v1 prerequisite (proposal.md, design.md
-# Decision 9), so this exercises the apply/replace/cancel request contract
-# and sequencing, not real exchange behavior.
+# The fake server records apply/replace/cancel requests so this exercises the
+# request contract and sequencing, not real exchange behavior.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 port="${FAKE_ABI_PORT:-18788}"

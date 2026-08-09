@@ -12,7 +12,7 @@ import { decodeOrderQueryResponse } from "./orderQueryResponseDecoder.js";
 
 // Starting point matches verifyPostCreateProtection.ts's existing
 // bounded-retry mechanics (2 attempts / 300ms); tunable independently since
-// this component's classification differs (design.md §10).
+// this component's classification differs from protection read-back.
 const CONFIRMATION_ATTEMPTS = 2;
 const CONFIRMATION_RETRY_DELAY_MS = 300;
 
@@ -50,20 +50,18 @@ export type CancelConfirmationOutcome =
 
 // A REST query result is a genuine three-state outcome. Collapsing
 // "queried and found nothing" and "the query itself failed" into a single
-// undefined, as an earlier version of this module did, made a transient
-// network/auth failure indistinguishable from confirmed absence — which for
-// confirmEntryPackageCancelled meant a timeout could fabricate
-// entry_package_absent. query_failed must never be treated as evidence of
-// anything.
+// undefined would make a transient network/auth failure indistinguishable
+// from confirmed absence — which for confirmEntryPackageCancelled could
+// fabricate entry_package_absent. query_failed must never be treated as
+// evidence of anything.
 type QueryResult =
   | { status: "found"; item: BybitOrderView }
   | { status: "not_found" }
   | { status: "query_failed" };
 
 // Bounded field-accuracy confirmation for a just-sent create/amend. Never
-// returns success on partial confirmation (audit §26); on full or partial
-// fill it returns only an aggregate observation, never a reconstructed fill
-// history (design.md §10).
+// returns success on partial field confirmation; on full or partial fill it
+// returns only an aggregate observation, never a reconstructed fill history.
 export async function confirmEntryPackage(input: {
   bybit: BybitAdapter;
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
@@ -92,7 +90,7 @@ export async function confirmEntryPackage(input: {
       // through to history below) marks this attempt inconclusive before
       // the history fallback runs. A positively-found order must never be
       // discarded into "not_found" solely because history later reports
-      // clean-empty (design.md's unknown/terminal order status correction).
+      // clean-empty.
       sawInconclusiveFinding = true;
 
       if (FILLED_STATUSES.has(item.orderStatus)) {
@@ -115,7 +113,7 @@ export async function confirmEntryPackage(input: {
         continue;
       }
       // A realtime item reporting a terminal or unrecognized status falls
-      // through to the order-history fallback below (design.md §10).
+      // through to the order-history fallback below.
     }
 
     const history = await queryOrderView(
@@ -209,18 +207,17 @@ export async function confirmEntryPackageCancelled(input: {
   return { kind: "ambiguous" };
 }
 
-// abi-close-execution-v1: close's neutralization needs a strictly different
-// question than confirmEntryPackageCancelled answers. That function folds
-// any observed fill — full or partial — into "filled_before_cancel",
-// correct for entry-package's own null-desired-entry (CANCEL) flow, which
-// must refuse to fabricate absence once any fill is observed regardless of
-// the order's own status. Close needs "can no further quantity fill,"
-// which for the order type ABI creates is answered by the order's own
-// terminal-vs-live status alone: a terminal status (fully filled, or
-// cancelled/rejected/deactivated) has no live remainder no matter how much
-// quantity executed before it got there; only a live status (new/
-// untriggered/triggered, or a still-open partially-filled state) can still
-// add exposure. This reuses the same query/decode building blocks above
+// Close neutralization needs a strictly different question than
+// confirmEntryPackageCancelled answers. That function folds any observed fill
+// — full or partial — into "filled_before_cancel", correct for entry-package's
+// own null-desired-entry (CANCEL) flow, which must refuse to fabricate absence
+// once any fill is observed regardless of the order's own status. Close needs
+// "can no further quantity fill," which for the order type ABI creates is
+// answered by the order's own terminal-vs-live status alone: a terminal status
+// (fully filled, or cancelled/rejected/deactivated) has no live remainder no
+// matter how much quantity executed before it got there; only a live status
+// (new/untriggered/triggered, or a still-open partially-filled state) can
+// still add exposure. This reuses the same query/decode building blocks above
 // rather than a second confirmation architecture, and does not change
 // confirmEntryPackageCancelled or its callers.
 export type EntryOrderTerminality = { kind: "terminal" } | { kind: "live" } | { kind: "ambiguous" };
@@ -417,6 +414,6 @@ async function queryOrderView(
   }
   // protocol_failure: a structurally malformed or identity-mismatched
   // response proves nothing, so it is folded into the same query_failed
-  // bucket a transport exception lands in (design.md).
+  // bucket a transport exception lands in.
   return { status: "query_failed" };
 }

@@ -23,9 +23,9 @@ export interface PositionSizeCalculator {
 }
 
 // V1 sizing: calculated_quantity = max(qty_by_min, qty_by_notional), both
-// rounded up to qty_step, exact-decimal throughout (design.md §8). This is a
-// genuinely minimum-executable quantity, not a hardcoded literal — but it is
-// still not real risk-based sizing.
+// rounded up to qty_step, exact-decimal throughout. This is a genuinely
+// minimum-executable quantity, not a hardcoded literal — but it is still not
+// real risk-based sizing.
 export class FixedMinimumPositionSizeCalculator implements PositionSizeCalculator {
   private readonly rulesProvider: InstrumentTradingRulesProvider;
 
@@ -43,7 +43,7 @@ export class FixedMinimumPositionSizeCalculator implements PositionSizeCalculato
     void ticker;
     void initialStopPrice;
     // V1 placeholder boundary: risk_multiplier is accepted and threaded
-    // through the port but does not yet vary this formula (design.md §8).
+    // through the port but does not yet vary this formula.
     void riskMultiplier;
 
     const rules = await this.rulesProvider.getRules(context.resolvedSymbol, context.resolvedCategory);

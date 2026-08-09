@@ -40,8 +40,8 @@ export type EntryPackageApplicationServiceDeps = {
   // the ownership check + durable claim write — never across a Bybit call
   // or a confirmation retry. No code path acquires `mutex` while holding
   // `scopeMutex`. This fixed ordering is what makes the two locks
-  // deadlock-free by construction (position-scope-exclusivity design.md
-  // Decisions 4-5) — preserve it if either lock's call sites ever change.
+  // deadlock-free by construction; preserve it if either lock's call sites
+  // ever change.
   scopeMutex: KeyedMutex;
   // Resolves a Runtime ticker into its Bybit exchange instrument identity
   // (symbol, category, product). Only ever called for a new generation
@@ -51,9 +51,8 @@ export type EntryPackageApplicationServiceDeps = {
 };
 
 // Orchestrates APPLY / REPLACE / CANCEL / confirm-absent for a validated
-// entry-package command (design.md §11). Owns nothing else: the HTTP route
-// only calls this service and never touches correlation state, Bybit, or
-// the mutex directly.
+// entry-package command. Owns nothing else: the HTTP route only calls this
+// service and never touches correlation state, Bybit, or the mutex directly.
 export class EntryPackageApplicationService {
   private readonly deps: EntryPackageApplicationServiceDeps;
 
@@ -101,11 +100,11 @@ export class EntryPackageApplicationService {
       return this.absentResult(command);
     }
 
-    // A trade cycle close-execution has terminally closed is not downgraded
+    // A trade cycle that close handling has terminally closed is not downgraded
     // back to absent by a cancel-intent request — that would strip the
     // resurrection protection its terminal_closed status exists to provide
-    // (abi-close-execution-v1 design.md Decision 6). No order exists to
-    // cancel either way, so this only ever acknowledges absence.
+    // for the same pair. No order exists to cancel either way, so this only
+    // ever acknowledges absence.
     if (record.status === "terminal_closed") {
       return this.absentResult(command);
     }
@@ -213,11 +212,11 @@ export class EntryPackageApplicationService {
       current_binding_started_at: currentBindingStartedAt,
     };
 
-    // Scope-level guard (position-scope-exclusivity design.md Decisions
-    // 3, 6): whichever pair reaches this scope's provisional write first
-    // durably claims it. The scope lock is held only for the check + this
-    // one write, never across the Bybit call below — repeating the mutex
-    // mistake already fixed once for the pair-lock would be a regression.
+    // Scope-level guard: whichever pair reaches this scope's provisional
+    // write first durably claims it. The scope lock is held only for the
+    // ownership check + this one write, never across the Bybit call below;
+    // holding it across external I/O would block unrelated pairs that only
+    // need to prove or claim the same physical scope.
     const claim = await this.deps.scopeMutex.withKeyLock(
       positionScopeKey(identity.category, identity.symbol),
       async (): Promise<"claimed" | "conflict"> => {
@@ -228,10 +227,11 @@ export class EntryPackageApplicationService {
           return "conflict";
         }
 
-        // Durable write before any exchange call (design.md §11 step 4d).
-        // This write both claims the scope (via the repository's live
-        // byScope update) and remains the existing pre-exchange-call
-        // record — no separate reservation write is introduced.
+        // Durable write before any exchange call: ABI must persist the
+        // intended binding and scope ownership before causing an external
+        // side effect. This write both claims the scope (via the repository's
+        // live byScope update) and remains the pre-exchange-call record — no
+        // separate reservation write is introduced.
         await this.deps.correlationRepository.save(provisional);
         return "claimed";
       },
@@ -241,8 +241,7 @@ export class EntryPackageApplicationService {
       // Another pair already holds this physical scope and has not
       // durably proven it no longer can. Fail closed before any exchange
       // write; no correlation write happens for this attempt, and no new
-      // public error code is introduced (position-scope-exclusivity
-      // design.md Decision 9).
+      // public error code is introduced for this internal ownership conflict.
       return internalErrorResult();
     }
 

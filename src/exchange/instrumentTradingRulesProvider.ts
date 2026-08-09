@@ -17,7 +17,7 @@ type CacheEntry = {
 // Lazy per-resolved-symbol lookup with an in-memory TTL cache. A lookup
 // failure for one symbol must fail only the command that requested it
 // (thrown here, mapped to internal_error by the application service) — it
-// must never be treated as a whole-service readiness failure (design.md §7).
+// must never be treated as a whole-service readiness failure.
 export class BybitInstrumentTradingRulesProvider implements InstrumentTradingRulesProvider {
   private readonly bybit: BybitAdapter;
   private readonly ttlMs: number;

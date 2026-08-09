@@ -1,6 +1,6 @@
 // Resolves a canonical Runtime ticker into the Bybit exchange instrument
 // identity it maps to. Deterministic and local: no network I/O, no
-// registry, no per-symbol configuration (design.md Decisions 1/4).
+// registry, no per-symbol configuration.
 const SPOT_PATTERN = /^[A-Z0-9]+$/;
 const LINEAR_PATTERN = /^[A-Z0-9]+\.P$/;
 
@@ -30,8 +30,7 @@ export class ExchangeInstrumentResolutionError extends Error {
 // Accepts only two ticker grammars: `[A-Z0-9]+` (spot) and `[A-Z0-9]+\.P`
 // (linear perpetual). Anything else — a non-trailing `.P`, a second
 // `.`-delimited segment, embedded whitespace, or empty input — fails
-// closed rather than resolving to a best-guess identity (design.md
-// Decision 1).
+// closed rather than resolving to a best-guess identity.
 export class BybitExchangeInstrumentResolver implements ExchangeInstrumentResolver {
   resolve(ticker: string): ExchangeInstrumentIdentity {
     if (LINEAR_PATTERN.test(ticker)) {

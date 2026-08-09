@@ -30,9 +30,9 @@ type StatusBucket = "durably_closed" | "live_query_admissible" | "unresolved";
 // The discriminated outcome of determining whether a given record's
 // physical scope currently holds a live position, independent of any HTTP
 // response shape — shared by this service's own GET .../open-position
-// wrapper (resolve()) and by protection-execution's live-position gate
-// (protection-execution design.md Decision 4), so Bybit position-envelope
-// validation and category/side-match rules are defined exactly once.
+// wrapper (resolve()) and by protection's live-position gate, so Bybit
+// position-envelope validation and category/side-match rules are defined
+// exactly once.
 export type PositionDetermination =
   | { kind: "open"; firstFillAtMs: number; averageEntryPrice: string }
   | { kind: "closed" }
@@ -40,15 +40,14 @@ export type PositionDetermination =
   | { kind: "error" };
 
 // Resolves a truthful, live current open-position answer for one
-// (strategy_instance_id, trade_cycle_id) pair (design.md Decisions 1-6).
+// (strategy_instance_id, trade_cycle_id) pair.
 //
-// V1 attribution operating precondition (design.md Decision 9): the live
-// Bybit query is scoped to category+symbol under the deployment's
-// configured API credentials and carries no Runtime/ABI order-binding
-// identity. The symbol+side check below is only a plausibility check
-// against the resolved record's own declared intent, not proof that the
-// reported exposure was caused by this record's own order. Correct
-// attribution for V1 depends on no overlapping manual or other-strategy
+// Attribution precondition: the live Bybit query is scoped to category+symbol
+// under the deployment's configured API credentials and carries no
+// Runtime/ABI order-binding identity. The symbol+side check below is only a
+// plausibility check against the resolved record's own declared intent, not
+// proof that the reported exposure was caused by this record's own order.
+// Correct attribution depends on no overlapping manual or other-strategy
 // exposure existing concurrently on the same exchange_symbol under those
 // credentials — this is not detected, enforced, or verified here.
 export class OpenPositionResolutionService {

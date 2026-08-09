@@ -39,7 +39,7 @@ export type ExpectedOrderIdentity = {
 
 // Pure decoder for a single `order/realtime` or `order/history` response,
 // scoped to the single-orderLinkId/limit=1 query shape both endpoints are
-// always called with (design.md). Never returns "not_found" for anything
+// always called with. Never returns "not_found" for anything
 // other than a structurally valid, correct-category, genuinely empty list —
 // every other malformed or identity-mismatched shape is "protocol_failure"
 // with a specific reason, so it can never be mistaken for a trustworthy

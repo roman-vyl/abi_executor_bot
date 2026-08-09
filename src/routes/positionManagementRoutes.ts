@@ -23,7 +23,7 @@ export type ProtectionApplicationServicePort = {
 };
 
 // Same narrow-port split as ProtectionApplicationServicePort above, for the
-// close pipeline (close-execution).
+// close pipeline.
 export type CloseApplicationServicePort = {
   apply(command: CloseCommand): Promise<PositionManagementHttpResult>;
 };
@@ -198,8 +198,8 @@ export function matchProtectionRoute(
 
   const details: EntryPackageValidationDetail[] = [];
   // Reused from openPositionApi.ts: same opaque-path decode-and-empty-check
-  // matchCloseRoute below already uses (design.md Decision 1) — both
-  // endpoints on this pair decode path identifiers identically.
+  // matchCloseRoute below already uses — both endpoints on this pair decode
+  // path identifiers identically.
   const strategyInstanceId = decodeOpaquePathValue(segments[3], "/path/strategy_instance_id", details);
   const tradeCycleId = decodeOpaquePathValue(segments[5], "/path/trade_cycle_id", details);
 
@@ -232,7 +232,7 @@ export function matchCloseRoute(
 
   const details: EntryPackageValidationDetail[] = [];
   // Reused from openPositionApi.ts: same opaque-path decode-and-empty-check
-  // this resource's existing GET already uses (design.md Decision 1).
+  // this resource's existing GET already uses.
   const strategyInstanceId = decodeOpaquePathValue(segments[3], "/path/strategy_instance_id", details);
   const tradeCycleId = decodeOpaquePathValue(segments[5], "/path/trade_cycle_id", details);
 
@@ -249,9 +249,9 @@ function pathSegments(requestUrl: string): string[] {
   return pathname.split("/");
 }
 
-// DELETE's body is required to be empty (spec: "ABI exposes a close endpoint
-// accepting only an empty body") — unlike readJsonBody, this never parses
-// JSON and never rejects an empty body; it only reports raw byte length.
+// DELETE's body is required to be empty. Unlike readJsonBody, this never
+// parses JSON and never rejects an empty body; it only reports raw byte
+// length.
 function readRawBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = "";

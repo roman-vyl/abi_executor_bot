@@ -20,10 +20,9 @@ import { classifyEntryOrderTerminality, confirmEntryOrderNeutralized } from "../
 // Bounded final verification that the live position has settled at zero
 // after a close order — a market close, unlike a position-level protection
 // write, is not guaranteed to settle by the time the placement call
-// returns (close-execution design.md Decision 9). Each attempt also
-// re-checks entry-order terminality; that fact is monotonic once
-// established, so this is a cheap single re-check per attempt, not a
-// second bounded sub-loop.
+// returns. Each attempt also re-checks entry-order terminality; that fact is
+// monotonic once established, so this is a cheap single re-check per attempt,
+// not a second bounded sub-loop.
 const FINAL_VERIFY_ATTEMPTS = 3;
 const FINAL_VERIFY_RETRY_DELAY_MS = 300;
 
@@ -31,18 +30,16 @@ export type CloseApplicationServiceDeps = {
   config: AbiConfig;
   bybit: BybitAdapter;
   correlationRepository: EntryPackageCorrelationRepository;
-  // The same per-pair lock entry-package and protection already use — see
-  // those services' own deps comments (close-execution design.md Decision
-  // 8). Not the scope-level lock: this service never claims a scope, only
-  // releases its own pair's, as a side effect of the durable terminal write.
+  // The same per-pair lock entry-package and protection already use. Not the
+  // scope-level lock: this service never claims a scope, only releases its
+  // own pair's, as a side effect of the durable terminal write.
   mutex: KeyedMutex;
 };
 
-// Executes an already-validated DELETE .../open-position command
-// (close-execution spec.md): classify the pair, neutralize its current
-// entry order, close the actual live remainder, verify both postconditions
-// fresh, and durably terminalize as terminal_closed before releasing the
-// pair's physical scope.
+// Executes an already-validated DELETE .../open-position command: classify
+// the pair, neutralize its current entry order, close the actual live
+// remainder, verify both postconditions fresh, and durably terminalize as
+// terminal_closed before releasing the pair's physical scope.
 export class CloseApplicationService {
   private readonly deps: CloseApplicationServiceDeps;
 
@@ -80,9 +77,8 @@ export class CloseApplicationService {
     // and no live order, but neither itself durably records that Runtime
     // asked to end the trade cycle via a close request — entry-package
     // execution's own null-desired-entry handling can otherwise resurrect
-    // either one with a later entry (close-execution design.md Decision 6).
-    // No exchange call is needed to justify the promotion; the write itself
-    // is not optional.
+    // either one with a later entry. No exchange call is needed to justify
+    // the promotion; the write itself is not optional.
     if (record.status === "absent" || record.status === "terminal_unfilled") {
       await this.deps.correlationRepository.save({
         ...record,
@@ -95,8 +91,8 @@ export class CloseApplicationService {
 
     const category = record.exchange_category;
     if (category !== "linear" && category !== "spot") {
-      // Unreachable while position-scope-exclusivity's own replay invariant
-      // holds — re-verified independently rather than assumed, mirroring
+      // Unreachable while correlation replay's scope invariant holds —
+      // re-verified independently rather than assumed, mirroring
       // protectionApplicationService's identical defensive check.
       return internalErrorResult();
     }
@@ -115,9 +111,8 @@ export class CloseApplicationService {
     }
 
     // A non-durably-closed record is always expected to carry a current
-    // entry order identity (close-execution design.md Decision 5) — a
-    // missing one here is contradictory correlation, not "nothing to
-    // neutralize".
+    // entry order identity — a missing one here is contradictory correlation,
+    // not "nothing to neutralize".
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
       return internalErrorResult();

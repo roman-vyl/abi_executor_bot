@@ -181,13 +181,12 @@ export function validateCloseCommand(path: {
   };
 }
 
-// The comparison confirmation uses (spec: "Protection confirmation requires
-// exact numeric equality, not exchange acceptance") — string formatting
-// differences (trailing zeros, leading '+') must not block confirmation,
-// only a genuine value change may. Delegates to exactDecimal.ts's
-// decimalEquals, which is total (never throws) and does not scale by
-// 10^exponent, so an arbitrarily large exponent never gets rejected as
-// "out of range" the way transport's own grammar never bounded it either.
+// Protection confirmation requires exact numeric equality, not mere exchange
+// acceptance: string formatting differences (trailing zeros, leading '+')
+// must not block confirmation, only a genuine value change may. Delegates to
+// exactDecimal.ts's decimalEquals, which is total (never throws) and does not
+// scale by 10^exponent, so an arbitrarily large exponent never gets rejected
+// as "out of range" the way transport's own grammar never bounded it either.
 export function isNumericallyEqualExactDecimal(a: string, b: string): boolean {
   return decimalEquals(a, b);
 }
@@ -199,8 +198,7 @@ export function isNumericallyEqualExactDecimal(a: string, b: string): boolean {
 // explicit flag that verification itself ran to completion — a caller that
 // hasn't finished verifying has no business calling this at all, but the
 // type still makes that state representable so it fails closed rather than
-// being assumed away (spec: "Protection confirmation requires exact numeric
-// equality, not exchange acceptance").
+// being assumed away.
 export type ProtectionConfirmation = {
   strategyInstanceId: string;
   tradeCycleId: string;
@@ -244,9 +242,9 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
   };
 }
 
-// The three minimal postconditions close's own success requirement names
-// (spec: "Close success means both postconditions are verified under
-// complete pair correlation") — all three must be independently verified
+// Close success requires all three postconditions to be verified under
+// complete pair correlation: zero position, no attributed active entry order,
+// and internally consistent correlation. All three must be independently
 // true, not merely absent/undefined, before a 2xx is possible.
 export type CloseConfirmation = {
   strategyInstanceId: string;
@@ -304,8 +302,8 @@ export function validationFailedResult(
   };
 }
 
-// Reused verbatim from abi-open-position-lookup-api (design.md Decision 1):
-// same code, same meaning, same HTTP status — not a parallel vocabulary.
+// Reused from open-position lookup: same code, same meaning, same HTTP
+// status — not a parallel vocabulary.
 export function unknownTradeCycleBindingResult(): PositionManagementHttpResult {
   return errorResult(422, "unknown_trade_cycle_binding", "no correlation record exists for the requested pair");
 }

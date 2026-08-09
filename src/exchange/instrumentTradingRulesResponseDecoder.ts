@@ -31,10 +31,10 @@ export type ExpectedInstrumentIdentity = {
 // Pure decoder for a single `instruments-info` response, scoped to the
 // `linear` lotSizeFilter shape (minOrderQty/qtyStep/minNotionalValue).
 // `spot`'s lotSizeFilter is a different schema (basePrecision/minOrderAmt)
-// and is rejected outright rather than parsed with linear's field names
-// (design.md). Numeric fields are validated with the same arithmetic-safe
-// `compareDecimal` parser sizing itself uses, not a grammar-only check, so
-// a decoded value can never later throw inside the sizing calculation.
+// and is rejected outright rather than parsed with linear's field names.
+// Numeric fields are validated with the same arithmetic-safe `compareDecimal`
+// parser sizing itself uses, not a grammar-only check, so a decoded value can
+// never later throw inside the sizing calculation.
 export function decodeInstrumentTradingRulesResponse(input: {
   response: unknown;
   expected: ExpectedInstrumentIdentity;

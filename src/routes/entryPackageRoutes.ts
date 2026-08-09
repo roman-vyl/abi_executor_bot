@@ -13,8 +13,7 @@ import type { EntryPackageCommand, EntryPackageHttpResult, EntryPackageValidatio
 
 // Narrow structural port, not the concrete class: entryPackageRoutes.ts must
 // not touch correlation state, Bybit, or the mutex directly — it only knows
-// how to hand a validated command to something that can apply() it
-// (design.md §11, tasks.md 8.5).
+// how to hand a validated command to something that can apply() it.
 export type EntryPackageApplicationServicePort = {
   apply(command: EntryPackageCommand): Promise<EntryPackageHttpResult>;
 };
@@ -91,7 +90,7 @@ async function handleEntryPackageRoutesSafely(
   if (!isReady()) {
     // Correlation-store replay hasn't completed (or failed) yet — fail
     // closed with the existing safe internal_error response rather than
-    // risk acting before durable state is recovered (design.md §13).
+    // risk acting before durable state is recovered.
     writeResult(response, internalErrorResult());
     return true;
   }

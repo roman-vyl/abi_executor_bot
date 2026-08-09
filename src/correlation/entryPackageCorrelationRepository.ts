@@ -16,7 +16,7 @@ export type CorrelationReplayResult = { ok: true } | { ok: false; reason: string
 // EntryPackageExecutionRecords. Not built on Journal: Journal's public query
 // surface is signal-shaped and its lenient corruption handling (skip and
 // continue) is wrong for a correctness-critical store, which here must fail
-// readiness on any non-final corruption instead (design.md §4).
+// readiness on any non-final corruption instead.
 export class EntryPackageCorrelationRepository {
   private readonly path: string;
   private readonly byCompositeKey = new Map<string, EntryPackageExecutionRecord>();
@@ -26,12 +26,12 @@ export class EntryPackageCorrelationRepository {
   // Unlike the two indexes above (append-only forever), this one has
   // release semantics and is maintained differently for live writes vs.
   // replay — see applyScopeClaimOnWrite() and rebuildScopeIndexFromReplay()
-  // (position-scope-exclusivity design.md Decisions 2 and 8).
+  // for the two ordering rules.
   private readonly byScope = new Map<string, EntryPackageExecutionRecord>();
 
   // FIFO queue serializing physical appends across all keys, since every
   // write shares one file. This is independent of the per-key business-logic
-  // mutex in src/concurrency/keyedMutex.ts (design.md §4).
+  // mutex in src/concurrency/keyedMutex.ts.
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(path: string) {
@@ -91,7 +91,7 @@ export class EntryPackageCorrelationRepository {
       // scope legitimately mid-transfer between two pairs before a later
       // line for the earlier pair resolves it, so per-line claim/release
       // would either false-positive on that intermediate moment or
-      // silently overwrite a still-active claim (design.md Decision 8).
+      // silently overwrite a still-active claim.
       this.indexRecord(parsed);
     }
 
@@ -120,8 +120,7 @@ export class EntryPackageCorrelationRepository {
   // The pair, if any, currently holding this physical scope. Callers
   // acquiring a new scope binding must serialize this read together with
   // the durable write that claims it under the scope-level KeyedMutex —
-  // this method itself performs no locking (position-scope-exclusivity
-  // design.md Decisions 2, 6).
+  // this method itself performs no locking.
   findOwnerByScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord | undefined {
     return this.byScope.get(positionScopeKey(category, symbol));
   }
@@ -136,8 +135,8 @@ export class EntryPackageCorrelationRepository {
     await task;
 
     this.indexRecord(record);
-    // Live-write-only scope claim/release (design.md Decision 2). Correct
-    // here specifically because live save() calls are already strictly
+    // Live-write-only scope claim/release. Correct here specifically because
+    // live save() calls are already strictly
     // ordered by the pair-lock and scope-lock, so this record is always
     // already the latest for its pair the instant this runs — unlike
     // replay, there is no later line still to arrive that could change the
@@ -176,7 +175,7 @@ export class EntryPackageCorrelationRepository {
 
   // Live-write scope claim/release. Never call this from replay() — see
   // rebuildScopeIndexFromReplay() for why the same per-line step is unsound
-  // there (design.md Decision 8).
+  // there.
   private applyScopeClaimOnWrite(record: EntryPackageExecutionRecord): void {
     if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
       return;
@@ -197,13 +196,12 @@ export class EntryPackageCorrelationRepository {
     }
   }
 
-  // Phase 2 of replay (design.md Decision 8): evaluated once, after every
-  // line has been indexed into byCompositeKey, using only each pair's
-  // final latest record — never an intermediate one a later line for the
-  // same pair has since superseded. byCompositeKey.values() yields exactly
-  // one record per pair, so a scope collision found here is necessarily
-  // between two *different* pairs' latest durable state, not a sequencing
-  // artifact.
+  // Phase 2 of replay: evaluated once, after every line has been indexed
+  // into byCompositeKey, using only each pair's final latest record — never
+  // an intermediate one a later line for the same pair has since superseded.
+  // byCompositeKey.values() yields exactly one record per pair, so a scope
+  // collision found here is necessarily between two different pairs' latest
+  // durable state, not a sequencing artifact.
   private rebuildScopeIndexFromReplay(): string | undefined {
     this.byScope.clear();
 

@@ -61,7 +61,7 @@ async function handleOpenPositionRoutesSafely(
     // Correlation-store replay hasn't completed (or failed) yet — fail
     // closed with the same safe internal_error response the entry-package
     // PUT route already uses for the same condition, rather than resolving
-    // against not-yet-recovered state (design.md Decision 8).
+    // against not-yet-recovered state.
     writeResult(response, internalErrorResult());
     return true;
   }

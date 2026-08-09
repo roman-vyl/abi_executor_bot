@@ -6,9 +6,8 @@ import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentR
 // of this type or its key — V1 has exactly one configured account per
 // process (config.ts) and supports only one-way mode (validated elsewhere,
 // e.g. open-position-resolution's positionIdx==0 check), so neither is a
-// dimension a scope key needs to vary over yet (position-scope-exclusivity
-// design.md Decision 1). Extending this type with an accountId is additive
-// if that V1 boundary is ever lifted.
+// dimension a scope key needs to vary over yet. Extending this type with an
+// accountId is additive if that V1 boundary is ever lifted.
 export type PositionScope = {
   category: ExchangeInstrumentCategory;
   symbol: string;

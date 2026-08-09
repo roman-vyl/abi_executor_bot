@@ -20,7 +20,7 @@ import type { OpenPositionResolutionService } from "../openPosition/openPosition
 
 // Reuses the same bounded-retry shape packageConfirmation.ts already uses
 // elsewhere in ABI: a small fixed number of fresh re-reads, never a repeated
-// write (protection-execution design.md Decision 6).
+// write.
 const READ_BACK_ATTEMPTS = 2;
 const READ_BACK_RETRY_DELAY_MS = 300;
 
@@ -30,13 +30,11 @@ export type ProtectionApplicationServiceDeps = {
   correlationRepository: EntryPackageCorrelationRepository;
   // Serializes protection commands against entry-package commands for the
   // same pair — the identical instance and key space
-  // EntryPackageApplicationService already uses (design.md Decision 7). Not
-  // the scope-level lock: protection only reads scope ownership, never
-  // claims or releases it.
+  // EntryPackageApplicationService already uses. Not the scope-level lock:
+  // protection only reads scope ownership, never claims or releases it.
   mutex: KeyedMutex;
-  // Reused for the live-position gate (design.md Decision 4) so Bybit
-  // position-envelope validation, category restriction, and side matching
-  // are defined exactly once.
+  // Reused for the live-position gate so Bybit position-envelope validation,
+  // category restriction, and side matching are defined exactly once.
   openPositionResolutionService: OpenPositionResolutionService;
 };
 
@@ -48,8 +46,7 @@ type ReadBackMatch = {
 // Executes an already-validated PUT .../protection command: durable-absence
 // shortcut, independent scope-ownership re-verification, the shared
 // live-position gate, the Bybit write, and a bounded read-back before
-// reporting success (protection-execution spec.md). Writes nothing to the
-// correlation store.
+// reporting success. Writes nothing to the correlation store.
 export class ProtectionApplicationService {
   private readonly deps: ProtectionApplicationServiceDeps;
 
@@ -78,17 +75,16 @@ export class ProtectionApplicationService {
     }
 
     // A durably absent pair's scope may already belong to a different pair
-    // — an ownership lookup must not run before this check (design.md
-    // Decision 2).
+    // — an ownership lookup must not run before this check.
     if (isDurablyClosedEntryPackageStatus(record.status)) {
       return positionNotOpenResult();
     }
 
     const category = record.exchange_category;
     if (category !== "linear" && category !== "spot") {
-      // Empty category on a non-durably-closed record is impossible under
-      // position-scope-exclusivity's own replay invariant; fail closed
-      // rather than call findOwnerByScope with an invalid value.
+      // Empty category on a non-durably-closed record contradicts the
+      // correlation replay invariant; fail closed rather than call
+      // findOwnerByScope with an invalid value.
       return internalErrorResult();
     }
 
@@ -98,9 +94,8 @@ export class ProtectionApplicationService {
       owner.strategy_instance_id !== command.strategyInstanceId ||
       owner.trade_cycle_id !== command.tradeCycleId
     ) {
-      // Should be unreachable while position-scope-exclusivity's invariant
-      // holds — re-verified independently rather than assumed (design.md
-      // Decision 3).
+      // Should be unreachable while scope ownership is internally
+      // consistent — re-verified independently rather than assumed.
       return internalErrorResult();
     }
 
@@ -124,7 +119,7 @@ export class ProtectionApplicationService {
         symbol: record.exchange_symbol,
         stopLoss: command.stopPrice,
         // "0" is Bybit's own convention for "remove this leg" on
-        // /v5/position/trading-stop (design.md Decision 5).
+        // /v5/position/trading-stop.
         takeProfit: command.takePrice ?? "0",
       },
     });
@@ -170,9 +165,9 @@ export class ProtectionApplicationService {
 
 // A confirmed leg reading as numeric zero satisfies an accepted
 // take_price: null — Bybit reports an unset leg as a numeric zero (e.g.
-// "0.00"), not necessarily the string the write used (design.md Decision
-// 6). Returns undefined when this attempt does not yet confirm the accepted
-// values, so the caller can retry within its bounded budget.
+// "0.00"), not necessarily the string the write used. Returns undefined
+// when this attempt does not yet confirm the accepted values, so the caller
+// can retry within its bounded budget.
 function evaluateReadBack(
   row: Pick<ValidatedOpenPositionRow, "stopLoss" | "takeProfit">,
   acceptedStopPrice: string,

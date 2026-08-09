@@ -16,12 +16,11 @@ export type EntryPackageExecutionStatus =
 // bucket) and physical-scope release share: a binding in any of these
 // statuses is durably proven to admit no position and no order that
 // could still produce one, without needing a live exchange query. Shared
-// here rather than left as independently-maintained sets
-// (position-scope-exclusivity design.md Decision 10). `terminal_closed`
-// (abi-close-execution-v1) additionally means the trade cycle was
-// explicitly and provably ended by a close request — unlike `absent` and
-// `terminal_unfilled`, entry-package execution never lets it be resurrected
-// by a later entry-package request for the same pair.
+// here rather than left as independently-maintained sets. `terminal_closed`
+// additionally means the trade cycle was explicitly and provably ended by a
+// close request — unlike `absent` and `terminal_unfilled`, entry-package
+// execution never lets it be resurrected by a later entry-package request
+// for the same pair.
 export function isDurablyClosedEntryPackageStatus(
   status: EntryPackageExecutionStatus,
 ): status is "absent" | "terminal_unfilled" | "terminal_closed" {

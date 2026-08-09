@@ -28,9 +28,9 @@ export function startServer(config: AbiConfig): void {
   const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
   const mutex = new KeyedMutex();
   // Serializes physical-position-scope acquisition across different pairs
-  // (position-scope-exclusivity design.md Decision 4) — a distinct
-  // instance from `mutex` above, always acquired second/inner, never
-  // acquired while `mutex` is not already held for the same request.
+  // with a distinct instance from `mutex` above. It is always acquired
+  // second/inner, never while `mutex` is not already held for the same
+  // request.
   const scopeMutex = new KeyedMutex();
   const readiness = new EntryPackageReadiness();
   const exchangeInstrumentResolver = new BybitExchangeInstrumentResolver();
@@ -51,9 +51,8 @@ export function startServer(config: AbiConfig): void {
   });
 
   // Reuses the same pair-level `mutex` (not `scopeMutex`) and the same
-  // live-position determination as openPositionResolutionService — see
-  // protectionApplicationService.ts's own deps comments
-  // (protection-execution design.md Decisions 4, 7).
+  // live-position determination as openPositionResolutionService; protection
+  // never claims or releases physical scopes.
   const protectionApplicationService = new ProtectionApplicationService({
     config,
     bybit,
@@ -64,8 +63,7 @@ export function startServer(config: AbiConfig): void {
 
   // Reuses the same pair-level `mutex`, never `scopeMutex` — release of a
   // pair's own scope happens as a side effect of its durable terminal write,
-  // not through the scope-acquisition lock (close-execution design.md
-  // Decision 8).
+  // not through the scope-acquisition lock.
   const closeApplicationService = new CloseApplicationService({
     config,
     bybit,
@@ -73,8 +71,9 @@ export function startServer(config: AbiConfig): void {
     mutex,
   });
 
-  // Correlation-store replay runs asynchronously and must not delay
-  // server.listen() for account routes (design.md §13).
+  // Correlation-store replay runs asynchronously so account/system routes can
+  // come up before entry-package state is ready; entry-package and position
+  // management routes fail closed until readiness flips true.
   void correlationRepository
     .replay()
     .then((result) => {

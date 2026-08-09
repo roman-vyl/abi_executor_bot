@@ -264,7 +264,7 @@ export type ExactDecimalClassification = {
 // parser) used wherever a caller needs sign/zero facts about exact-decimal
 // text without doing arithmetic on it — notably bybitAdapter.ts's typed
 // query boundary, which must never throw on adversarial or malformed field
-// values (design.md Decision 4).
+// values.
 export function classifyExactDecimalText(value: string): ExactDecimalClassification {
   const result = analyzeExactDecimalText(value);
   return {
@@ -286,8 +286,7 @@ export function isPositiveExactDecimalText(value: string): boolean {
 // Same grammar as isExactDecimalText, additionally rejecting a negative
 // value while still accepting exact zero (e.g. "0", "-0") — used by the
 // Bybit position-size check, which must treat a missing/unparseable/negative
-// size as a failure but a genuine zero as a valid flat row (design.md
-// Decision 4).
+// size as a failure but a genuine zero as a valid flat row.
 export function isNonNegativeExactDecimalText(value: string): boolean {
   const result = classifyExactDecimalText(value);
   return result.valid && (!result.negative || result.zero);

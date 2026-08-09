@@ -102,7 +102,7 @@ export function internalErrorResult(): OpenPositionHttpResult {
 // Mirrors entryPackageRoutes.ts's decodePathValue, extended with the
 // empty-after-decoding check inline: this route has no request body to
 // carry a second validation phase, so percent-decoding and the emptiness
-// check for each opaque path segment both happen here (design.md Decision 7).
+// check for each opaque path segment both happen here.
 export function decodeOpaquePathValue(
   value: string,
   path: string,
