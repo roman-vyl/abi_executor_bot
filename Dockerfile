@@ -20,7 +20,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
-RUN mkdir -p /app/var && chown -R node:node /app
+RUN mkdir -p /app/var && chown node:node /app/var
 
 USER node
 

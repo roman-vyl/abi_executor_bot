@@ -37,13 +37,19 @@ The base compose file sets `ABI_DRY_RUN=true`, `ABI_LIVE_TRADING_ENABLED=false`,
 the entry-package correlation store lives inside the container (see below).
 
 The container process runs as the non-root `node` user (uid/gid 1000, built into the
-`node:20-bookworm-slim` base image), not root. Before the first run, make sure the host `./var`
-directory is writable by that uid, otherwise correlation-store creation/append/replay fails:
+`node:20-bookworm-slim` base image), not root. Only `/app/var` is owned by that user inside the
+image; application code and dependencies stay root-owned and merely readable. The host `./var`
+directory (bind-mounted to `/app/var`) needs to be writable by uid/gid 1000, otherwise
+correlation-store creation/append/replay fails. On a Linux host this may require an explicit:
 
 ```bash
 mkdir -p var
 chown 1000:1000 var
 ```
+
+On Docker Desktop (macOS/Windows), bind-mount ownership goes through the
+virtualization/file-sharing layer, and a numeric `chown` is usually not needed — only run it if
+you actually hit a permission error on first start.
 
 Container logs are structured: every ABI-controlled line is one JSON object
 (`timestamp`/`level`/`service`/`event` plus event-specific fields), not free text.
@@ -53,11 +59,13 @@ docker compose logs -f abi
 ```
 
 A normal startup emits, among others, `service_starting`, `correlation_replay_started`,
-`correlation_replay_succeeded`, `readiness_ready`, and `server_listening` — the container can be
-running and accepting connections before `readiness_ready` fires, which is exactly what
-`/health` (and the container healthcheck) gates on. A graceful `docker compose stop` emits
-`shutdown_started` then `shutdown_completed`. Error-level events (`level: "error"`) go to
-stderr; everything else goes to stdout.
+`correlation_replay_succeeded`/`correlation_replay_failed`, `readiness_ready`/`readiness_failed`,
+and `server_listening`. Correlation-store replay runs asynchronously relative to the HTTP server
+starting to listen, so the relative order between `server_listening` and the replay/readiness
+events is not a guaranteed contract — the container can already be accepting connections before
+`readiness_ready` fires, which is exactly what `/health` (and the container healthcheck) gates
+on. A graceful `docker compose stop` emits `shutdown_started` then `shutdown_completed`.
+Error-level events (`level: "error"`) go to stderr; everything else goes to stdout.
 
 For an explicit demo-live override:
 

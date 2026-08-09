@@ -981,12 +981,16 @@ closes HTTP server
 exits through normal shutdown path
 ```
 
-Correlation state остаётся в host-mounted `./var` и не является частью image layer. Так как container process работает под non-root `node` (uid/gid 1000), host-каталог `./var` должен быть writable этим uid до первого запуска:
+Correlation state остаётся в host-mounted `./var` и не является частью image layer. Container process работает под non-root `node` (uid/gid 1000), поэтому host-каталог `./var` должен быть writable этим uid/gid.
+
+На Linux host с обычным bind mount это может потребовать явного ownership:
 
 ```bash
 mkdir -p var
 chown 1000:1000 var
 ```
+
+На Docker Desktop (macOS/Windows) bind-mount ownership проходит через virtualization/file-sharing layer, и predварительный numeric `chown` обычно не требуется — используй его только если реально столкнулся с permission error при первом запуске.
 
 Для explicit demo workflow используется отдельный Compose override и local environment file; operational details находятся в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
