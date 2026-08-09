@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "test": "bash scripts/run-tests.sh",
-    "validate:openapi": "node scripts/validate-entry-package-openapi.mjs",
+    "validate:openapi": "node scripts/validate-openapi.mjs",
     "archive:project": "bash scripts/archive-project.sh",
     "smoke:sandbox:read": "bash scripts/smoke-testnet-readonly.sh",
     "smoke:entry-package:fake": "bash scripts/smoke-entry-package-contract-matrix.sh",
