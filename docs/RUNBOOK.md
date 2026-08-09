@@ -36,6 +36,29 @@ The base compose file sets `ABI_DRY_RUN=true`, `ABI_LIVE_TRADING_ENABLED=false`,
 `BYBIT_ENV=testnet`, and requires no Bybit keys. It mounts `./var` to `/app/var`, which is where
 the entry-package correlation store lives inside the container (see below).
 
+The container process runs as the non-root `node` user (uid/gid 1000, built into the
+`node:20-bookworm-slim` base image), not root. Before the first run, make sure the host `./var`
+directory is writable by that uid, otherwise correlation-store creation/append/replay fails:
+
+```bash
+mkdir -p var
+chown 1000:1000 var
+```
+
+Container logs are structured: every ABI-controlled line is one JSON object
+(`timestamp`/`level`/`service`/`event` plus event-specific fields), not free text.
+
+```bash
+docker compose logs -f abi
+```
+
+A normal startup emits, among others, `service_starting`, `correlation_replay_started`,
+`correlation_replay_succeeded`, `readiness_ready`, and `server_listening` — the container can be
+running and accepting connections before `readiness_ready` fires, which is exactly what
+`/health` (and the container healthcheck) gates on. A graceful `docker compose stop` emits
+`shutdown_started` then `shutdown_completed`. Error-level events (`level: "error"`) go to
+stderr; everything else goes to stdout.
+
 For an explicit demo-live override:
 
 ```bash

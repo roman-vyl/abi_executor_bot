@@ -955,7 +955,7 @@ curl http://127.0.0.1:8787/health
 curl http://127.0.0.1:8787/execution/mode
 ```
 
-Логи:
+Логи — каждая строка это один structured JSON object (`timestamp`/`level`/`service`/`event` plus event-specific fields), не free-text:
 
 ```bash
 docker compose logs -f abi
@@ -967,7 +967,7 @@ docker compose logs -f abi
 docker compose stop
 ```
 
-Production container запускает Node напрямую как PID 1.
+Production container запускает Node напрямую как PID 1, под dedicated non-root user (`node`, uid/gid 1000 — встроенный в базовый образ `node:20-bookworm-slim`).
 
 При `SIGTERM` / `SIGINT` ABI:
 
@@ -981,7 +981,12 @@ closes HTTP server
 exits through normal shutdown path
 ```
 
-Correlation state остаётся в host-mounted `./var` и не является частью image layer.
+Correlation state остаётся в host-mounted `./var` и не является частью image layer. Так как container process работает под non-root `node` (uid/gid 1000), host-каталог `./var` должен быть writable этим uid до первого запуска:
+
+```bash
+mkdir -p var
+chown 1000:1000 var
+```
 
 Для explicit demo workflow используется отдельный Compose override и local environment file; operational details находятся в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
