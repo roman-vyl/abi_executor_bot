@@ -15,12 +15,12 @@
 
 ## 3. Execution Operation Events
 
-- [ ] 3.1 Define per-operation `outcome` literal unions (entry_package, open_position, protection, close_position) in `src/observability/events.ts` or co-located with each service, per design.md.
-- [ ] 3.2 Wrap `EntryPackageApplicationService`'s public entry method: emit `operation_started` with `operation: "entry_package"` before the call; emit exactly one terminal event (`operation_completed` or `operation_failed`) with `operation`, `outcome`, `duration_ms`, and `strategy_instance_id`/`trade_cycle_id` where available.
-- [ ] 3.3 Apply the same wrapping to `OpenPositionResolutionService` (`operation: "open_position"`).
+- [ ] 3.1 Define per-operation `outcome` literal unions derived from each operation's existing production result/status/error types (entry_package, open_position, protection, close_position), plus the shared `internal_error` outcome, in `src/observability/events.ts` or co-located with each service, per design.md. For `open_position`, derive `position_open` | `position_closed` from the existing boolean success result — do not invent a separate business-outcome taxonomy.
+- [ ] 3.2 Wrap `EntryPackageApplicationService`'s public entry method at the instrumentation boundary (after successful transport/command decode, before core logic runs): emit `operation_started` with `operation: "entry_package"`, `strategy_instance_id`, and `trade_cycle_id` (required, always present post-decode). On normal return (including handled business-negative results like `position_not_open` / `unknown_trade_cycle_binding` / `unsupported_exchange_scope` where applicable to this operation), emit exactly one `operation_completed` (`level: "info"`) with `operation`, `outcome`, `duration_ms`, `strategy_instance_id`, `trade_cycle_id`. On thrown/rejected failure, emit exactly one `operation_failed` (`level: "error"`) with `outcome: "internal_error"` and the same identifying fields. A transport-level decode rejection before this boundary is not a started operation and emits no `operation_started`.
+- [ ] 3.3 Apply the same wrapping to `OpenPositionResolutionService` (`operation: "open_position"`, outcomes `position_open` | `position_closed` | `internal_error`).
 - [ ] 3.4 Apply the same wrapping to `ProtectionApplicationService` (`operation: "protection"`).
 - [ ] 3.5 Apply the same wrapping to `CloseApplicationService` (`operation: "close_position"`).
-- [ ] 3.6 Add unit tests per operation: success path emits `operation_started` then exactly one `operation_completed` with correct `outcome`; failure path emits `operation_started` then exactly one `operation_failed`, and never both terminal events for one invocation.
+- [ ] 3.6 Add unit tests per operation: (a) success path emits `operation_started` then exactly one `operation_completed` with correct `outcome`, both `level: "info"`; (b) internal-error path emits `operation_started` then exactly one `operation_failed` with `outcome: "internal_error"`, `level: "error"`, and no `operation_completed`; (c) a handled business-negative typed result emits `operation_completed`, not `operation_failed`; (d) never both `operation_completed` and `operation_failed` for one invocation; (e) `strategy_instance_id`/`trade_cycle_id` present on both `operation_started` and the terminal event.
 
 ## 4. Sensitive Data Exclusion Verification
 
@@ -31,4 +31,8 @@
 
 - [ ] 5.1 Run `npm test`.
 - [ ] 5.2 Run `npm run typecheck`.
-- [ ] 5.3 Manually start the service (dry-run config) and confirm stdout/stderr output is single-line JSON only, with no remaining pretty-printed or bare-text log lines.
+- [ ] 5.3 Run `npm run build`.
+- [ ] 5.4 Run `npm run validate:openapi`.
+- [ ] 5.5 Run `openspec validate --strict --all`.
+- [ ] 5.6 Run `git diff --check`.
+- [ ] 5.7 Manually start the service (dry-run config) and confirm stdout/stderr output is single-line JSON only, with no remaining pretty-printed or bare-text log lines.
