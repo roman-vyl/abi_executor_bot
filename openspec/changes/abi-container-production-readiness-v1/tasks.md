@@ -1,0 +1,5 @@
+- [ ] 1. Сделать runtime config parsing fail-closed для явно присутствующих невалидных значений; сохранить documented defaults только для отсутствующих значений; добавить focused tests.
+- [ ] 2. Сделать container health/readiness зависимым от существующего `entryPackageReady`; добавить focused tests.
+- [ ] 3. Добавить graceful `SIGTERM`/`SIGINT` shutdown HTTP server/process; добавить focused tests.
+- [ ] 4. Сделать standalone host default `127.0.0.1`, а container deployment явно `0.0.0.0`; добавить focused tests.
+- [ ] 5. Выполнить `npm test`, `npm run typecheck`, `npm run build`, strict OpenSpec validation и `git diff --check`.
