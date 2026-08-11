@@ -930,9 +930,10 @@ curl http://127.0.0.1:8787/execution/mode
 
 Это контейнеризация самого ABI service, а не общий Compose всего BBB stack.
 
-Запуск safe container:
+Перед запуском нужно задать `BBB_DATA_ROOT` (shared host data root для BBB stack) — durable correlation store монтируется из `${BBB_DATA_ROOT}/abi`:
 
 ```bash
+export BBB_DATA_ROOT=/path/to/bbb-data
 docker compose up --build
 ```
 
@@ -944,7 +945,7 @@ docker compose up --build
 - использует `ABI_LIVE_TRADING_ENABLED=false`;
 - использует `BYBIT_ENV=testnet`;
 - не требует Bybit credentials для safe startup;
-- монтирует `./var:/app/var`;
+- монтирует `${BBB_DATA_ROOT}/abi:/app/var`;
 - использует `/health` для container healthcheck.
 
 Проверить:
@@ -981,13 +982,13 @@ closes HTTP server
 exits through normal shutdown path
 ```
 
-Correlation state остаётся в host-mounted `./var` и не является частью image layer. Container process работает под non-root `node` (uid/gid 1000), поэтому host-каталог `./var` должен быть writable этим uid/gid.
+Correlation state остаётся в host-mounted `${BBB_DATA_ROOT}/abi` (production/local Compose) и не является частью image layer; repo-local `./var` не используется как production/local durable storage. Container process работает под non-root `node` (uid/gid 1000), поэтому host-каталог `${BBB_DATA_ROOT}/abi` должен быть writable этим uid/gid.
 
 На Linux host с обычным bind mount это может потребовать явного ownership:
 
 ```bash
-mkdir -p var
-chown 1000:1000 var
+mkdir -p "${BBB_DATA_ROOT}/abi"
+chown 1000:1000 "${BBB_DATA_ROOT}/abi"
 ```
 
 На Docker Desktop (macOS/Windows) bind-mount ownership проходит через virtualization/file-sharing layer, и predварительный numeric `chown` обычно не требуется — используй его только если реально столкнулся с permission error при первом запуске.
