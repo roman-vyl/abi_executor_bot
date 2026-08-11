@@ -22,3 +22,8 @@ SHALL NOT be the production/local Compose durable-storage location.
 - **WHEN** an operator inspects production/local Compose configuration or operational docs
 - **THEN** repo-local `./var` is not documented or configured as the production/local Compose
   durable-storage location
+
+#### Scenario: Missing BBB_DATA_ROOT fails explicitly
+- **WHEN** `BBB_DATA_ROOT` is not set and an operator runs Compose
+- **THEN** Compose fails with an explicit `BBB_DATA_ROOT must be set` error
+- **AND** Compose does not silently substitute an empty host path for the mount source
