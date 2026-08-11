@@ -1,0 +1,5 @@
+- [x] 1. Изменить `docker-compose.yml`: bind mount с `./var:/app/var` на `${BBB_DATA_ROOT}/abi:/app/var`, сохранить writable mode и неизменный container-internal `/app/var`.
+- [x] 2. Синхронизировать `README.md` и `docs/RUNBOOK.md` с новым host-side contract; repo-local `./var` больше не описывается как production/local Compose durable storage.
+- [x] 3. Обновить `container-runtime` capability spec (MODIFIED requirement) под новый host-side contract.
+- [x] 4. Проверить `docker compose config` с `BBB_DATA_ROOT=/tmp/bbb-data`: source `/tmp/bbb-data/abi`, target `/app/var`, mount writable, `ABI_ENTRY_PACKAGE_CORRELATION_PATH` неизменен.
+- [x] 5. Прогнать `npm test`, `npm run typecheck`, `npm run build`, `npm run validate:openapi`, `git diff --check`.

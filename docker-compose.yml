@@ -18,7 +18,7 @@ services:
       BYBIT_SETTLE_COIN: "USDT"
       BYBIT_TRIGGER_BY: "LastPrice"
     volumes:
-      - ./var:/app/var
+      - ${BBB_DATA_ROOT:?BBB_DATA_ROOT must be set}/abi:/app/var
     healthcheck:
       test:
         [

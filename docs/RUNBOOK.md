@@ -26,25 +26,29 @@ requires no Bybit credentials.
 
 ## Docker Compose startup
 
-Build and run the safe dry-run container:
+Set `BBB_DATA_ROOT` to the shared BBB host data root, then build and run the safe dry-run
+container:
 
 ```bash
+export BBB_DATA_ROOT=/path/to/bbb-data
 docker compose up --build
 ```
 
 The base compose file sets `ABI_DRY_RUN=true`, `ABI_LIVE_TRADING_ENABLED=false`, and
-`BYBIT_ENV=testnet`, and requires no Bybit keys. It mounts `./var` to `/app/var`, which is where
-the entry-package correlation store lives inside the container (see below).
+`BYBIT_ENV=testnet`, and requires no Bybit keys. It mounts `${BBB_DATA_ROOT}/abi` to `/app/var`,
+which is where the entry-package correlation store lives inside the container (see below).
+Repo-local `./var` is not the production/local Compose durable-storage location.
 
 The container process runs as the non-root `node` user (uid/gid 1000, built into the
 `node:20-bookworm-slim` base image), not root. Only `/app/var` is owned by that user inside the
-image; application code and dependencies stay root-owned and merely readable. The host `./var`
-directory (bind-mounted to `/app/var`) needs to be writable by uid/gid 1000, otherwise
-correlation-store creation/append/replay fails. On a Linux host this may require an explicit:
+image; application code and dependencies stay root-owned and merely readable. The host
+`${BBB_DATA_ROOT}/abi` directory (bind-mounted to `/app/var`) needs to be writable by uid/gid
+1000, otherwise correlation-store creation/append/replay fails. On a Linux host this may require
+an explicit:
 
 ```bash
-mkdir -p var
-chown 1000:1000 var
+mkdir -p "${BBB_DATA_ROOT}/abi"
+chown 1000:1000 "${BBB_DATA_ROOT}/abi"
 ```
 
 On Docker Desktop (macOS/Windows), bind-mount ownership goes through the
@@ -128,9 +132,9 @@ state that might not be fully recovered.
 ## Entry-package correlation storage path
 
 Abi's only durable state is the entry-package correlation store, controlled by
-`ABI_ENTRY_PACKAGE_CORRELATION_PATH` (default `./var/abi_entry_package_correlation.jsonl`). In
-the Docker Compose setup, `./var` on the host is mounted to `/app/var` in the container, so the
-store survives container rebuilds and restarts.
+`ABI_ENTRY_PACKAGE_CORRELATION_PATH` (default `./var/abi_entry_package_correlation.jsonl` for
+local, non-Docker runs). In the Docker Compose setup, `${BBB_DATA_ROOT}/abi` on the host is
+mounted to `/app/var` in the container, so the store survives container rebuilds and restarts.
 
 ## Read-only sandbox smoke
 
