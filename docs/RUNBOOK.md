@@ -74,22 +74,49 @@ Error-level events (`level: "error"`) go to stderr; everything else goes to stdo
 For an explicit demo-live override:
 
 ```bash
+export BBB_SECRETS_ROOT=/path/to/bbb-secrets
 docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
 ```
 
-This loads `.env.demo.local` (git-ignored, must not be committed) and sets `ABI_DRY_RUN=false`,
-`ABI_LIVE_TRADING_ENABLED=true`, `BYBIT_ENV=demo`. Keep demo credentials only in
-`.env.demo.local` or runtime environment variables — never in a tracked file.
+This loads Bybit credentials from `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` on the host and sets
+`ABI_DRY_RUN=false`, `ABI_LIVE_TRADING_ENABLED=true`, `BYBIT_ENV=demo`. `BBB_SECRETS_ROOT` is
+required only for this Demo Compose path; the base Compose stack above starts with no secrets
+root and no Bybit credentials. If `BBB_SECRETS_ROOT` is not set, the Demo Compose command fails
+immediately with an explicit `BBB_SECRETS_ROOT must be set` error instead of starting without
+credentials.
+
+`${BBB_SECRETS_ROOT}/abi/bybit-demo.env` is the canonical Demo credential location — it is a
+host-side file outside the ABI repo checkout and outside `BBB_DATA_ROOT`, never tracked or
+copied into the image. It must contain only the two Bybit credential lines:
+
+```bash
+BYBIT_API_KEY=...
+BYBIT_API_SECRET=...
+```
+
+Execution-mode settings (`ABI_DRY_RUN`, `ABI_LIVE_TRADING_ENABLED`, `BYBIT_ENV`) stay in
+`docker-compose.demo.yml` as deployment configuration — do not add them to the secret file.
+
+Recommended host setup (example path — express any real path through `BBB_SECRETS_ROOT`):
+
+```bash
+mkdir -p "${BBB_SECRETS_ROOT}/abi"
+chmod 700 "${BBB_SECRETS_ROOT}"
+chmod 700 "${BBB_SECRETS_ROOT}/abi"
+chmod 600 "${BBB_SECRETS_ROOT}/abi/bybit-demo.env"
+```
 
 ## Credential hygiene
 
 - Keep `.env` and other `.env.*` files local; only `.env.example` is tracked, with empty values.
+- Keep Demo credentials only in `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` or runtime environment
+  variables — never in a tracked file, and never repo-local.
 - Use demo-only API credentials with the minimum permissions needed.
 - Rotate a credential immediately if it appears in a commit, log, correlation-store file, ZIP,
   screenshot, or shared terminal output.
 - Never put credentials in this document, other tracked files, or command examples.
 
-To load credentials locally:
+To load credentials locally for non-Docker runs:
 
 ```bash
 cp .env.example .env

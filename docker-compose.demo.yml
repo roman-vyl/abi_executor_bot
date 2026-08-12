@@ -1,7 +1,7 @@
 services:
   abi:
     env_file:
-      - .env.demo.local
+      - ${BBB_SECRETS_ROOT:?BBB_SECRETS_ROOT must be set}/abi/bybit-demo.env
     environment:
       ABI_DRY_RUN: "false"
       ABI_LIVE_TRADING_ENABLED: "true"

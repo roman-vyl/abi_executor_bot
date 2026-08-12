@@ -1,0 +1,11 @@
+- [x] 1. Изменить `docker-compose.demo.yml`: `env_file` с repo-local `.env.demo.local` на `${BBB_SECRETS_ROOT:?BBB_SECRETS_ROOT must be set}/abi/bybit-demo.env`; сохранить существующие Demo overrides (`ABI_DRY_RUN`, `ABI_LIVE_TRADING_ENABLED`, `BYBIT_ENV`).
+- [x] 2. Подтвердить, что `docker-compose.yml` (base) не требует `BBB_SECRETS_ROOT` и safe startup остаётся полностью рабочим без credentials.
+- [x] 3. Синхронизировать `README.md` и `docs/RUNBOOK.md`: canonical Demo credential source — `${BBB_SECRETS_ROOT}/abi/bybit-demo.env`, а не `.env.demo.local`; описать secret-file contract (только `BYBIT_API_KEY`/`BYBIT_API_SECRET`) и рекомендуемый host permissions setup (`mkdir -p`, `chmod 700`/`600`).
+- [x] 4. Обновить `container-runtime` capability spec (MODIFIED requirement) под новый host-side secrets contract.
+- [x] 5. Не создавать/не коммитить реальный `bybit-demo.env`; не ослаблять `.dockerignore`.
+- [x] 6. Verification:
+  - `docker compose config` для base без `BBB_SECRETS_ROOT` проходит с safe defaults;
+  - `docker compose -f docker-compose.yml -f docker-compose.demo.yml config` без `BBB_SECRETS_ROOT` fails non-zero с явной ошибкой `BBB_SECRETS_ROOT must be set`;
+  - с temporary `<tmp>/abi/bybit-demo.env` (только fake значения) и `BBB_SECRETS_ROOT=<tmp>` combined config проходит, env file resolves из `<tmp>/abi/bybit-demo.env`, overrides остаются `dryRun=false`/`liveTradingEnabled=true`/`BYBIT_ENV=demo`.
+- [x] 7. Прогнать `npm test`, `npm run typecheck`, `npm run build`, `npm run validate:openapi`, `git diff --check`.
+- [x] 8. После apply синхронизировать canonical `container-runtime` spec и заархивировать change.
