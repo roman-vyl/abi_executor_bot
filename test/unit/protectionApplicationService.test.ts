@@ -131,10 +131,95 @@ test("live-execution guard disabled fails closed without writing", async () => {
   );
 });
 
+test("already-equal exchange protection is confirmed without any write", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "1.0000", takeProfit: "1.0200" });
+
+    const result = await service.apply(makeCommand({ stopPrice: "1.0000", takePrice: "1.0200" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.body, {
+      strategy_instance_id: "instance-1",
+      trade_cycle_id: "cycle-1",
+      status: "protection_applied",
+      stop_price: "1.0000",
+      take_price: "1.0200",
+    });
+    assert.equal(bybit.setTradingStopCalls.length, 0);
+  });
+});
+
+test("already-equal exchange protection with differing formatting is confirmed without a write, echoing the request", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "1", takeProfit: "1.02000" });
+
+    const result = await service.apply(makeCommand({ stopPrice: "1.0000", takePrice: "1.02" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.body, {
+      strategy_instance_id: "instance-1",
+      trade_cycle_id: "cycle-1",
+      status: "protection_applied",
+      stop_price: "1.0000",
+      take_price: "1.02",
+    });
+    assert.equal(bybit.setTradingStopCalls.length, 0);
+  });
+});
+
+test("a requested null take_price already matching exchange numeric zero is confirmed without a write", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "0.00" });
+
+    const result = await service.apply(makeCommand({ takePrice: null }));
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.body, {
+      strategy_instance_id: "instance-1",
+      trade_cycle_id: "cycle-1",
+      status: "protection_applied",
+      stop_price: "99000",
+      take_price: null,
+    });
+    assert.equal(bybit.setTradingStopCalls.length, 0);
+  });
+});
+
+test("already-equal exchange protection with the live-execution guard disabled still fails closed without a write", async () => {
+  await withService(
+    async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord());
+      bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "103000" });
+
+      const result = await service.apply(makeCommand());
+
+      assert.equal(result.statusCode, 500);
+      assert.deepEqual(result.body, { error: { code: "internal_error", message: "internal error" } });
+      assert.equal(bybit.setTradingStopCalls.length, 0);
+    },
+    { dryRun: true, liveTradingEnabled: false, bybitApiKey: "", bybitApiSecret: "" },
+  );
+});
+
 test("a successful write confirmed on the first read-back attempt returns protection_applied", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
-    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "103000" });
+    // The pre-write live-position gate sees a stale value (so the
+    // already-satisfied short-circuit does not apply); the write's first
+    // read-back attempt sees the newly applied one.
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "98000", takeProfit: "102000" });
+    let getOpenPositionsCallCount = 0;
+    const realGetOpenPositions = bybit.getOpenPositions.bind(bybit);
+    bybit.getOpenPositions = async (input) => {
+      getOpenPositionsCallCount += 1;
+      if (getOpenPositionsCallCount >= 2) {
+        bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "103000" });
+      }
+      return realGetOpenPositions(input);
+    };
 
     const result = await service.apply(makeCommand());
 
@@ -200,7 +285,19 @@ test("read-back exhausted without matching returns internal_error and does not r
 test("take_price: null sends Bybit's own clearing sentinel and a numeric-zero read-back confirms it", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
-    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "0.00" });
+    // The pre-write live-position gate sees a still-set take-profit (so
+    // the already-satisfied short-circuit does not apply); the write's
+    // read-back sees it cleared to numeric zero.
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "103000" });
+    let getOpenPositionsCallCount = 0;
+    const realGetOpenPositions = bybit.getOpenPositions.bind(bybit);
+    bybit.getOpenPositions = async (input) => {
+      getOpenPositionsCallCount += 1;
+      if (getOpenPositionsCallCount >= 2) {
+        bybit.openPositionsResponse = positionResponse({ side: "Buy", stopLoss: "99000", takeProfit: "0.00" });
+      }
+      return realGetOpenPositions(input);
+    };
 
     const result = await service.apply(makeCommand({ takePrice: null }));
 

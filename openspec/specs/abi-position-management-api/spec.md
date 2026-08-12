@@ -2,7 +2,6 @@
 
 ## Purpose
 Define the public V1 Runtime → ABI HTTP contract for applying protection to, and fully closing, an already-open, Runtime-owned trade cycle position, addressed by the existing `strategy_instance_id` + `trade_cycle_id` ownership pair.
-
 ## Requirements
 ### Requirement: ABI exposes a protection endpoint
 ABI SHALL expose `PUT /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/protection`, accepting `application/json` and returning `application/json; charset=utf-8`. The body SHALL be a closed JSON object with exactly `stop_price` (required, non-null, strictly positive exact-decimal text) and `take_price` (strictly positive exact-decimal text, or `null`). Zero and negative values SHALL be rejected for both fields: Bybit's own protection-clearing command reserves the numeric value zero to mean "remove this leg," so accepting zero as a real price at this public boundary would let a caller silently strip protection while ABI still reports `protection_applied`.
@@ -51,7 +50,7 @@ Before performing any exchange write, ABI SHALL resolve the requested pair to ex
 - **AND** ABI proceeds to the endpoint's own size-dependent check rather than failing on scope alone
 
 ### Requirement: Protection success is a closed object, confirmed by exact numeric equality
-A successful response SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status: "protection_applied"`, `stop_price`, and `take_price` (`take_price` `null` when the request's `take_price` was `null`). `protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. ABI SHALL NOT canonicalize, reformat, or otherwise alter the accepted request values: the response SHALL return the exact `stop_price`/`take_price` strings ABI accepted in the request, unchanged.
+A successful response SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status: "protection_applied"`, `stop_price`, and `take_price` (`take_price` `null` when the request's `take_price` was `null`). `protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. ABI SHALL NOT canonicalize, reformat, or otherwise alter the accepted request values: the response SHALL return the exact `stop_price`/`take_price` strings ABI accepted in the request, unchanged. When the exchange's confirmed protection already numerically equals the requested values before any write, ABI SHALL return `protection_applied` without sending an exchange write.
 
 #### Scenario: Verified protection returns the accepted request strings unchanged
 - **WHEN** the exchange's confirmed stop/take are numerically equal to the requested values
@@ -69,6 +68,10 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 #### Scenario: Accepted-but-unverified write is not acknowledged
 - **WHEN** the exchange has accepted, submitted, or queued the write but ABI has not verified it
 - **THEN** ABI does not return `protection_applied` or any other `2xx`
+
+#### Scenario: Already-matching confirmed protection may return protection_applied without exchange mutation
+- **WHEN** the exchange's confirmed stop/take already numerically equal the requested values before ABI sends any write
+- **THEN** ABI returns HTTP `200` with `status: "protection_applied"` and the exact `stop_price`/`take_price` strings it accepted in the request, having sent no exchange write
 
 ### Requirement: Protection fails closed when the resolved scope has no live position to protect
 After ABI has resolved a single unambiguous, supported position scope for the pair (per the shared resolution requirement above), if the verified live position size at that scope is zero, ABI SHALL return HTTP `422` with `error.code` `position_not_open`, not `internal_error`.

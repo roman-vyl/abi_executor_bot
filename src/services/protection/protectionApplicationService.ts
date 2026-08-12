@@ -16,6 +16,7 @@ import {
 } from "../../domain/positionManagementApi.js";
 import type { BybitAdapter, ValidatedOpenPositionRow } from "../../exchange/bybitAdapter.js";
 import { executeProtectionUpdate } from "../../execution/execution.js";
+import { getLiveExecutionMode } from "../../execution/liveGuard.js";
 import type { OpenPositionResolutionService } from "../openPosition/openPositionResolutionService.js";
 
 // Reuses the same bounded-retry shape packageConfirmation.ts already uses
@@ -45,8 +46,9 @@ type ReadBackMatch = {
 
 // Executes an already-validated PUT .../protection command: durable-absence
 // shortcut, independent scope-ownership re-verification, the shared
-// live-position gate, the Bybit write, and a bounded read-back before
-// reporting success. Writes nothing to the correlation store.
+// live-position gate, and either an already-satisfied short-circuit (no
+// exchange write) or the Bybit write followed by a bounded read-back,
+// before reporting success. Writes nothing to the correlation store.
 export class ProtectionApplicationService {
   private readonly deps: ProtectionApplicationServiceDeps;
 
@@ -109,6 +111,38 @@ export class ProtectionApplicationService {
     }
     if (determination.kind === "error") {
       return internalErrorResult();
+    }
+
+    // Already-satisfied short-circuit: the same live-position query that
+    // just confirmed the position is open also reports its current
+    // stop/take. If that already numerically matches what's requested,
+    // no exchange write is needed or attempted — reuses the identical
+    // match/zero-leg semantics the post-write read-back uses below, so
+    // there is exactly one definition of "matches the request".
+    const alreadySatisfied = evaluateReadBack(
+      { stopLoss: determination.confirmedStopLoss, takeProfit: determination.confirmedTakeProfit },
+      command.stopPrice,
+      command.takePrice,
+    );
+
+    if (alreadySatisfied !== undefined) {
+      // The already-satisfied path must not bypass the live-execution
+      // guard: if live writes are currently disallowed, this endpoint
+      // must still fail closed rather than hand back a real-looking
+      // acknowledgement of exchange state.
+      if (!getLiveExecutionMode(this.deps.config).canExecuteLive) {
+        return internalErrorResult();
+      }
+
+      return serializeProtectionApplied({
+        strategyInstanceId: command.strategyInstanceId,
+        tradeCycleId: command.tradeCycleId,
+        acceptedStopPrice: command.stopPrice,
+        acceptedTakePrice: command.takePrice,
+        confirmedStopPrice: alreadySatisfied.confirmedStopPrice,
+        confirmedTakePrice: alreadySatisfied.confirmedTakePrice,
+        verificationSucceeded: true,
+      });
     }
 
     const writeResult = await executeProtectionUpdate({

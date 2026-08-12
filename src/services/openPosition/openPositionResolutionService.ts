@@ -34,7 +34,18 @@ type StatusBucket = "durably_closed" | "live_query_admissible" | "unresolved";
 // position-envelope validation and category/side-match rules are defined
 // exactly once.
 export type PositionDetermination =
-  | { kind: "open"; firstFillAtMs: number; averageEntryPrice: string }
+  | {
+      kind: "open";
+      firstFillAtMs: number;
+      averageEntryPrice: string;
+      // Sourced from the same live-position query used for the open/closed
+      // determination itself — protection's already-satisfied comparison
+      // reuses these rather than issuing a second query. Undefined means
+      // the exchange reported no exact-decimal value for that leg, not
+      // that it is zero.
+      confirmedStopLoss?: string;
+      confirmedTakeProfit?: string;
+    }
   | { kind: "closed" }
   | { kind: "unsupported_scope" }
   | { kind: "error" };
@@ -123,6 +134,8 @@ export class OpenPositionResolutionService {
       kind: "open",
       firstFillAtMs: queryResult.row.openTime,
       averageEntryPrice: queryResult.row.avgPrice,
+      confirmedStopLoss: queryResult.row.stopLoss,
+      confirmedTakeProfit: queryResult.row.takeProfit,
     };
   }
 }
