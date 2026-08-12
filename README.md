@@ -993,7 +993,7 @@ chown 1000:1000 "${BBB_DATA_ROOT}/abi"
 
 На Docker Desktop (macOS/Windows) bind-mount ownership проходит через virtualization/file-sharing layer, и predварительный numeric `chown` обычно не требуется — используй его только если реально столкнулся с permission error при первом запуске.
 
-Для explicit demo workflow используется отдельный Compose override и local environment file; operational details находятся в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Для explicit demo workflow используется отдельный Compose override; Bybit credentials подгружаются из host-side `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` (canonical Demo credential location, вне repo и вне `BBB_DATA_ROOT`), не из repo-local файла. Operational details находятся в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ---
 
