@@ -16,16 +16,12 @@ import {
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
 import { positionScopeKey } from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
-import type {
-  BybitAmendOrderPayload,
-  BybitCreateOrderPayload,
-  EntryPackageOrderPayloads,
-} from "../../exchange/bybitOrderMapper.js";
+import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { amendEntryOrder, cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
-import type { DesiredPackageFields, PackageConfirmationOutcome } from "./packageConfirmation.js";
+import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
 import { confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
 
 export type EntryPackageApplicationServiceDeps = {
@@ -287,7 +283,7 @@ export class EntryPackageApplicationService {
     const orderId = readBybitOrderId(executionResult.bybitResponse);
     const withOrderId: EntryPackageExecutionRecord = { ...provisional, order_id: orderId };
 
-    return this.confirmAndFinalize(command, withOrderId, payloads, payloads.createEntryOrder, desiredEntry);
+    return this.confirmAndFinalize(command, withOrderId, payloads, desiredEntry);
   }
 
   private async replaceAmend(
@@ -364,7 +360,7 @@ export class EntryPackageApplicationService {
       return internalErrorResult();
     }
 
-    return this.confirmAndFinalize(command, provisional, payloads, payloads.amendEntryOrder, desiredEntry);
+    return this.confirmAndFinalize(command, provisional, payloads, desiredEntry);
   }
 
   private async replaceCancelAndCreate(
@@ -477,7 +473,12 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: exchangeBoundDesiredFields(payloads.amendEntryOrder),
+      desired: {
+        triggerPrice: desiredEntry.planned_entry_price,
+        qty: record.calculated_quantity ?? "0",
+        stopLoss: desiredEntry.initial_stop_price,
+        takeProfit: desiredEntry.initial_take_price,
+      },
     });
 
     if (this.shouldResendPendingAction(record, confirmation)) {
@@ -554,7 +555,12 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: exchangeBoundDesiredFields(payloads.amendEntryOrder),
+      desired: {
+        triggerPrice: desiredEntry.planned_entry_price,
+        qty: updated.calculated_quantity ?? "0",
+        stopLoss: desiredEntry.initial_stop_price,
+        takeProfit: desiredEntry.initial_take_price,
+      },
     });
 
     if (this.shouldResendPendingAction(updated, confirmation)) {
@@ -642,21 +648,18 @@ export class EntryPackageApplicationService {
     command: EntryPackageCommand,
     record: EntryPackageExecutionRecord,
     payloads: EntryPackageOrderPayloads,
-    // The exact payload that was just sent to Bybit (createEntryOrder or
-    // amendEntryOrder) — the last internal representation before the
-    // exchange write. Confirmation compares the exchange read-back against
-    // these literal fields, never against a value re-derived from
-    // desiredEntry, so a future divergence between the two can never make
-    // confirmation compare against something other than what was actually
-    // sent.
-    writtenOrder: BybitCreateOrderPayload | BybitAmendOrderPayload,
     desiredEntry: DesiredEntryDto,
   ): Promise<EntryPackageHttpResult> {
     const confirmation = await confirmEntryPackage({
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: exchangeBoundDesiredFields(writtenOrder),
+      desired: {
+        triggerPrice: desiredEntry.planned_entry_price,
+        qty: record.calculated_quantity ?? "0",
+        stopLoss: desiredEntry.initial_stop_price,
+        takeProfit: desiredEntry.initial_take_price,
+      },
     });
 
     return this.persistConfirmationOutcome(command, record, desiredEntry, confirmation);
@@ -774,26 +777,6 @@ export class EntryPackageApplicationService {
       calculatedQuantity,
     });
   }
-}
-
-// The single place that turns a Bybit create/amend order payload into the
-// fields confirmation compares against the exchange read-back. Takes the
-// payload actually built for (or sent to) Bybit — never DesiredEntryDto —
-// so confirmation can only ever check the order against the exact values
-// that are, or were, exchange-bound. stopLoss/takeProfit are typed optional
-// on BybitCreateOrderPayload/BybitAmendOrderPayload in general, even though
-// mapEntryPackageToBybit always populates both for the entry-package flow;
-// the "" fallback here exists only to keep this function total over the
-// wider payload type, and is unreachable for every current caller.
-export function exchangeBoundDesiredFields(
-  writtenOrder: Pick<BybitCreateOrderPayload | BybitAmendOrderPayload, "triggerPrice" | "qty" | "stopLoss" | "takeProfit">,
-): DesiredPackageFields {
-  return {
-    triggerPrice: writtenOrder.triggerPrice,
-    qty: writtenOrder.qty,
-    stopLoss: writtenOrder.stopLoss ?? "",
-    takeProfit: writtenOrder.takeProfit ?? "",
-  };
 }
 
 function isIdenticalDesiredEntry(a: DesiredEntryDto, b: DesiredEntryDto): boolean {
