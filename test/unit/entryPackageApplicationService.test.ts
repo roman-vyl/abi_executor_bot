@@ -39,6 +39,34 @@ test("first APPLY creates a live order and confirms application", async () => {
   });
 });
 
+test("real Demo regression: create succeeds when Bybit read-back uses canonical price text", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({
+        orderStatus: "Untriggered",
+        triggerPrice: "63619.7",
+        stopLoss: "64619.7",
+        takeProfit: "61619.7",
+      }),
+    ]);
+
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({
+          side: "short",
+          planned_entry_price: "63619.700087721256",
+          initial_stop_price: "64619.700087721256",
+          initial_take_price: "61619.700087721256",
+        }),
+      }),
+    );
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+  });
+});
+
 test("identical repeated APPLY revalidates without a duplicate create", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -49,6 +77,39 @@ test("identical repeated APPLY revalidates without a duplicate create", async ()
     assertApplied(second, "0.001");
     assert.equal(bybit.createOrderCalls.length, 1);
     assert.ok(bybit.getOrderByLinkIdCalls.length >= 2);
+  });
+});
+
+test("repeat PUT and metadata-only revalidation accept the bound order's canonical price text", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const rawDesired = makeDesiredEntry({
+      side: "short",
+      planned_entry_price: "63619.700087721256",
+      initial_stop_price: "64619.700087721256",
+      initial_take_price: "61619.700087721256",
+    });
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({
+        orderStatus: "Untriggered",
+        triggerPrice: "63619.7",
+        stopLoss: "64619.7",
+        takeProfit: "61619.7",
+      }),
+    ]);
+
+    assertApplied(await service.apply(makeCommand({ desiredEntry: rawDesired })), "0.001");
+    assertApplied(await service.apply(makeCommand({ desiredEntry: rawDesired })), "0.001");
+    assertApplied(
+      await service.apply(
+        makeCommand({ desiredEntry: { ...rawDesired, locked_exit_profile: "canonical-read-back" } }),
+      ),
+      "0.001",
+    );
+
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.amendOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+    assert.equal(repo.get("instance-1", "cycle-1")?.desired_entry?.locked_exit_profile, "canonical-read-back");
   });
 });
 
@@ -74,6 +135,35 @@ test("REPLACE via amend when only price/stop/take change (side unchanged)", asyn
     assert.equal(bybit.amendOrderCalls.length, 1);
     assert.equal(bybit.createOrderCalls.length, 1);
     assert.equal(bybit.cancelOrderCalls.length, 0);
+  });
+});
+
+test("amend succeeds when the same order reads back Bybit canonical price text", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    assertApplied(await service.apply(makeCommand()), "0.001");
+
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({
+        orderStatus: "Untriggered",
+        triggerPrice: "63619.7",
+        stopLoss: "62619.7",
+        takeProfit: "65619.7",
+      }),
+    ]);
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({
+          planned_entry_price: "63619.700087721256",
+          initial_stop_price: "62619.700087721256",
+          initial_take_price: "65619.700087721256",
+        }),
+      }),
+    );
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.amendOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
   });
 });
 
