@@ -473,11 +473,8 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: {
-        triggerPrice: desiredEntry.planned_entry_price,
+      expected: {
         qty: record.calculated_quantity ?? "0",
-        stopLoss: desiredEntry.initial_stop_price,
-        takeProfit: desiredEntry.initial_take_price,
       },
     });
 
@@ -555,11 +552,8 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: {
-        triggerPrice: desiredEntry.planned_entry_price,
+      expected: {
         qty: updated.calculated_quantity ?? "0",
-        stopLoss: desiredEntry.initial_stop_price,
-        takeProfit: desiredEntry.initial_take_price,
       },
     });
 
@@ -654,11 +648,8 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: payloads.getEntryOrder,
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
-      desired: {
-        triggerPrice: desiredEntry.planned_entry_price,
+      expected: {
         qty: record.calculated_quantity ?? "0",
-        stopLoss: desiredEntry.initial_stop_price,
-        takeProfit: desiredEntry.initial_take_price,
       },
     });
 

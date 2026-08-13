@@ -21,11 +21,8 @@ const FILLED_STATUSES = new Set(["Filled"]);
 const PARTIAL_FILL_STATUSES = new Set(["PartiallyFilled"]);
 const TERMINAL_WITHOUT_FILL_STATUSES = new Set(["Rejected", "Deactivated", "Cancelled"]);
 
-export type DesiredPackageFields = {
-  triggerPrice: string;
+export type ExpectedPackageFields = {
   qty: string;
-  stopLoss: string;
-  takeProfit: string;
 };
 
 export type PackageConfirmationOutcome =
@@ -38,9 +35,9 @@ export type PackageConfirmationOutcome =
   // from "ambiguous" because it is the one outcome safe to treat as
   // grounds for resending a create (nothing found anywhere, confidently).
   | { kind: "not_found" }
-  // Found in an inconclusive state (fields never matched, or a filled
-  // order's fields didn't plausibly correspond to our own desired
-  // package), or at least one query in the budget threw.
+  // Found in an inconclusive state (quantity never matched, or a filled
+  // order's quantity didn't plausibly correspond to our own command), or
+  // at least one query in the budget threw.
   | { kind: "ambiguous" };
 
 export type CancelConfirmationOutcome =
@@ -59,14 +56,19 @@ type QueryResult =
   | { status: "not_found" }
   | { status: "query_failed" };
 
-// Bounded field-accuracy confirmation for a just-sent create/amend. Never
-// returns success on partial field confirmation; on full or partial fill it
-// returns only an aggregate observation, never a reconstructed fill history.
+// Bounded identity/state confirmation for a just-sent create/amend, or for
+// revalidation of an already durable binding. The successful write itself
+// proves Bybit accepted the command; the read-back proves that the same
+// category/symbol/orderLinkId is now represented by a valid exchange order
+// in the expected quantity and a recognized state. Bybit's returned price
+// fields are still strictly decoded as exact decimals, but are authoritative
+// exchange representation and are intentionally not compared with the raw
+// Strategy Engine decimal text sent in the write.
 export async function confirmEntryPackage(input: {
   bybit: BybitAdapter;
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
-  desired: DesiredPackageFields;
+  expected: ExpectedPackageFields;
 }): Promise<PackageConfirmationOutcome> {
   const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
   const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
@@ -94,19 +96,19 @@ export async function confirmEntryPackage(input: {
       sawInconclusiveFinding = true;
 
       if (FILLED_STATUSES.has(item.orderStatus)) {
-        if (fillFieldsPlausible(item, input.desired)) {
-          return { kind: "full_fill", observation: toObservation(item, input.desired.qty) };
+        if (fillQuantityPlausible(item, input.expected)) {
+          return { kind: "full_fill", observation: toObservation(item, input.expected.qty) };
         }
       } else if (PARTIAL_FILL_STATUSES.has(item.orderStatus)) {
-        if (fillFieldsPlausible(item, input.desired)) {
-          return { kind: "partial_fill", observation: toObservation(item, input.desired.qty) };
+        if (fillQuantityPlausible(item, input.expected)) {
+          return { kind: "partial_fill", observation: toObservation(item, input.expected.qty) };
         }
       } else if (LIVE_UNFILLED_STATUSES.has(item.orderStatus)) {
-        if (fieldsMatch(item, input.desired)) {
+        if (quantityMatches(item, input.expected)) {
           return { kind: "pending_confirmed" };
         }
-        // Fields not yet consistent (e.g. an amend still propagating) —
-        // retry within the bounded window rather than confirming early.
+        // Quantity not yet consistent — retry within the bounded window
+        // rather than confirming a different-sized order.
         if (attempt < CONFIRMATION_ATTEMPTS - 1) {
           await sleep(CONFIRMATION_RETRY_DELAY_MS);
         }
@@ -130,9 +132,9 @@ export async function confirmEntryPackage(input: {
       const hasFilledQty = compareDecimal(cumulativeFilledQty, "0") > 0;
 
       if (hasFilledQty) {
-        if (fillFieldsPlausible(item, input.desired)) {
-          const observation = toObservation(item, input.desired.qty);
-          return compareDecimal(cumulativeFilledQty, input.desired.qty) >= 0
+        if (fillQuantityPlausible(item, input.expected)) {
+          const observation = toObservation(item, input.expected.qty);
+          return compareDecimal(cumulativeFilledQty, input.expected.qty) >= 0
             ? { kind: "full_fill", observation }
             : { kind: "partial_fill", observation };
         }
@@ -330,33 +332,18 @@ function hasFill(item: BybitOrderView): boolean {
   return item.cumExecQty !== "" && compareDecimal(item.cumExecQty, "0") > 0;
 }
 
-function fieldsMatch(item: BybitOrderView, desired: DesiredPackageFields): boolean {
-  return (
-    decimalEquals(item.triggerPrice, desired.triggerPrice) &&
-    decimalEquals(item.qty, desired.qty) &&
-    decimalEquals(item.stopLoss, desired.stopLoss) &&
-    decimalEquals(item.takeProfit, desired.takeProfit)
-  );
+function quantityMatches(item: BybitOrderView, expected: ExpectedPackageFields): boolean {
+  return decimalEquals(item.qty, expected.qty);
 }
 
 // A filled/partially-filled order is only trusted as evidence that *our*
-// desired package was applied if every field the exchange did report is
-// consistent with it. Fields the exchange omits (e.g. stopLoss/takeProfit
-// may move to position-level after a fill on some venues) are not treated
-// as a mismatch — but a present-and-different qty or triggerPrice must
-// never be waved through as a successful application of a different
-// package (field-level accuracy, not merely order existence).
-function fillFieldsPlausible(item: BybitOrderView, desired: DesiredPackageFields): boolean {
-  if (item.qty !== "" && !decimalEquals(item.qty, desired.qty)) {
-    return false;
-  }
-  if (item.triggerPrice !== "" && !decimalEquals(item.triggerPrice, desired.triggerPrice)) {
-    return false;
-  }
-  if (item.stopLoss !== "" && !decimalEquals(item.stopLoss, desired.stopLoss)) {
-    return false;
-  }
-  if (item.takeProfit !== "" && !decimalEquals(item.takeProfit, desired.takeProfit)) {
+// command was applied if the quantity the exchange reports is consistent
+// with it. An omitted qty remains admissible after a fill as before, because
+// cumExecQty supplies the fill evidence; a present-and-different qty must
+// never be waved through as our order. Price fields are exchange-owned after
+// the write and therefore are validation inputs, not request-equality proof.
+function fillQuantityPlausible(item: BybitOrderView, expected: ExpectedPackageFields): boolean {
+  if (item.qty !== "" && !decimalEquals(item.qty, expected.qty)) {
     return false;
   }
   return true;

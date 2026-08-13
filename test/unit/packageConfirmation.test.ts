@@ -4,27 +4,75 @@ import test from "node:test";
 import { confirmEntryPackage, confirmEntryPackageCancelled } from "../../src/services/entryPackage/packageConfirmation.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
-const desired = {
-  triggerPrice: "100000",
-  qty: "0.001",
-  stopLoss: "99000",
-  takeProfit: "103000",
-};
+const expected = { qty: "0.001" };
 
 const payloads = {
   getEntryOrderPayload: { category: "linear", symbol: "BTCUSDT", orderLinkId: "link-1", limit: "1" as const },
   getEntryOrderHistoryPayload: { category: "linear", symbol: "BTCUSDT", orderLinkId: "link-1", limit: "1" as const },
 };
 
-test("pending order confirmed when realtime fields match the desired package", async () => {
+test("pending order is confirmed from matching identity, recognized state, and quantity", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = listResponse([
     { orderStatus: "New", triggerPrice: "100000", qty: "0.001", stopLoss: "99000", takeProfit: "103000" },
   ]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "pending_confirmed" });
+});
+
+test("real Demo regression: Bybit canonical price text confirms the accepted order", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    {
+      orderStatus: "Untriggered",
+      triggerPrice: "63619.7",
+      qty: "0.001",
+      stopLoss: "64619.7",
+      takeProfit: "61619.7",
+    },
+  ]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.deepEqual(outcome, { kind: "pending_confirmed" });
+});
+
+test("a live order with a different quantity still fails closed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "Untriggered", triggerPrice: "63619.7", qty: "0.002", stopLoss: "64619.7", takeProfit: "61619.7" },
+  ]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("a read-back for a different order identity still fails closed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderLinkId: "different-link", orderStatus: "Untriggered", qty: "0.001" },
+  ]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+test("a malformed canonical price field still fails closed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "Untriggered", triggerPrice: "not-a-decimal", qty: "0.001" },
+  ]);
+  bybit.orderHistoryResponse = listResponse([]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.deepEqual(outcome, { kind: "ambiguous" });
 });
 
 test("full fill before acknowledgement is classified from realtime and returns an aggregate observation", async () => {
@@ -33,7 +81,7 @@ test("full fill before acknowledgement is classified from realtime and returns a
     { orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "99950" },
   ]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.equal(outcome.kind, "full_fill");
   if (outcome.kind === "full_fill") {
@@ -62,7 +110,7 @@ test("a Filled row whose cumExecQty is a number rather than a string is ambiguou
   };
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -73,7 +121,7 @@ test("partial fill before acknowledgement records observed filled and remaining 
     { orderStatus: "PartiallyFilled", cumExecQty: "0.0004", qty: "0.001" },
   ]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.equal(outcome.kind, "partial_fill");
   if (outcome.kind === "partial_fill") {
@@ -87,7 +135,7 @@ test("rejected before any fill is classified rejected/deactivated with no fill",
   bybit.orderByLinkIdResponse = listResponse([]);
   bybit.orderHistoryResponse = listResponse([{ orderStatus: "Rejected", cumExecQty: "0" }]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "terminal_without_fill" });
 });
@@ -97,7 +145,7 @@ test("full fill resolves only via the order-history fallback when the order has 
   bybit.orderByLinkIdResponse = listResponse([]); // absent from /v5/order/realtime
   bybit.orderHistoryResponse = listResponse([{ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100010" }]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.equal(outcome.kind, "full_fill");
   assert.equal(bybit.getOrderByLinkIdCalls.length > 0, true);
@@ -109,18 +157,18 @@ test("not_found is returned when both queries cleanly find nothing within the bo
   bybit.orderByLinkIdResponse = listResponse([]);
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "not_found" });
 });
 
-test("a filled order reporting a different qty or triggerPrice is not blindly trusted as our own package", async () => {
+test("a filled order reporting a different qty is not blindly trusted as our own package", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = listResponse([
-    { orderStatus: "Filled", qty: "999", triggerPrice: "1", cumExecQty: "999" },
+    { orderStatus: "Filled", qty: "999", cumExecQty: "999" },
   ]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.equal(outcome.kind, "ambiguous");
 });
@@ -132,7 +180,7 @@ test("a query exception is never treated as a not_found result: confirmation sta
   };
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -196,7 +244,7 @@ test("a structurally malformed realtime response with a clean empty history is a
   bybit.orderByLinkIdResponse = malformedResponse();
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -206,7 +254,7 @@ test("a clean empty realtime with a structurally malformed history is ambiguous,
   bybit.orderByLinkIdResponse = listResponse([]);
   bybit.orderHistoryResponse = malformedResponse();
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -226,7 +274,7 @@ test("valid empty realtime and valid empty history for the whole retry budget st
   bybit.orderByLinkIdResponse = listResponse([]);
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "not_found" });
 });
@@ -236,7 +284,7 @@ test("an unrecognized realtime order status with clean empty history for the who
   bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "SomeFutureBybitStatus" }]);
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -246,7 +294,7 @@ test("a terminal-without-fill realtime status with clean empty history is ambigu
   bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "Cancelled", cumExecQty: "0" }]);
   bybit.orderHistoryResponse = listResponse([]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
 });
@@ -256,7 +304,7 @@ test("an unrecognized realtime status resolved by a definitive terminal-without-
   bybit.orderByLinkIdResponse = listResponse([{ orderStatus: "SomeFutureBybitStatus" }]);
   bybit.orderHistoryResponse = listResponse([{ orderStatus: "Rejected", cumExecQty: "0" }]);
 
-  const outcome = await confirmEntryPackage({ bybit, ...payloads, desired });
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
   assert.deepEqual(outcome, { kind: "terminal_without_fill" });
 });
