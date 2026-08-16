@@ -24,22 +24,28 @@ confirmation succeeds.
 - **WHEN** the create request is rejected or fails at the transport level
 - **THEN** ABI SHALL NOT return `entry_package_applied` and SHALL return a safe error
 
-### Requirement: ABI replaces a live order when the desired entry package changes
-When an existing trade cycle has a live or confirmed order and the desired entry changes,
-ABI SHALL either amend the existing order in place or replace it via cancel-and-create,
-depending on which fields changed, and SHALL confirm the result before acknowledging
-success.
+### Requirement: A desired-entry change on an existing binding is served by cancellation only
+When an existing trade cycle has a live or confirmed order and the desired entry changes
+in any way (side, price, quantity, stop, or take), ABI SHALL treat the request identically
+to an explicit CANCEL: it SHALL cancel the existing exchange order, confirm the
+cancellation, and acknowledge `entry_package_absent`. ABI SHALL NOT amend the existing
+order in place, and SHALL NOT create a new order as part of the same request. A new
+desired entry is applied only by a subsequent, independent PUT for a trade cycle with no
+existing binding.
 
-#### Scenario: Compatible field change amends the existing order
-- **WHEN** price, quantity, stop, or take fields change but side is unchanged
-- **THEN** ABI SHALL amend the existing exchange order in place, preserving its order
-  identity, and confirm the amendment before acknowledging `entry_package_applied`
+#### Scenario: Any desired-entry change cancels rather than replaces
+- **WHEN** a PUT request specifies a non-null `desired_entry` for a trade cycle that
+  already has a live or confirmed order, and that `desired_entry` differs from the
+  currently stored one
+- **THEN** ABI SHALL cancel the existing exchange order, confirm the cancellation, and
+  return `entry_package_absent`
+- **AND** ABI SHALL NOT create a new order in the same request
 
-#### Scenario: Side change replaces the order via cancel-and-create
-- **WHEN** the desired side changes for an existing trade cycle
-- **THEN** ABI SHALL cancel the existing order and create a new order under a new
-  identity for that trade cycle, confirming the new order before acknowledging
-  `entry_package_applied`
+#### Scenario: An identical repeat PUT still revalidates rather than cancelling
+- **WHEN** a PUT request specifies a non-null `desired_entry` identical to the currently
+  stored one
+- **THEN** this Requirement SHALL NOT apply, and ABI SHALL instead revalidate the existing
+  binding per the existing repeat-PUT revalidation requirement
 
 ### Requirement: ABI cancels or confirms absence of a desired entry package
 When the desired entry is null, ABI SHALL cancel any live order for that trade cycle and
@@ -76,6 +82,25 @@ acknowledge absence, or confirm absence directly when nothing was ever live.
 - **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that result, even
   if a subsequent history query cleanly reports the order absent
 
+#### Scenario: A cancel transport failure is durably recorded as unknown, not silently left pending
+- **WHEN** ABI dispatches a cancel command and the exchange call throws or times out
+  before ABI can classify the outcome
+- **THEN** ABI SHALL durably record `status: "unknown"` for the binding before returning a
+  safe error
+- **AND** `pending_action` SHALL remain `"cancel"` so a subsequent repeat PUT can safely
+  resend it
+
+#### Scenario: A repeat cancel-intent PUT revalidates before resending
+- **WHEN** a PUT request specifies a null `desired_entry` and the stored record's status
+  is not already `absent` or `terminal_unfilled`
+- **THEN** ABI SHALL query the exchange for the existing order's current state before
+  resending the cancel command
+- **AND** ABI SHALL resend cancel only if that query confirms the order is still live
+- **AND** if the query confirms the order is already terminal, ABI SHALL record the
+  confirmed outcome without resending
+- **AND** if the query is inconclusive, ABI SHALL record `status: "unknown"` without
+  resending
+
 ### Requirement: A changed ticker within an existing trade cycle is rejected without contacting the exchange
 The `ticker` associated with a trade cycle is fixed at first application. ABI SHALL
 reject any request that supplies a different ticker for the same trade cycle without
@@ -87,10 +112,10 @@ making any exchange call.
 - **THEN** ABI SHALL return a safe error and SHALL NOT send any request to the exchange
 
 ### Requirement: Entry-package Bybit calls use the resolved category, not global configuration
-For entry-package create/amend/cancel/query payloads and instrument trading-rules
-lookup, ABI SHALL source `category` from the resolved (or, for an existing binding,
-previously stored) exchange instrument identity, rather than from the global Bybit
-category configuration value.
+For entry-package create/cancel/query payloads and instrument trading-rules lookup, ABI
+SHALL source `category` from the resolved (or, for an existing binding, previously
+stored) exchange instrument identity, rather than from the global Bybit category
+configuration value.
 
 #### Scenario: Create payload category comes from the resolved identity
 - **WHEN** ABI builds the create payload for a new binding
@@ -111,32 +136,31 @@ category configuration value.
 
 ### Requirement: The correlation record stores the resolved category for reuse
 The entry-package correlation record SHALL durably store `exchange_category` alongside
-the existing `exchange_symbol`, so that a later amend, cancel, or query against the same
-binding uses the category it was originally resolved with, without re-resolving the
-ticker.
+the existing `exchange_symbol`, so that a later cancel or query against the same binding
+uses the category it was originally resolved with, without re-resolving the ticker.
 
 #### Scenario: A newly created binding's record includes its category
 - **WHEN** ABI durably persists the record for a new binding
 - **THEN** the record SHALL include the resolved `exchange_category` alongside
   `exchange_symbol`
 
-#### Scenario: Amend, cancel, realtime query, and history query all reuse the stored category
-- **WHEN** ABI amends, cancels, or queries (realtime or history) an existing binding
+#### Scenario: Cancel, realtime query, and history query all reuse the stored category
+- **WHEN** ABI cancels or queries (realtime or history) an existing binding
 - **THEN** every one of those payloads SHALL use that binding's stored
   `exchange_category` together with its stored `exchange_symbol`, rather than the global
   Bybit category configuration value or a fresh resolution
 
-### Requirement: Metadata-only changes update the record without amending or recreating the order
+### Requirement: Metadata-only changes update the record without cancelling or recreating the order
 When only `source_plan_bar_open_time_ms` or `locked_exit_profile` differ from the
 previously applied desired entry, with side, price, quantity, stop, and take unchanged,
 ABI SHALL durably update the stored desired entry and revalidate the existing order
-without sending an amend or create request.
+without sending a cancel or create request.
 
 #### Scenario: Metadata-only change durably updates without an exchange write
 - **WHEN** a PUT request changes only `source_plan_bar_open_time_ms` or
   `locked_exit_profile` relative to the previously applied desired entry
 - **THEN** ABI SHALL durably persist the updated desired entry and perform a bounded
-  revalidation of the existing order without sending an amend or create request to the
+  revalidation of the existing order without sending a cancel or create request to the
   exchange
 
 ### Requirement: Trigger direction is derived deterministically from side, not from market conditions
@@ -186,9 +210,9 @@ that only advances when a physically new order is created.
   new one
 
 #### Scenario: An unconfirmed attempt is recovered by resending, not just re-querying
-- **WHEN** a previous create or amend attempt's outcome was never durably confirmed (e.g.
-  ABI restarted or lost the response mid-flight), a later identical request arrives, and
-  the exchange genuinely has no record of that attempt anywhere
+- **WHEN** a previous create attempt's outcome was never durably confirmed (e.g. ABI
+  restarted or lost the response mid-flight), a later identical request arrives, and the
+  exchange genuinely has no record of that attempt anywhere
 - **THEN** ABI SHALL resend the same command against the exchange, reusing the
   already-reserved order identity, rather than only re-querying indefinitely without ever
   resending
@@ -200,18 +224,13 @@ that only advances when a physically new order is created.
 - **THEN** ABI SHALL NOT resend the command, since the order may already exist on the
   exchange, and SHALL instead return a safe internal error
 
-#### Scenario: Replacement via cancel-and-create receives a new identity
-- **WHEN** ABI replaces an order by cancelling the old one and creating a new one
-- **THEN** the new order SHALL receive an identity distinct from every previous order for
-  that trade cycle
-
 ### Requirement: ABI durably records correlation state before acknowledging success
 ABI SHALL durably persist a record of the intended action before contacting the exchange,
 and SHALL durably commit the confirmed outcome before returning any success
 acknowledgement.
 
 #### Scenario: Provisional record exists before the exchange is contacted
-- **WHEN** ABI begins processing a create, replace, or cancel command
+- **WHEN** ABI begins processing a create or cancel command
 - **THEN** ABI SHALL durably persist a record of the intended action before sending any
   request to the exchange
 
@@ -221,19 +240,32 @@ acknowledgement.
   crash immediately before that commit cannot have produced a successful response
 
 ### Requirement: ABI confirms package application with field-level accuracy before acknowledging success
-After a create or amend is sent, ABI SHALL verify within a bounded window that the
-exchange order's actual price, quantity, stop, and take fields match the desired package
-before acknowledging success, not merely that an order exists.
+After the exchange accepts a create, and when ABI revalidates the same binding for a
+repeat PUT or metadata-only update, ABI SHALL verify within a bounded window that the
+read-back identifies the expected `category`, `symbol`, and `orderLinkId`, reports a
+recognized live or filled state, carries the expected quantity, and contains structurally
+valid exchange-reported numeric fields. The exchange-reported `triggerPrice`, `stopLoss`,
+and `takeProfit` SHALL be treated as the authoritative exchange representation and SHALL
+NOT be required to equal the raw desired-entry decimal text. This requirement's only
+change from the currently active canonical-price-confirmation semantics
+(`abi-entry-package-exchange-canonical-confirmation-v1`) is the removal of "or amend" from
+its trigger clause, since this change removes physical amend entirely — the identity,
+quantity, state, and exchange-canonical-price rules are otherwise unchanged and are not
+being reintroduced as raw decimal equality.
 
-#### Scenario: Matching fields confirm the package
-- **WHEN** a bounded confirmation query finds the order live with trigger price,
-  quantity, stop, and take matching the desired package
-- **THEN** ABI SHALL return `entry_package_applied`
+#### Scenario: Exchange-canonical prices do not create false ambiguity
+- **WHEN** a successful create is read back for the same correctly identified order with
+  the expected quantity and a recognized state, but Bybit represents `triggerPrice`,
+  `stopLoss`, or `takeProfit` with decimal text different from the raw desired-entry text
+- **THEN** ABI SHALL accept those structurally valid exchange-canonical price fields and
+  SHALL NOT make confirmation ambiguous solely because their text or numeric values differ
+  from the raw desired-entry fields
 
-#### Scenario: Mismatched fields do not confirm the package
-- **WHEN** the exchange-reported order fields do not match the desired package after the
-  bounded confirmation window
-- **THEN** ABI SHALL NOT return `entry_package_applied`
+#### Scenario: Identity quantity malformed or state mismatch fails closed
+- **WHEN** bounded confirmation cannot establish the expected order identity, expected
+  quantity, a recognized live or filled state, or structurally valid exchange-reported
+  numeric fields
+- **THEN** ABI SHALL NOT return `entry_package_applied` and SHALL fail confirmation safely
 
 #### Scenario: Ambiguous confirmation fails safely
 - **WHEN** bounded confirmation cannot determine whether the package is pending, filled,
@@ -261,8 +293,8 @@ before acknowledging success, not merely that an order exists.
   text, or violates that field's sign rule (`qty`/`avgPrice` must be strictly positive
   when present; `cumExecQty`/`triggerPrice`/`stopLoss`/`takeProfit` must be zero or
   positive when present; none may be negative)
-- **THEN** ABI SHALL NOT use that row's fields as evidence the desired package's fields
-  match or fail to match, and SHALL treat the query the same as a query failure
+- **THEN** ABI SHALL NOT use that row as confirming evidence and SHALL treat the query the
+  same as a query failure
 
 #### Scenario: An unrecognized order status is found but inconclusive, not malformed
 - **WHEN** a confirmation query returns a single, correctly-identified row with a
@@ -450,14 +482,14 @@ Every failure, timeout, or unclassifiable outcome SHALL map to one of the existi
 error responses, never to a success acknowledgement.
 
 #### Scenario: Every non-success outcome maps to a safe error
-- **WHEN** any step of applying, replacing, confirming, or cancelling a package fails,
-  times out, or cannot be classified
+- **WHEN** any step of applying, confirming, or cancelling a package fails, times out, or
+  cannot be classified
 - **THEN** ABI SHALL return one of the existing public error responses and SHALL NOT
   return `entry_package_applied` or `entry_package_absent`
 
 #### Scenario: A skipped live execution never produces a success acknowledgement
-- **WHEN** the live execution guard reports that a create, amend, or cancel command was
-  skipped rather than sent to the exchange
+- **WHEN** the live execution guard reports that a create or cancel command was skipped
+  rather than sent to the exchange
 - **THEN** ABI SHALL return a safe internal error and SHALL NOT return
   `entry_package_applied` or `entry_package_absent`
 
