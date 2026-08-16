@@ -28,4 +28,4 @@ jobs:
         run: npm run validate:openapi
 
       - name: OpenSpec strict validation
-        run: npx openspec validate --all --strict --no-interactive
+        run: npx -y -p @fission-ai/openspec openspec validate --all --strict --no-interactive
