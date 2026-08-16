@@ -19,17 +19,73 @@ composite-key lookup and no other lookup mechanism.
   missing record proves only that ABI has no record of this pair, not that no exchange
   side effect could have occurred for it
 
+### Requirement: A durably closed correlation status resolves the matching terminal recovery state directly, with no exchange query
+When the correlation record's own `status` is already one of ABI's canonical durably
+closed statuses — `absent`, `terminal_unfilled`, or `terminal_closed`, exactly the set
+`isDurablyClosedEntryPackageStatus` defines — ABI SHALL resolve the corresponding
+terminal recovery state directly from that status, before checking `order_link_id` and
+without querying the exchange at all. `absent` and `terminal_unfilled` both resolve
+`terminal_without_fill`; `terminal_closed` resolves `terminal_after_fill`. This is
+positive evidence, not an inference from absence: each of these statuses is written only
+by a previously completed, positively confirmed ABI operation (e.g. a confirmed CANCEL
+durably persists `status: "absent"`) — a fact ABI already durably holds about its own
+prior write, not a conclusion drawn from an empty or missing exchange query result. Using
+it does not weaken the "absence of evidence is never treated as evidence of absence" rule
+below; it is the positive-durable-fact case that rule's own reasoning already carves out.
+This is the only condition under which recovery resolution requires no exchange query;
+every other status proceeds to the order_link_id and dual-query resolution below,
+including the case where `order_link_id` is null for a status that is not one of these
+three (e.g. `unknown`), which continues to fail safe rather than being inferred terminal.
+
+#### Scenario: A durably absent record resolves terminal_without_fill without any exchange query
+- **WHEN** the correlation record's `status` is `absent`
+- **THEN** ABI resolves `terminal_without_fill`
+- **AND** ABI issues no order query and no position query to resolve it
+
+#### Scenario: A durably terminal-unfilled record resolves terminal_without_fill without any exchange query
+- **WHEN** the correlation record's `status` is `terminal_unfilled`
+- **THEN** ABI resolves `terminal_without_fill`
+- **AND** ABI issues no order query and no position query to resolve it
+
+#### Scenario: A durably terminal-closed record resolves terminal_after_fill without any exchange query
+- **WHEN** the correlation record's `status` is `terminal_closed`
+- **THEN** ABI resolves `terminal_after_fill`
+- **AND** ABI issues no order query and no position query to resolve it
+
+#### Scenario: A lost success response remains recoverable through the record ABI already durably wrote
+- **WHEN** a CANCEL (or any other operation) is positively confirmed and durably
+  persisted by ABI as one of the three durably closed statuses, but the caller never
+  receives that HTTP response (e.g. it is lost in transit)
+- **THEN** a later recovery-state query for the same pair still resolves the matching
+  terminal state directly from the durable record
+- **AND** this holds even though the same write already cleared `order_link_id` to
+  `null` — a later recovery-state query is not required to positively re-establish
+  through the exchange a fact ABI already durably confirmed itself
+
+#### Scenario: A null order_link_id on a status that is not durably closed still fails safe
+- **WHEN** the correlation record's `order_link_id` is `null` but its `status` is not
+  `absent`, `terminal_unfilled`, or `terminal_closed` (e.g. `unknown`)
+- **THEN** ABI does NOT resolve any terminal state from this alone
+- **AND** ABI fails safe, exactly as it would for any other inconclusive attempt — a
+  null `order_link_id` alone, without one of the three durably closed statuses, is never
+  broadly interpreted as terminal
+
 ### Requirement: Recovery resolution classifies the trade cycle into exactly one of four states, or fails safe on contradictory or incomplete evidence
-Given an existing correlation record, ABI SHALL resolve exactly one of: `entry_order_live`,
-`position_open`, `terminal_without_fill`, or `terminal_after_fill` — or, when it cannot
-positively establish one of those four from non-contradictory evidence, ABI SHALL fail
-safe rather than resolve anything. Resolution SHALL combine a bounded order query
-(realtime and history, using the same fill-priority classification already used to
-confirm package application) with a bounded position query, following the same
-dual-query, bounded-retry pattern `close-execution` already uses to verify both
-postconditions of a close. No state is resolved from the order query alone or the
-position query alone — both signals SHALL be positively established and SHALL agree
-before ABI resolves `position_open`, `terminal_after_fill`, or `terminal_without_fill`; a
+Given an existing correlation record whose `status` is not already one of the three
+durably closed statuses resolved directly above, ABI SHALL resolve exactly one of:
+`entry_order_live`, `position_open`, `terminal_without_fill`, or `terminal_after_fill` —
+or, when it cannot positively establish one of those four from non-contradictory
+evidence, ABI SHALL fail safe rather than resolve anything. Resolution SHALL combine a
+bounded order query (realtime and history, using the same fill-priority classification
+already used to confirm package application) with a bounded position query, following
+the same dual-query, bounded-retry pattern `close-execution` already uses to verify both
+postconditions of a close. This dual-query, bounded-retry resolution path is required
+only when resolving from current exchange observations, as in this Requirement — it is
+not required, and not performed, when the record's own durably closed status already
+resolves the state directly (the prior Requirement). No state is resolved from the order
+query alone or the position query alone — both signals SHALL be positively established
+and SHALL agree before ABI resolves `position_open`, `terminal_after_fill`, or
+`terminal_without_fill`; a
 fill signal on its own (including an order found `PartiallyFilled`), or a terminal-order
 signal on its own, is never sufficient by itself. In particular, `terminal_without_fill`
 requires the position query to positively confirm no open position — a position query

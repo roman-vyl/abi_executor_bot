@@ -11,6 +11,7 @@ import {
   unknownTradeCycleBindingResult,
 } from "../../domain/entryCycleRecoveryApi.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
+import { isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
 import type { BybitAdapter, BybitOrderSide, PositionQueryResult } from "../../exchange/bybitAdapter.js";
@@ -88,12 +89,28 @@ export class EntryCycleRecoveryResolutionService {
       return unknownTradeCycleBindingResult();
     }
 
+    // A durably closed status (absent, terminal_unfilled, terminal_closed)
+    // is ABI's own previously confirmed fact — a positive durable record
+    // produced by a prior completed operation, not an inference from an
+    // empty exchange query. Resolving directly from it, before ever
+    // requiring order_link_id or querying Bybit, is what keeps a successful
+    // cancel or entry-package outcome recoverable even when the caller lost
+    // the original HTTP response: the record already durably proves the
+    // fact recovery exists to answer, so no exchange query is required or
+    // performed. This does not weaken "absence of evidence is never
+    // evidence of absence" — it is not inference from silence.
+    if (isDurablyClosedEntryPackageStatus(record.status)) {
+      return record.status === "terminal_closed" ? terminalAfterFillResult() : terminalWithoutFillResult();
+    }
+
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
-      // No order identity is bound (never dispatched, or already durably
-      // resolved to absent) — there is nothing to query and no positive
-      // evidence this capability can act on. Fails safe like any other
-      // inconclusive attempt rather than inventing a fifth state.
+      // The status above already ruled out every durably closed case — a
+      // null order_link_id here means no order identity is bound for a
+      // still-open, non-terminal status (e.g. never dispatched, or an
+      // unresolved "unknown"/"create_failed"): there is nothing to query and
+      // no positive evidence this capability can act on. Fails safe like any
+      // other inconclusive attempt rather than inventing a fifth state.
       return internalErrorResult();
     }
 

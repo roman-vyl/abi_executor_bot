@@ -183,6 +183,46 @@ state-resolver` on the Runtime side) already treats this response as an unresolv
 failure — `pending_entry_recovery` untouched, retried later — identically to every other
 non-positive response.
 
+### 6. A durably closed correlation status resolves recovery directly, with no exchange query
+
+`entryPackageExecutionRecord.ts` already exports `isDurablyClosedEntryPackageStatus`,
+shared by `open-position-resolution` and physical-scope release: a record whose `status`
+is `absent`, `terminal_unfilled`, or `terminal_closed` is durably proven to admit no
+position and no order that could still produce one — without needing a live exchange
+query. Recovery resolution now checks this first, before the `order_link_id`-null check
+and before any Bybit call: `absent`/`terminal_unfilled` resolve `terminal_without_fill`,
+`terminal_closed` resolves `terminal_after_fill`.
+
+This closes a specific composition gap discovered after the rest of this change was
+implemented: `confirmCancelOutcomeAndPersist`'s successful-cancel branch durably persists
+`status: "absent"` together with `order_link_id: null`, then returns `EntryPackageAbsent`.
+If the caller (Runtime) never receives that HTTP response — the write already committed,
+but the response is lost in transit — Runtime is left believing the cancel is still
+uncertain and later queries recovery-state for the same pair. Before this Decision, that
+query reached the `order_link_id === null` fail-safe check (Decision 2's own successful
+write already cleared it) and returned `500 internal_error` — forever, since nothing
+about that record ever changes again. A lost success response would have permanently
+blocked Runtime's guarded bar path with no path back to resolved, even though ABI had
+already positively confirmed the exact fact recovery exists to answer.
+
+This is not a weakening of Decision 4's "absence of evidence is never treated as evidence
+of absence" rule — it is the positive-evidence case that rule's own reasoning already
+implies. Decision 4 refuses to infer a terminal state from an *empty* or *unavailable*
+query result, because that proves nothing about what actually happened. A durably closed
+`status`, by contrast, is not an empty result at all: it is ABI's own record of a
+previously completed, positively confirmed write — the same durable fact
+`isDurablyClosedEntryPackageStatus` already lets other capabilities trust without
+re-querying the exchange. Using it here is exactly the same trust, applied to the one
+consumer (recovery resolution) that had not yet been taught to check it.
+
+The dual-query, bounded-retry resolution path (Decision 3) and the `order_link_id`
+fail-safe check remain exactly as specified for every record whose `status` is *not*
+already one of the three durably closed values — this Decision adds a first check, not a
+replacement for the existing one. In particular, a null `order_link_id` on a
+non-durably-closed status (e.g. `unknown`) still fails safe exactly as before; this
+Decision is deliberately narrow to the three canonical statuses, not a broad "null
+`order_link_id` means terminal" inference.
+
 ## Risks / Trade-offs
 
 - [Removing amend increases order churn: every desired-entry change now cancels and later

@@ -7,6 +7,7 @@ import test from "node:test";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type {
   EntryPackageExecutionRecord,
+  EntryPackageExecutionStatus,
   StoredEntryPackagePendingAction,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
 import { EntryCycleRecoveryResolutionService } from "../../src/services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
@@ -20,6 +21,91 @@ test("missing correlation record fails closed as unknown_trade_cycle_binding, ne
       statusCode: 422,
       body: { error: { code: "unknown_trade_cycle_binding", message: "no correlation record exists for the requested pair" } },
     });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0);
+  });
+});
+
+// A durably closed status is ABI's own previously confirmed fact — a
+// positive durable record produced by a prior completed operation, not an
+// inference from an empty exchange query. Recovery resolves directly from
+// it, before ever requiring order_link_id or querying Bybit, so a lost
+// EntryPackageAbsent/terminal HTTP response never leaves the pair
+// unrecoverable. See isDurablyClosedEntryPackageStatus.
+test("status: absent resolves terminal_without_fill directly from the durable record, zero Bybit queries", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "absent", orderLinkId: null, pendingAction: null }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "terminal_without_fill",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0);
+  });
+});
+
+test("status: terminal_unfilled resolves terminal_without_fill directly from the durable record, zero Bybit queries", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "terminal_unfilled", orderLinkId: null, pendingAction: null }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "terminal_without_fill",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0);
+  });
+});
+
+test("status: terminal_closed resolves terminal_after_fill directly from the durable record, zero Bybit queries", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "terminal_closed", orderLinkId: null, pendingAction: null }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "terminal_after_fill",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0);
+  });
+});
+
+// A null order_link_id on a status that is NOT one of the three durably
+// closed statuses (e.g. a genuinely inconclusive "unknown") must still fail
+// safe — the durable-status short-circuit above is deliberately narrow, not
+// a broad "order_link_id === null means terminal" rule.
+test("a null order_link_id on a non-durably-closed status still fails safe (500), never inferred terminal", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", orderLinkId: null }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
     assert.equal(bybit.getOpenPositionsCalls.length, 0);
   });
@@ -371,7 +457,12 @@ function openPosition(input: { side: "Buy" | "Sell"; avgPrice: string; openTime:
 }
 
 function makeRecord(
-  overrides: Partial<{ side: "long" | "short"; pendingAction: StoredEntryPackagePendingAction | null }> = {},
+  overrides: Partial<{
+    side: "long" | "short";
+    pendingAction: StoredEntryPackagePendingAction | null;
+    status: EntryPackageExecutionStatus;
+    orderLinkId: string | null;
+  }> = {},
 ): EntryPackageExecutionRecord {
   return {
     strategy_instance_id: "instance-1",
@@ -391,10 +482,10 @@ function makeRecord(
     },
     risk_multiplier: "1",
     calculated_quantity: "0.001",
-    order_link_id: "link-1",
+    order_link_id: overrides.orderLinkId === undefined ? "link-1" : overrides.orderLinkId,
     order_id: "order-1",
     generation: 1,
-    status: "unknown",
+    status: overrides.status ?? "unknown",
     early_execution_observation: null,
     binding_history: [],
     pending_action: overrides.pendingAction === undefined ? "cancel" : overrides.pendingAction,

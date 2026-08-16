@@ -95,3 +95,24 @@
 
 - [x] 6.1 Run `npm test`, `npm run typecheck`, and the OpenAPI verification command.
 - [x] 6.2 Run strict OpenSpec validation (`npm exec -- openspec validate --all --strict`).
+
+## 7. Fix: durable-status short-circuit (post-implementation correctness fix)
+
+A lost `EntryPackageAbsent`/terminal HTTP response after a positively confirmed cancel or
+terminal outcome left the pair permanently unrecoverable, since the same write that
+confirms it also clears `order_link_id` to `null`, and `order_link_id === null` was
+unconditionally fail-safe. See design.md Decision 6.
+
+- [x] 7.1 In `EntryCycleRecoveryResolutionService.process`, check
+      `isDurablyClosedEntryPackageStatus(record.status)` before the `order_link_id`-null
+      check and before any exchange query: `absent`/`terminal_unfilled` resolve
+      `terminal_without_fill`; `terminal_closed` resolves `terminal_after_fill`. No
+      exchange query is issued for this path.
+- [x] 7.2 Every other status (including a null `order_link_id` on a non-durably-closed
+      status) proceeds to the existing `order_link_id`/dual-query resolution unchanged.
+- [x] 7.3 Regression coverage: `absent`, `terminal_unfilled`, and `terminal_closed` each
+      resolve their matching state with zero Bybit queries; a null `order_link_id` on a
+      non-durably-closed status still fails safe; a cross-service integration regression
+      proves a lost `EntryPackageAbsent` response from a real confirmed cancel remains
+      recoverable via a later, independent recovery-state query against the same durable
+      file.
