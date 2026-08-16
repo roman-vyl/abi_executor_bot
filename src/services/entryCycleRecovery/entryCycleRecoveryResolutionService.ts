@@ -12,7 +12,8 @@ import {
 } from "../../domain/entryCycleRecoveryApi.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
-import type { BybitAdapter, PositionQueryResult } from "../../exchange/bybitAdapter.js";
+import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
+import type { BybitAdapter, BybitOrderSide, PositionQueryResult } from "../../exchange/bybitAdapter.js";
 import type { BybitGetOrderByLinkIdPayload, BybitGetOrderHistoryPayload } from "../../exchange/bybitOrderMapper.js";
 import {
   FILLED_STATUSES,
@@ -116,7 +117,7 @@ export class EntryCycleRecoveryResolutionService {
       });
       const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
 
-      const resolved = resolveRecoveryState(orderSignal, positionQuery);
+      const resolved = resolveRecoveryState(orderSignal, positionQuery, record.desired_entry);
       if (resolved !== undefined) {
         return this.toHttpResult(resolved, record);
       }
@@ -168,11 +169,20 @@ export class EntryCycleRecoveryResolutionService {
 // clean-but-empty result everywhere, a position query that merely fails to
 // contradict rather than positively confirming flat, and any contradictory
 // pairing — falls through to `undefined`, the caller's signal to fail safe.
+//
+// A positively-found position only counts as "open" for this trade cycle
+// when its side plausibly matches the record's own declared desired_entry
+// side (Buy<->long, Sell<->short) — the same plausibility rule
+// OpenPositionResolutionService already applies on the normal path. A
+// found position on the opposite side is contradictory evidence (some
+// other exposure on the same symbol, not this binding's own fill) and must
+// never be treated as confirming position_open.
 function resolveRecoveryState(
   orderSignal: OrderRecoverySignal,
   positionQuery: PositionQueryResult,
+  desiredEntry: DesiredEntryDto | null,
 ): ResolvedOutcome | undefined {
-  const positionOpen = positionQuery.kind === "position";
+  const positionOpen = positionQuery.kind === "position" && positionSideMatches(positionQuery.row.side, desiredEntry);
   const positionFlat = positionQuery.kind === "no_position";
 
   if (orderSignal.kind === "live_unfilled" && positionFlat) {
@@ -193,6 +203,14 @@ function resolveRecoveryState(
   }
 
   return undefined;
+}
+
+function positionSideMatches(rowSide: BybitOrderSide, desiredEntry: DesiredEntryDto | null): boolean {
+  if (desiredEntry === null) {
+    return false;
+  }
+
+  return (rowSide === "Buy" && desiredEntry.side === "long") || (rowSide === "Sell" && desiredEntry.side === "short");
 }
 
 // Single-pass realtime-then-history classification of the order side of the

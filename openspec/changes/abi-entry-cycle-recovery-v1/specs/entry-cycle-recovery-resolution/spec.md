@@ -35,7 +35,13 @@ signal on its own, is never sufficient by itself. In particular, `terminal_witho
 requires the position query to positively confirm no open position — a position query
 that fails, times out, or is otherwise inconclusive does NOT satisfy this, even though it
 also does not "contradict" the order-side finding; absence of contradiction is not the
-same as a positive confirmation, and only the latter is sufficient.
+same as a positive confirmation, and only the latter is sufficient. A positively-found
+position confirms `position_open` only when its side plausibly matches the correlation
+record's own `desired_entry.side` (`Buy` with `long`, `Sell` with `short`) — the same
+plausibility rule `open-position-resolution` already applies. A found position on the
+opposite side is contradictory evidence (some other exposure on the same exchange
+symbol, not this binding's own fill) and ABI SHALL fail safe rather than resolve
+`position_open` from it.
 
 #### Scenario: A live, unfilled order resolves to entry_order_live
 - **WHEN** the order query positively finds the entry order in a live, unfilled state, and
@@ -56,6 +62,15 @@ same as a positive confirmation, and only the latter is sufficient.
   filled order with zero remaining quantity), and the position query positively confirms
   no open position
 - **THEN** ABI resolves `terminal_after_fill`, distinct from `terminal_without_fill`
+
+#### Scenario: A found position on the opposite side is contradictory, not position_open
+- **WHEN** the order query positively observes a fill (fully or partially filled), and the
+  position query positively finds an open position whose side does not plausibly match
+  the correlation record's `desired_entry.side` (e.g. a `long` record with a found `Sell`
+  position, or a `short` record with a found `Buy` position)
+- **THEN** ABI does NOT resolve `position_open` from this — the opposite-side position is
+  contradictory evidence, not confirmation of this binding's own fill
+- **AND** ABI fails safe instead of resolving any state from this contradictory evidence
 
 #### Scenario: A fill observed with a flat position but a still-live order fails safe
 - **WHEN** the order query positively observes a fill but the order is still live (e.g.

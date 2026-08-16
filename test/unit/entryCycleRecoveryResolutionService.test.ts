@@ -77,6 +77,35 @@ test("a Filled order confirmed by an open position resolves position_open", asyn
   });
 });
 
+// A found position only counts as confirming this trade cycle's own fill
+// when its side plausibly matches the record's declared desired_entry side
+// (the same rule OpenPositionResolutionService already applies) — the
+// opposite side is some other exposure on the same symbol, not evidence
+// this binding filled, and must fail safe rather than resolve position_open.
+test("a long record with an open Sell position fails safe: opposite-side exposure is contradictory, not position_open", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ side: "long" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "PartiallyFilled", cumExecQty: "0.0005" })]);
+    bybit.openPositionsResponse = openPosition({ side: "Sell", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("a short record with an open Buy position fails safe: opposite-side exposure is contradictory, not position_open", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ side: "short" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001" })]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
 test("a fill found only via order-history (already left the realtime set), confirmed flat, resolves terminal_after_fill without the applied entry package", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
@@ -250,7 +279,7 @@ function openPosition(input: { side: "Buy" | "Sell"; avgPrice: string; openTime:
   };
 }
 
-function makeRecord(): EntryPackageExecutionRecord {
+function makeRecord(overrides: Partial<{ side: "long" | "short" }> = {}): EntryPackageExecutionRecord {
   return {
     strategy_instance_id: "instance-1",
     trade_cycle_id: "cycle-1",
@@ -260,7 +289,7 @@ function makeRecord(): EntryPackageExecutionRecord {
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {
-      side: "long",
+      side: overrides.side ?? "long",
       source_plan_bar_open_time_ms: 1785000000000,
       planned_entry_price: "100000",
       initial_stop_price: "99000",

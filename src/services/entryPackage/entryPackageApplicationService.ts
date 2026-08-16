@@ -383,7 +383,21 @@ export class EntryPackageApplicationService {
     record: EntryPackageExecutionRecord,
     confirmation: PackageConfirmationOutcome,
   ): boolean {
-    return confirmation.kind === "not_found" && record.status !== "applied" && record.pending_action !== null;
+    // A legacy "amend"/"cancel_and_create" pending_action (see
+    // LegacyEntryPackagePendingAction) is never safe to resend as CREATE:
+    // the stored desired_entry may already describe a replacement B while
+    // the physical order the exchange genuinely has no record of could
+    // still have been the old A under a different identity. Only the two
+    // pending_action values current code ever writes are eligible to
+    // resend; a legacy binding instead falls through to
+    // persistConfirmationOutcome's "not_found"/"ambiguous" branch, which
+    // records status "unknown" and fails safe rather than resending or
+    // fabricating success.
+    return (
+      confirmation.kind === "not_found" &&
+      record.status !== "applied" &&
+      (record.pending_action === "create" || record.pending_action === "cancel")
+    );
   }
 
   private async resendPendingAction(

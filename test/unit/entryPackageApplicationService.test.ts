@@ -523,6 +523,55 @@ test("a create genuinely never dispatched (crash before Bybit ever saw it) self-
   });
 });
 
+// abi-entry-cycle-recovery-v1 removed in-place amend as active write
+// behavior, but an existing durable store can still contain a binding left
+// mid-amend by an earlier version of this service. A repeat PUT against
+// such a record must never resend CREATE: the stored desired_entry may
+// already describe the amend's replacement entry while the physical order
+// the exchange has no record of could still have been the pre-amend one —
+// resending CREATE could fabricate a second, unrelated order. It must fail
+// closed instead.
+test("a legacy amend pending_action never resends CREATE, even when the exchange confirms nothing found anywhere", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const desiredEntry = makeDesiredEntry();
+    const legacyRecord: EntryPackageExecutionRecord = {
+      strategy_instance_id: "instance-1",
+      trade_cycle_id: "cycle-1",
+      ticker: "BTCUSDT.P",
+      exchange_symbol: "BTCUSDT",
+      exchange_category: "linear",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      desired_entry: desiredEntry,
+      risk_multiplier: "1",
+      calculated_quantity: "0.001",
+      order_link_id: "legacy-link-1",
+      order_id: "legacy-order-1",
+      generation: 1,
+      status: "unknown",
+      early_execution_observation: null,
+      binding_history: [],
+      pending_action: "amend",
+      current_binding_started_at: "2026-01-01T00:00:00.000Z",
+    };
+    await repo.save(legacyRecord);
+
+    // The exchange confirms nothing found anywhere for this order identity
+    // — the one condition that would otherwise be grounds to resend.
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+
+    const result = await service.apply(makeCommand({ desiredEntry }));
+
+    assertInternalError(result);
+    assert.equal(bybit.createOrderCalls.length, 0, "a legacy amend binding is never resent as CREATE");
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "unknown");
+    assert.equal(record?.pending_action, "amend", "the legacy pending_action is preserved, not silently rewritten");
+    assert.notEqual((result.body as { status?: string }).status, "entry_package_applied");
+  });
+});
+
 test("a risk_multiplier-only change on an otherwise-identical repeat PUT is durably persisted", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
