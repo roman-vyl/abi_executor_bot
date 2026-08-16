@@ -3,7 +3,6 @@ import { createHmac } from "node:crypto";
 import type { AbiConfig } from "../config/config.js";
 import { classifyExactDecimalText, isExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
 import type {
-  BybitAmendOrderPayload,
   BybitCancelOrderPayload,
   BybitCancelAllOrdersPayload,
   BybitCreateOrderPayload,
@@ -92,7 +91,6 @@ export interface BybitAdapter {
   getOpenPositions(input?: GetOpenPositionsInput): Promise<unknown>;
   queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult>;
   createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown>;
-  amendOrder(payload: BybitAmendOrderPayload): Promise<unknown>;
   cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown>;
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
@@ -184,10 +182,6 @@ export class RestBybitAdapter implements BybitAdapter {
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
     return this.signedPost("/v5/order/create", payload);
-  }
-
-  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
-    return this.signedPost("/v5/order/amend", payload);
   }
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {
@@ -371,10 +365,6 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
     return stub("createOrder", payload);
-  }
-
-  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
-    return stub("amendOrder", payload);
   }
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {

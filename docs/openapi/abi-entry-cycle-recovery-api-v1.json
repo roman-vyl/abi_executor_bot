@@ -1,0 +1,435 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ABI Entry Cycle Recovery API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/recovery-state": {
+      "get": {
+        "operationId": "getEntryCycleRecoveryState",
+        "summary": "Read the exchange ground truth for one trade cycle whose last mutation outcome was ambiguous",
+        "description": "Resolves one of four recovery states — entry_order_live, position_open, terminal_without_fill, terminal_after_fill — from a bounded, read-only order-plus-position query. Never returns a terminal state except from positive evidence: a clean-but-empty result everywhere is treated the same as a genuine query failure, not as proof the entry never filled. This endpoint never causes an exchange side effect, including when it resolves entry_order_live.",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One of the four recovery states was positively resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryStateResponse"
+                },
+                "examples": {
+                  "entry_order_live": {
+                    "value": {
+                      "recovery_state": "entry_order_live",
+                      "applied_entry_package": {
+                        "applied_desired_entry": {
+                          "side": "long",
+                          "source_plan_bar_open_time_ms": 1785000000000,
+                          "planned_entry_price": "100000",
+                          "initial_stop_price": "99000",
+                          "initial_take_price": "103000",
+                          "locked_exit_profile": "runner"
+                        },
+                        "calculated_quantity": "0.001"
+                      },
+                      "first_fill_at_ms": null,
+                      "average_entry_price": null
+                    }
+                  },
+                  "position_open": {
+                    "value": {
+                      "recovery_state": "position_open",
+                      "applied_entry_package": {
+                        "applied_desired_entry": {
+                          "side": "long",
+                          "source_plan_bar_open_time_ms": 1785000000000,
+                          "planned_entry_price": "100000",
+                          "initial_stop_price": "99000",
+                          "initial_take_price": "103000",
+                          "locked_exit_profile": "runner"
+                        },
+                        "calculated_quantity": "0.001"
+                      },
+                      "first_fill_at_ms": 1785000012345,
+                      "average_entry_price": "100000"
+                    }
+                  },
+                  "terminal_without_fill": {
+                    "value": {
+                      "recovery_state": "terminal_without_fill",
+                      "applied_entry_package": null,
+                      "first_fill_at_ms": null,
+                      "average_entry_price": null
+                    }
+                  },
+                  "terminal_after_fill": {
+                    "value": {
+                      "recovery_state": "terminal_after_fill",
+                      "applied_entry_package": null,
+                      "first_fill_at_ms": null,
+                      "average_entry_price": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Transport validation failed, or no correlation record exists for the pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryStateBusinessError"
+                },
+                "examples": {
+                  "validation_failed": {
+                    "value": {
+                      "error": {
+                        "code": "validation_failed",
+                        "message": "request validation failed",
+                        "details": [
+                          {
+                            "path": "/path/trade_cycle_id",
+                            "message": "path value must be a non-empty string"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "unknown_trade_cycle_binding": {
+                    "value": {
+                      "error": {
+                        "code": "unknown_trade_cycle_binding",
+                        "message": "no correlation record exists for the requested pair"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "None of the four recovery states could be positively established — a query failed or was malformed, or every query consulted completed cleanly but found nothing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                },
+                "example": {
+                  "error": {
+                    "code": "internal_error",
+                    "message": "internal error"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AppliedDesiredEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "side",
+          "source_plan_bar_open_time_ms",
+          "planned_entry_price",
+          "initial_stop_price",
+          "initial_take_price",
+          "locked_exit_profile"
+        ],
+        "properties": {
+          "side": {
+            "type": "string",
+            "enum": ["long", "short"]
+          },
+          "source_plan_bar_open_time_ms": {
+            "type": "integer"
+          },
+          "planned_entry_price": {
+            "type": "string",
+            "format": "exact-decimal"
+          },
+          "initial_stop_price": {
+            "type": "string",
+            "format": "exact-decimal"
+          },
+          "initial_take_price": {
+            "type": "string",
+            "format": "positive-exact-decimal"
+          },
+          "locked_exit_profile": {
+            "type": "string"
+          }
+        }
+      },
+      "AppliedEntryPackage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "applied_desired_entry",
+          "calculated_quantity"
+        ],
+        "properties": {
+          "applied_desired_entry": {
+            "$ref": "#/components/schemas/AppliedDesiredEntry"
+          },
+          "calculated_quantity": {
+            "type": "string",
+            "format": "exact-decimal"
+          }
+        }
+      },
+      "RecoveryStateResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EntryOrderLiveResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PositionOpenResponse"
+          },
+          {
+            "$ref": "#/components/schemas/TerminalWithoutFillResponse"
+          },
+          {
+            "$ref": "#/components/schemas/TerminalAfterFillResponse"
+          }
+        ]
+      },
+      "EntryOrderLiveResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recovery_state",
+          "applied_entry_package",
+          "first_fill_at_ms",
+          "average_entry_price"
+        ],
+        "properties": {
+          "recovery_state": {
+            "const": "entry_order_live"
+          },
+          "applied_entry_package": {
+            "$ref": "#/components/schemas/AppliedEntryPackage"
+          },
+          "first_fill_at_ms": {
+            "type": "null"
+          },
+          "average_entry_price": {
+            "type": "null"
+          }
+        }
+      },
+      "PositionOpenResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recovery_state",
+          "applied_entry_package",
+          "first_fill_at_ms",
+          "average_entry_price"
+        ],
+        "properties": {
+          "recovery_state": {
+            "const": "position_open"
+          },
+          "applied_entry_package": {
+            "$ref": "#/components/schemas/AppliedEntryPackage"
+          },
+          "first_fill_at_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "average_entry_price": {
+            "type": "string",
+            "format": "positive-exact-decimal"
+          }
+        }
+      },
+      "TerminalWithoutFillResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recovery_state",
+          "applied_entry_package",
+          "first_fill_at_ms",
+          "average_entry_price"
+        ],
+        "properties": {
+          "recovery_state": {
+            "const": "terminal_without_fill"
+          },
+          "applied_entry_package": {
+            "type": "null"
+          },
+          "first_fill_at_ms": {
+            "type": "null"
+          },
+          "average_entry_price": {
+            "type": "null"
+          }
+        }
+      },
+      "TerminalAfterFillResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recovery_state",
+          "applied_entry_package",
+          "first_fill_at_ms",
+          "average_entry_price"
+        ],
+        "properties": {
+          "recovery_state": {
+            "const": "terminal_after_fill"
+          },
+          "applied_entry_package": {
+            "type": "null"
+          },
+          "first_fill_at_ms": {
+            "type": "null"
+          },
+          "average_entry_price": {
+            "type": "null"
+          }
+        }
+      },
+      "ValidationDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "RecoveryStateBusinessError": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ValidationFailedError"
+          },
+          {
+            "$ref": "#/components/schemas/UnknownTradeCycleBindingError"
+          }
+        ]
+      },
+      "ValidationFailedError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "code": {
+                "const": "validation_failed"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "details": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/components/schemas/ValidationDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "UnknownTradeCycleBindingError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "unknown_trade_cycle_binding"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "internal_error"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

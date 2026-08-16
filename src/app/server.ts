@@ -9,6 +9,7 @@ import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradi
 import { emitEvent } from "../observability/events.js";
 import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
 import { CloseApplicationService } from "../services/close/closeApplicationService.js";
+import { EntryCycleRecoveryResolutionService } from "../services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
@@ -17,6 +18,7 @@ import { writeJson } from "./http.js";
 import { replayCorrelationStore } from "./lifecycleEvents.js";
 import { installShutdownHandlers } from "./shutdown.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
+import { handleEntryCycleRecoveryRoutes } from "../routes/entryCycleRecoveryRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
 import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
 import { handlePositionManagementRoutes } from "../routes/positionManagementRoutes.js";
@@ -48,6 +50,11 @@ export function startServer(config: AbiConfig): void {
   });
 
   const openPositionResolutionService = new OpenPositionResolutionService({
+    correlationRepository,
+    bybit,
+  });
+
+  const entryCycleRecoveryResolutionService = new EntryCycleRecoveryResolutionService({
     correlationRepository,
     bybit,
   });
@@ -103,6 +110,17 @@ export function startServer(config: AbiConfig): void {
         request,
         response,
         resolutionService: openPositionResolutionService,
+        isReady: () => readiness.isReady,
+      })
+    ) {
+      return;
+    }
+
+    if (
+      await handleEntryCycleRecoveryRoutes({
+        request,
+        response,
+        resolutionService: entryCycleRecoveryResolutionService,
         isReady: () => readiness.isReady,
       })
     ) {

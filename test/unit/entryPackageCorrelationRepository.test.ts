@@ -8,6 +8,7 @@ import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPa
 import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
+  StoredEntryPackagePendingAction,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
 
 test("save writes one durable JSONL line and updates in-memory indexes", async () => {
@@ -56,6 +57,78 @@ test("replay fails readiness on non-final corruption", async () => {
     const result = await repo.replay();
 
     assert.equal(result.ok, false);
+  });
+});
+
+// abi-entry-cycle-recovery-v1 removed in-place amend and atomic
+// cancel-and-create as active write behavior, but an existing durable store
+// from before that change can still contain their pending_action values.
+// Replay must accept and preserve them rather than fail readiness — see
+// LegacyEntryPackagePendingAction.
+test("replay accepts a legacy pending_action: amend record without failing readiness", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const record = makeRecord({
+      orderLinkId: "link-1",
+      orderId: "order-1",
+      status: "pending_replace",
+      pendingAction: "amend",
+    });
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), record);
+  });
+});
+
+test("replay accepts a legacy pending_action: cancel_and_create record without failing readiness", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const record = makeRecord({
+      orderLinkId: "link-1",
+      orderId: "order-1",
+      status: "pending_replace",
+      pendingAction: "cancel_and_create",
+    });
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), record);
+  });
+});
+
+test("replay accepts a non-final legacy-pending_action line superseded by a later record for the same pair", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const legacy = makeRecord({
+      orderLinkId: "link-1",
+      orderId: "order-1",
+      generation: 1,
+      status: "pending_replace",
+      pendingAction: "amend",
+    });
+    const superseding = makeRecord({
+      orderLinkId: "link-2",
+      orderId: "order-2",
+      generation: 2,
+      status: "applied",
+    });
+    await writeFile(path, `${JSON.stringify(legacy)}\n${JSON.stringify(superseding)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), superseding);
+    // The legacy binding's identity remains reachable via history lookups
+    // even though it is no longer the pair's current record.
+    assert.deepEqual(repo.findByOrderLinkId("link-1"), legacy);
   });
 });
 
@@ -446,6 +519,7 @@ function makeRecord(
     generation: number;
     status: EntryPackageExecutionStatus;
     exchangeSymbol: string;
+    pendingAction: StoredEntryPackagePendingAction;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -465,7 +539,8 @@ function makeRecord(
     status: overrides.status ?? "pending_create",
     early_execution_observation: null,
     binding_history: [],
-    pending_action: overrides.orderLinkId !== undefined ? "create" : null,
+    pending_action:
+      overrides.pendingAction ?? (overrides.orderLinkId !== undefined ? "create" : null),
     current_binding_started_at: overrides.orderLinkId !== undefined ? "2026-01-01T00:00:00.000Z" : null,
   };
 }

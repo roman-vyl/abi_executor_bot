@@ -11,7 +11,6 @@ import type {
 } from "../../src/exchange/bybitAdapter.js";
 import { evaluatePositionQueryResponse } from "../../src/exchange/bybitAdapter.js";
 import type {
-  BybitAmendOrderPayload,
   BybitCancelAllOrdersPayload,
   BybitCancelOrderPayload,
   BybitCreateOrderPayload,
@@ -22,7 +21,6 @@ import type {
 
 export class FakeBybitAdapter implements BybitAdapter {
   readonly createOrderCalls: Array<BybitCreateOrderPayload | BybitMarketCloseOrderPayload> = [];
-  readonly amendOrderCalls: BybitAmendOrderPayload[] = [];
   readonly cancelOrderCalls: BybitCancelOrderPayload[] = [];
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
@@ -90,11 +88,6 @@ export class FakeBybitAdapter implements BybitAdapter {
   async createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown> {
     this.createOrderCalls.push(payload);
     return { retCode: 0, result: { orderLinkId: "fake-create" } };
-  }
-
-  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
-    this.amendOrderCalls.push(payload);
-    return { retCode: 0, result: { orderLinkId: payload.orderLinkId } };
   }
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {

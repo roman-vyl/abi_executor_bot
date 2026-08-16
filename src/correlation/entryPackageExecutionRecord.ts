@@ -31,8 +31,24 @@ export function isDurablyClosedEntryPackageStatus(
 // record's current binding, so a repeat PUT arriving after a crash or an
 // inconclusive confirmation knows exactly what to resend rather than only
 // being able to re-query. null once the current binding's outcome is
-// definitively known (applied, terminal_unfilled, or absent).
-export type EntryPackagePendingAction = "create" | "amend" | "cancel_and_create" | "cancel";
+// definitively known (applied, terminal_unfilled, or absent). These are the
+// only values current write paths ever produce.
+export type EntryPackagePendingAction = "create" | "cancel";
+
+// Historical pending_action values a durable store may still contain from
+// before abi-entry-cycle-recovery-v1 removed in-place amend and atomic
+// cancel-and-create. No write path in this codebase produces these anymore
+// — they exist solely so replay of an existing store does not fail
+// readiness against records written by an earlier version of this service.
+// An ambiguous legacy "amend" is inherently unsafe to resend as CREATE: the
+// stored desired_entry may already describe a replacement B while the
+// physical order on the exchange could still be the old A, so no current
+// code path infers or resends anything from these values — see
+// shouldResendPendingAction in entryPackageApplicationService.ts, the one
+// place that reads pending_action to decide whether to resend.
+export type LegacyEntryPackagePendingAction = "amend" | "cancel_and_create";
+
+export type StoredEntryPackagePendingAction = EntryPackagePendingAction | LegacyEntryPackagePendingAction;
 
 export type EarlyExecutionObservation = {
   order_status: string;
@@ -75,7 +91,10 @@ export type EntryPackageExecutionRecord = {
   status: EntryPackageExecutionStatus;
   early_execution_observation: EarlyExecutionObservation | null;
   binding_history: BindingHistoryEntry[];
-  pending_action: EntryPackagePendingAction | null;
+  // Widened to also accept legacy values on read/replay — see
+  // StoredEntryPackagePendingAction. Current write paths only ever
+  // construct "create" | "cancel" | null literals.
+  pending_action: StoredEntryPackagePendingAction | null;
   // When the current top-level binding (order_link_id/order_id/generation)
   // was established, tracked separately from updated_at (which advances on
   // every unrelated revalidation) so a later binding_history entry's
@@ -103,11 +122,13 @@ const STATUSES: ReadonlySet<EntryPackageExecutionStatus> = new Set([
   "terminal_closed",
 ]);
 
-const PENDING_ACTIONS: ReadonlySet<EntryPackagePendingAction> = new Set([
+// Includes the legacy values (see LegacyEntryPackagePendingAction) so replay
+// accepts records written before amend/cancel-and-create were removed.
+const PENDING_ACTIONS: ReadonlySet<StoredEntryPackagePendingAction> = new Set([
   "create",
+  "cancel",
   "amend",
   "cancel_and_create",
-  "cancel",
 ]);
 
 const END_REASONS: ReadonlySet<Exclude<BindingHistoryEndReason, null>> = new Set([
@@ -160,7 +181,7 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     record.binding_history.every(isValidBindingHistoryEntry) &&
     (record.pending_action === null ||
       (typeof record.pending_action === "string" &&
-        PENDING_ACTIONS.has(record.pending_action as EntryPackagePendingAction))) &&
+        PENDING_ACTIONS.has(record.pending_action as StoredEntryPackagePendingAction))) &&
     (record.current_binding_started_at === null || typeof record.current_binding_started_at === "string")
   );
 }
