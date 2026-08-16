@@ -32,7 +32,7 @@ export function isDurablyClosedEntryPackageStatus(
 // inconclusive confirmation knows exactly what to resend rather than only
 // being able to re-query. null once the current binding's outcome is
 // definitively known (applied, terminal_unfilled, or absent).
-export type EntryPackagePendingAction = "create" | "amend" | "cancel_and_create" | "cancel";
+export type EntryPackagePendingAction = "create" | "cancel";
 
 export type EarlyExecutionObservation = {
   order_status: string;
@@ -103,12 +103,7 @@ const STATUSES: ReadonlySet<EntryPackageExecutionStatus> = new Set([
   "terminal_closed",
 ]);
 
-const PENDING_ACTIONS: ReadonlySet<EntryPackagePendingAction> = new Set([
-  "create",
-  "amend",
-  "cancel_and_create",
-  "cancel",
-]);
+const PENDING_ACTIONS: ReadonlySet<EntryPackagePendingAction> = new Set(["create", "cancel"]);
 
 const END_REASONS: ReadonlySet<Exclude<BindingHistoryEndReason, null>> = new Set([
   "replaced",

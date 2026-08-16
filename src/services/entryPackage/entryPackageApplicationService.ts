@@ -19,10 +19,10 @@ import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
-import { amendEntryOrder, cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
+import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
-import { confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
+import { classifyEntryOrderTerminality, confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
 
 export type EntryPackageApplicationServiceDeps = {
   config: AbiConfig;
@@ -114,7 +114,54 @@ export class EntryPackageApplicationService {
       return this.absentResult(command);
     }
 
-    return this.cancelLiveOrder(command, record);
+    return this.revalidateBeforeCancel(command, record);
+  }
+
+  // Preflight for a null-desired-entry (cancel-intent) PUT against a binding
+  // that isn't already known-absent or terminal-without-fill: queries the
+  // exchange's current state before resending anything, so a repeat PUT
+  // never blindly resends `cancelEntryOrder` to an order it can already
+  // prove is no longer there to cancel. Only the non-mutating classification
+  // query runs here — the actual cancel dispatch (cancelLiveOrder) fires
+  // only when the order is confirmed still live.
+  private async revalidateBeforeCancel(
+    command: EntryPackageCommand,
+    record: EntryPackageExecutionRecord,
+  ): Promise<EntryPackageHttpResult> {
+    const orderLinkId = record.order_link_id;
+    if (orderLinkId === null) {
+      await this.persistTransitionToAbsent(record);
+      return this.absentResult(command);
+    }
+
+    const symbol = record.exchange_symbol;
+    const category = requireCategory(record.exchange_category);
+    const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
+
+    const classification = await classifyEntryOrderTerminality({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload,
+      getEntryOrderHistoryPayload,
+    });
+
+    if (classification.kind === "ambiguous") {
+      await this.deps.correlationRepository.save({
+        ...record,
+        status: "unknown",
+        updated_at: new Date().toISOString(),
+      });
+      return internalErrorResult();
+    }
+
+    if (classification.kind === "live") {
+      return this.cancelLiveOrder(command, record);
+    }
+
+    // Already confirmed to have no live remainder — record the outcome
+    // (cancelled, or a fill discovered instead) without resending a
+    // redundant cancel command.
+    return this.confirmCancelOutcomeAndPersist(command, record);
   }
 
   private async handleNonNullDesiredEntry(
@@ -148,11 +195,12 @@ export class EntryPackageApplicationService {
       return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
     }
 
-    if (record.desired_entry !== null && record.desired_entry.side !== desiredEntry.side) {
-      return this.replaceCancelAndCreate(command, desiredEntry, record);
-    }
-
-    return this.replaceAmend(command, desiredEntry, record);
+    // Any other non-null desired-entry change against a live/confirmed
+    // binding is served exclusively by CANCEL: no in-place amend, no atomic
+    // cancel-and-create. ABI cancels the existing order and returns
+    // entry_package_absent; a new desired entry is only applied by a later,
+    // independent PUT for a trade cycle with no existing binding.
+    return this.cancelLiveOrder(command, record);
   }
 
   private async createOrder(
@@ -286,165 +334,6 @@ export class EntryPackageApplicationService {
     return this.confirmAndFinalize(command, withOrderId, payloads, desiredEntry);
   }
 
-  private async replaceAmend(
-    command: EntryPackageCommand,
-    desiredEntry: DesiredEntryDto,
-    record: EntryPackageExecutionRecord,
-  ): Promise<EntryPackageHttpResult> {
-    // Amend targets the SAME physical order as record.order_link_id, which
-    // was created under record.exchange_symbol/exchange_category —
-    // re-resolving the ticker here could target a different instrument than
-    // the live order actually lives under (e.g. if resolution changes over
-    // time).
-    const symbol = record.exchange_symbol;
-    const category = requireCategory(record.exchange_category);
-
-    let calculatedQuantity: string;
-    try {
-      calculatedQuantity = await this.deps.positionSizeCalculator.calculate(
-        command.ticker,
-        desiredEntry.planned_entry_price,
-        desiredEntry.initial_stop_price,
-        command.riskMultiplier,
-        { resolvedSymbol: symbol, resolvedCategory: category },
-      );
-    } catch {
-      return internalErrorResult();
-    }
-
-    const now = new Date().toISOString();
-    const provisional: EntryPackageExecutionRecord = {
-      ...record,
-      desired_entry: desiredEntry,
-      risk_multiplier: command.riskMultiplier,
-      calculated_quantity: calculatedQuantity,
-      status: "pending_replace",
-      pending_action: "amend",
-      updated_at: now,
-    };
-    await this.deps.correlationRepository.save(provisional);
-
-    const orderLinkId = record.order_link_id;
-    if (orderLinkId === null) {
-      return internalErrorResult();
-    }
-
-    const payloads = mapEntryPackageToBybit(this.deps.config, {
-      symbol,
-      category,
-      side: desiredEntry.side,
-      plannedEntryPrice: desiredEntry.planned_entry_price,
-      initialStopPrice: desiredEntry.initial_stop_price,
-      initialTakePrice: desiredEntry.initial_take_price,
-      qty: calculatedQuantity,
-      orderLinkId,
-    });
-
-    let executionResult;
-    try {
-      executionResult = await amendEntryOrder({
-        config: this.deps.config,
-        bybit: this.deps.bybit,
-        payload: payloads.amendEntryOrder,
-      });
-    } catch {
-      await this.deps.correlationRepository.save({
-        ...provisional,
-        status: "unknown",
-        updated_at: new Date().toISOString(),
-      });
-      return internalErrorResult();
-    }
-
-    if (executionResult.status === "skipped_live_execution") {
-      return internalErrorResult();
-    }
-
-    return this.confirmAndFinalize(command, provisional, payloads, desiredEntry);
-  }
-
-  private async replaceCancelAndCreate(
-    command: EntryPackageCommand,
-    desiredEntry: DesiredEntryDto,
-    record: EntryPackageExecutionRecord,
-  ): Promise<EntryPackageHttpResult> {
-    const orderLinkId = record.order_link_id;
-    if (orderLinkId === null) {
-      return internalErrorResult();
-    }
-
-    const symbol = record.exchange_symbol;
-    const category = requireCategory(record.exchange_category);
-    const cancelPayload = { category, symbol, orderLinkId };
-
-    await this.deps.correlationRepository.save({
-      ...record,
-      status: "pending_replace",
-      pending_action: "cancel_and_create",
-      updated_at: new Date().toISOString(),
-    });
-
-    let cancelResult;
-    try {
-      cancelResult = await cancelEntryOrder({ config: this.deps.config, bybit: this.deps.bybit, payload: cancelPayload });
-    } catch {
-      await this.deps.correlationRepository.save({
-        ...record,
-        status: "unknown",
-        pending_action: "cancel_and_create",
-        updated_at: new Date().toISOString(),
-      });
-      return internalErrorResult();
-    }
-
-    if (cancelResult.status === "skipped_live_execution") {
-      return internalErrorResult();
-    }
-
-    // The old order must be confirmed gone before a new (opposite-side)
-    // order is created — a bare cancel acceptance from the REST call does
-    // not prove the old order is no longer live, and creating a second
-    // order while the first might still trigger would risk two live
-    // positions simultaneously.
-    const confirmation = await confirmEntryPackageCancelled({
-      bybit: this.deps.bybit,
-      getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" },
-      getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" },
-      desiredQty: record.calculated_quantity ?? "0",
-    });
-
-    const now = new Date().toISOString();
-
-    if (confirmation.kind === "cancelled_confirmed") {
-      const recordAfterCancel: EntryPackageExecutionRecord = {
-        ...record,
-        binding_history: [...record.binding_history, closeBindingFrom(record, "replaced", now)],
-        updated_at: now,
-      };
-      return this.createOrder(command, desiredEntry, recordAfterCancel, record.generation + 1);
-    }
-
-    if (confirmation.kind === "filled_before_cancel") {
-      // The old order actually filled despite the cancel attempt. Creating
-      // a new, opposite-side order now would risk two live positions;
-      // record the truth and fail safely instead.
-      await this.deps.correlationRepository.save({
-        ...record,
-        status: "applied",
-        pending_action: null,
-        early_execution_observation: confirmation.observation,
-        updated_at: now,
-      });
-      return internalErrorResult();
-    }
-
-    // ambiguous: cancellation not confirmed. Do not create a second order
-    // while the old one's true state is unknown; pending_action stays
-    // "cancel_and_create" so a subsequent PUT can safely retry.
-    await this.deps.correlationRepository.save({ ...record, status: "unknown", updated_at: now });
-    return internalErrorResult();
-  }
-
   private async repeatPutRevalidate(
     command: EntryPackageCommand,
     record: EntryPackageExecutionRecord,
@@ -502,21 +391,13 @@ export class EntryPackageApplicationService {
     desiredEntry: DesiredEntryDto,
     record: EntryPackageExecutionRecord,
   ): Promise<EntryPackageHttpResult> {
-    switch (record.pending_action) {
-      case "amend":
-        return this.replaceAmend(command, desiredEntry, record);
-      case "cancel_and_create":
-        return this.replaceCancelAndCreate(command, desiredEntry, record);
-      case "cancel":
-      case "create":
-      default:
-        // Either a genuine create retry, or a stale "cancel" pending_action
-        // left over from an interrupted CANCEL that a subsequent non-null
-        // PUT has now superseded — in both cases the exchange confirmed
-        // nothing exists, and the current request wants an order to exist,
-        // so (re)creating at the already-reserved generation is correct.
-        return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
-    }
+    // Either a genuine create retry, or a stale "cancel" pending_action left
+    // over from an interrupted CANCEL that a subsequent non-null PUT has now
+    // superseded — in both cases the exchange confirmed nothing exists, and
+    // the current request wants an order to exist, so (re)creating at the
+    // already-reserved generation is correct. Physical replace is CANCEL-only
+    // now, so create is the only command this ever resends.
+    return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
   }
 
   private async metadataOnlyUpdate(
@@ -578,23 +459,55 @@ export class EntryPackageApplicationService {
     const category = requireCategory(record.exchange_category);
     const cancelPayload = { category, symbol, orderLinkId };
 
-    await this.deps.correlationRepository.save({
+    const provisional: EntryPackageExecutionRecord = {
       ...record,
       status: "pending_cancel",
       pending_action: "cancel",
       updated_at: new Date().toISOString(),
-    });
+    };
+    await this.deps.correlationRepository.save(provisional);
 
     let cancelResult;
     try {
       cancelResult = await cancelEntryOrder({ config: this.deps.config, bybit: this.deps.bybit, payload: cancelPayload });
     } catch {
+      // A thrown exception here means we genuinely don't know whether Bybit
+      // received and applied the cancel — "unknown", not a silently dropped
+      // pending state, matching createOrder's catch block. pending_action
+      // stays "cancel" so a subsequent PUT can safely resend it.
+      await this.deps.correlationRepository.save({
+        ...provisional,
+        status: "unknown",
+        updated_at: new Date().toISOString(),
+      });
       return internalErrorResult();
     }
 
     if (cancelResult.status === "skipped_live_execution") {
       return internalErrorResult();
     }
+
+    return this.confirmCancelOutcomeAndPersist(command, provisional);
+  }
+
+  // Read-only re-classification of a cancel-intent binding's true exchange
+  // outcome (cancelled vs. a fill discovered instead vs. still inconclusive)
+  // — shared by cancelLiveOrder (after it has just sent a cancel) and
+  // revalidateBeforeCancel's already-terminal branch (which never sends a
+  // cancel at all, since the preflight query already proved nothing is left
+  // to cancel).
+  private async confirmCancelOutcomeAndPersist(
+    command: EntryPackageCommand,
+    record: EntryPackageExecutionRecord,
+  ): Promise<EntryPackageHttpResult> {
+    const orderLinkId = record.order_link_id;
+    if (orderLinkId === null) {
+      await this.persistTransitionToAbsent(record);
+      return this.absentResult(command);
+    }
+
+    const symbol = record.exchange_symbol;
+    const category = requireCategory(record.exchange_category);
 
     const confirmation = await confirmEntryPackageCancelled({
       bybit: this.deps.bybit,

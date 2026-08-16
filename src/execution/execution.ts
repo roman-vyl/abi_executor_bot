@@ -1,7 +1,6 @@
 import type { AbiConfig } from "../config/config.js";
 import type { BybitAdapter, SetTradingStopInput } from "../exchange/bybitAdapter.js";
 import type {
-  BybitAmendOrderPayload,
   BybitCancelOrderPayload,
   BybitCreateOrderPayload,
   BybitMarketCloseOrderPayload,
@@ -15,17 +14,6 @@ export type EntryOrderExecutionResult =
     }
   | {
       status: "bybit_entry_order_create_accepted";
-      mode: LiveExecutionMode;
-      bybitResponse: unknown;
-    };
-
-export type EntryOrderAmendExecutionResult =
-  | {
-      status: "skipped_live_execution";
-      mode: LiveExecutionMode;
-    }
-  | {
-      status: "bybit_entry_order_amend_accepted";
       mode: LiveExecutionMode;
       bybitResponse: unknown;
     };
@@ -70,29 +58,6 @@ export async function executeEntryOrder(input: {
 
   return {
     status: "bybit_entry_order_create_accepted",
-    mode,
-    bybitResponse,
-  };
-}
-
-export async function amendEntryOrder(input: {
-  config: AbiConfig;
-  bybit: BybitAdapter;
-  payload: BybitAmendOrderPayload;
-}): Promise<EntryOrderAmendExecutionResult> {
-  const mode = getLiveExecutionMode(input.config);
-
-  if (!mode.canExecuteLive) {
-    return {
-      status: "skipped_live_execution",
-      mode,
-    };
-  }
-
-  const bybitResponse = await input.bybit.amendOrder(input.payload);
-
-  return {
-    status: "bybit_entry_order_amend_accepted",
     mode,
     bybitResponse,
   };

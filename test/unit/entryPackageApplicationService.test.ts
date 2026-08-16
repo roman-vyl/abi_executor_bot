@@ -107,20 +107,19 @@ test("repeat PUT and metadata-only revalidation accept the bound order's canonic
     );
 
     assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.amendOrderCalls.length, 0);
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
     assert.equal(repo.get("instance-1", "cycle-1")?.desired_entry?.locked_exit_profile, "canonical-read-back");
   });
 });
 
-test("REPLACE via amend when only price/stop/take change (side unchanged)", async () => {
-  await withService(async ({ service, bybit }) => {
+test("a changed desired_entry against a live binding cancels rather than replaces, and never creates a second order", async () => {
+  await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
+    const firstOrderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(firstOrderLinkId);
 
-    bybit.orderByLinkIdResponse = orderList([
-      liveOrder({ triggerPrice: "101000", stopLoss: "100000", takeProfit: "104000" }),
-    ]);
+    flipToAbsentAfterCancel(bybit);
     const second = await service.apply(
       makeCommand({
         desiredEntry: makeDesiredEntry({
@@ -131,75 +130,37 @@ test("REPLACE via amend when only price/stop/take change (side unchanged)", asyn
       }),
     );
 
-    assertApplied(second, "0.001");
-    assert.equal(bybit.amendOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assertAbsent(second);
+    assert.equal(bybit.cancelOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls.length, 1, "no second order created in the same request");
+
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "absent");
+    assert.equal(record?.order_link_id, null);
+    assert.equal(record?.binding_history[0]?.end_reason, "cancelled");
   });
 });
 
-test("amend succeeds when the same order reads back Bybit canonical price text", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-    assertApplied(await service.apply(makeCommand()), "0.001");
-
-    bybit.orderByLinkIdResponse = orderList([
-      liveOrder({
-        orderStatus: "Untriggered",
-        triggerPrice: "63619.7",
-        stopLoss: "62619.7",
-        takeProfit: "65619.7",
-      }),
-    ]);
-    const result = await service.apply(
-      makeCommand({
-        desiredEntry: makeDesiredEntry({
-          planned_entry_price: "63619.700087721256",
-          initial_stop_price: "62619.700087721256",
-          initial_take_price: "65619.700087721256",
-        }),
-      }),
-    );
-
-    assertApplied(result, "0.001");
-    assert.equal(bybit.amendOrderCalls.length, 1);
-    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
-  });
-});
-
-test("REPLACE via cancel-and-create when side changes: confirms the old order cancelled before creating the new one", async () => {
+test("a changed desired_entry (including a changed side) against a live binding cancels rather than replaces", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
-    const firstOrderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
-    assert.ok(firstOrderLinkId);
 
-    // The old order must confirm cancelled (not found) before the new,
-    // opposite-side order is created; the shared default response
-    // represents the *new* order once it exists.
-    bybit.orderByLinkIdResponseByLinkId.set(firstOrderLinkId, orderList([]));
-    bybit.orderByLinkIdResponse = orderList([
-      liveOrder({ triggerPrice: "100000", stopLoss: "101000", takeProfit: "97000" }),
-    ]);
+    flipToAbsentAfterCancel(bybit);
     const second = await service.apply(
       makeCommand({
         desiredEntry: makeDesiredEntry({ side: "short", initial_stop_price: "101000", initial_take_price: "97000" }),
       }),
     );
 
-    assertApplied(second, "0.001");
+    assertAbsent(second);
     assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls.length, 2);
-
-    const record = repo.get("instance-1", "cycle-1");
-    assert.notEqual(record?.order_link_id, firstOrderLinkId);
-    assert.equal(record?.generation, 2);
-    assert.equal(record?.binding_history.length, 1);
-    assert.equal(record?.binding_history[0]?.end_reason, "replaced");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
   });
 });
 
-test("REPLACE via cancel-and-create: a fill discovered while confirming the cancel aborts creating a second order", async () => {
+test("a fill discovered while confirming a desired-entry-change cancel fails safe instead of fabricating absence", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
@@ -219,7 +180,7 @@ test("REPLACE via cancel-and-create: a fill discovered while confirming the canc
     );
 
     assertInternalError(result);
-    assert.equal(bybit.createOrderCalls.length, createCallsBefore, "no second order created while the first may be live");
+    assert.equal(bybit.createOrderCalls.length, createCallsBefore, "no order created while the old one may be live");
 
     const record = repo.get("instance-1", "cycle-1");
     assert.equal(record?.status, "applied");
@@ -227,13 +188,56 @@ test("REPLACE via cancel-and-create: a fill discovered while confirming the canc
   });
 });
 
+test("a desired-entry-change cancel reuses the order's recorded exchange_symbol/exchange_category rather than re-resolving the ticker", async () => {
+  let resolveCount = 0;
+  const driftingResolver: ExchangeInstrumentResolver = {
+    resolve(ticker: string) {
+      // Simulates resolution drifting between calls (e.g. a contract
+      // rollover, or a category reclassification) — the cancel path must
+      // not pick up a new value mid-flight.
+      const symbol = `${ticker.replace(/\.P$/, "")}-${resolveCount}`;
+      const category = resolveCount === 0 ? "linear" : "spot";
+      resolveCount += 1;
+      return { ticker, symbol, category, product: category === "linear" ? "perpetual" : "spot" };
+    },
+  };
+
+  await withService(
+    async ({ service, bybit, repo }) => {
+      bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+      await service.apply(makeCommand());
+      const originalSymbol = repo.get("instance-1", "cycle-1")?.exchange_symbol;
+      const originalCategory = repo.get("instance-1", "cycle-1")?.exchange_category;
+      assert.ok(originalSymbol);
+      assert.equal(originalCategory, "linear");
+
+      flipToAbsentAfterCancel(bybit);
+      const result = await service.apply(
+        makeCommand({
+          desiredEntry: makeDesiredEntry({
+            planned_entry_price: "101000",
+            initial_stop_price: "100000",
+            initial_take_price: "104000",
+          }),
+        }),
+      );
+
+      assertAbsent(result);
+      assert.equal(bybit.cancelOrderCalls[0]?.symbol, originalSymbol);
+      assert.equal(bybit.cancelOrderCalls[0]?.category, originalCategory);
+      assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+    },
+    {},
+    driftingResolver,
+  );
+});
+
 test("successful CANCEL returns absent after durable confirmation", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
 
-    bybit.orderByLinkIdResponse = orderList([]);
-    bybit.orderHistoryResponse = orderList([]);
+    flipToAbsentAfterCancel(bybit);
     const result = await service.apply(makeCommand({ desiredEntry: null }));
 
     assertAbsent(result);
@@ -246,7 +250,60 @@ test("successful CANCEL returns absent after durable confirmation", async () => 
   });
 });
 
-test("CANCEL with a malformed confirmation response never returns entry_package_absent and leaves state unresolved", async () => {
+test("cancelLiveOrder transport failure records status: unknown and preserves pending_action cancel", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.cancelOrder = async () => {
+      throw new Error("transport failure");
+    };
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "unknown");
+    assert.equal(record?.pending_action, "cancel");
+    assert.equal(record?.order_link_id, orderLinkId, "the record does not become absent");
+  });
+});
+
+test("a repeat cancel-intent PUT against a still-live order resends cancel only after confirming liveness", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+
+    flipToAbsentAfterCancel(bybit);
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    // One preflight realtime query, then the actual cancel dispatch.
+    assert.equal(bybit.cancelOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  });
+});
+
+test("a repeat cancel-intent PUT against an already-terminal order records the outcome without resending", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+
+    // The preflight query finds the order already gone (cleanly absent on
+    // both realtime and history) — cancelled without ever needing to
+    // dispatch a fresh cancel command.
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0, "no redundant cancel sent to an already-terminal order");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  });
+});
+
+test("a repeat cancel-intent PUT against an inconclusive query records unknown without resending", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
@@ -258,10 +315,10 @@ test("CANCEL with a malformed confirmation response never returns entry_package_
     const result = await service.apply(makeCommand({ desiredEntry: null }));
 
     assertInternalError(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0, "no cancel sent while the order's true state is unclear");
     const record = repo.get("instance-1", "cycle-1");
-    assert.notEqual(record?.status, "absent");
     assert.equal(record?.status, "unknown");
-    assert.equal(record?.order_link_id, orderLinkId, "the record does not become absent");
+    assert.equal(record?.order_link_id, orderLinkId);
   });
 });
 
@@ -279,8 +336,7 @@ test("a spot ticker (no .P suffix) uses category=spot end-to-end, never the glob
       assert.equal(call.category, "spot");
     }
 
-    bybit.orderByLinkIdResponse = orderList([]);
-    bybit.orderHistoryResponse = orderList([]);
+    flipToAbsentAfterCancel(bybit);
     const cancelResult = await service.apply(makeCommand({ ticker: "BTCUSDT", desiredEntry: null }));
 
     assertAbsent(cancelResult);
@@ -480,55 +536,6 @@ test("a risk_multiplier-only change on an otherwise-identical repeat PUT is dura
   });
 });
 
-test("REPLACE via amend reuses the order's recorded exchange_symbol/exchange_category rather than re-resolving the ticker", async () => {
-  let resolveCount = 0;
-  const driftingResolver: ExchangeInstrumentResolver = {
-    resolve(ticker: string) {
-      // Simulates resolution drifting between calls (e.g. a contract
-      // rollover, or a category reclassification) — amend must not pick up
-      // a new value mid-flight.
-      const symbol = `${ticker.replace(/\.P$/, "")}-${resolveCount}`;
-      const category = resolveCount === 0 ? "linear" : "spot";
-      resolveCount += 1;
-      return { ticker, symbol, category, product: category === "linear" ? "perpetual" : "spot" };
-    },
-  };
-
-  await withService(
-    async ({ service, bybit, repo, rulesProvider }) => {
-      bybit.orderByLinkIdResponse = orderList([liveOrder()]);
-      await service.apply(makeCommand());
-      const originalSymbol = repo.get("instance-1", "cycle-1")?.exchange_symbol;
-      const originalCategory = repo.get("instance-1", "cycle-1")?.exchange_category;
-      assert.ok(originalSymbol);
-      assert.equal(originalCategory, "linear");
-
-      rulesProvider.getRulesCalls.length = 0;
-      bybit.orderByLinkIdResponse = orderList([
-        liveOrder({ triggerPrice: "101000", stopLoss: "100000", takeProfit: "104000" }),
-      ]);
-      const result = await service.apply(
-        makeCommand({
-          desiredEntry: makeDesiredEntry({
-            planned_entry_price: "101000",
-            initial_stop_price: "100000",
-            initial_take_price: "104000",
-          }),
-        }),
-      );
-
-      assertApplied(result, "0.001");
-      assert.equal(bybit.amendOrderCalls[0]?.symbol, originalSymbol);
-      assert.equal(bybit.amendOrderCalls[0]?.category, originalCategory);
-      assert.deepEqual(rulesProvider.getRulesCalls, [`${originalCategory}:${originalSymbol}`]);
-      assert.equal(repo.get("instance-1", "cycle-1")?.exchange_symbol, originalSymbol);
-      assert.equal(repo.get("instance-1", "cycle-1")?.exchange_category, originalCategory);
-    },
-    {},
-    driftingResolver,
-  );
-});
-
 test("terminal-without-fill fail-closed, then CANCEL, then a fresh CREATE gets a new generation", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -597,19 +604,17 @@ test("a changed ticker within an existing trade cycle is rejected without contac
     await service.apply(makeCommand());
 
     const createCallsBefore = bybit.createOrderCalls.length;
-    const amendCallsBefore = bybit.amendOrderCalls.length;
     const cancelCallsBefore = bybit.cancelOrderCalls.length;
 
     const result = await service.apply(makeCommand({ ticker: "ETHUSDT.P" }));
 
     assertInternalError(result);
     assert.equal(bybit.createOrderCalls.length, createCallsBefore);
-    assert.equal(bybit.amendOrderCalls.length, amendCallsBefore);
     assert.equal(bybit.cancelOrderCalls.length, cancelCallsBefore);
   });
 });
 
-test("metadata-only change durably updates without sending an amend or create request", async () => {
+test("metadata-only change durably updates without sending a cancel or create request", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     await service.apply(makeCommand());
@@ -620,7 +625,7 @@ test("metadata-only change durably updates without sending an amend or create re
 
     assertApplied(result, "0.001");
     assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.amendOrderCalls.length, 0);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
     assert.equal(repo.get("instance-1", "cycle-1")?.desired_entry?.locked_exit_profile, "scratch");
   });
 });
@@ -652,6 +657,10 @@ test("concurrent identical PUT produces exactly one exchange create order", asyn
 test("concurrent differing PUT does not interleave: second request completes only after the first", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    // Only the second (differing-desired-entry) request ever dispatches a
+    // cancel — the mutex guarantees the first request's create-and-confirm
+    // is unaffected by this override.
+    flipToAbsentAfterCancel(bybit);
 
     const secondDesiredEntry = makeDesiredEntry({
       planned_entry_price: "101000",
@@ -659,25 +668,16 @@ test("concurrent differing PUT does not interleave: second request completes onl
       initial_take_price: "104000",
     });
 
-    const firstPromise = service.apply(makeCommand());
-    const secondPromise = service.apply(makeCommand({ desiredEntry: secondDesiredEntry }));
-
-    // The first request's confirmation query needs matching fields; the
-    // second (amend) request's confirmation needs the amended fields. Since
-    // the mutex serializes them, swap the fake's response once the first
-    // create call has actually gone out.
-    await waitUntil(() => bybit.createOrderCalls.length >= 1);
-    bybit.orderByLinkIdResponse = orderList([
-      liveOrder({ triggerPrice: "101000", stopLoss: "100000", takeProfit: "104000" }),
+    const [first, second] = await Promise.all([
+      service.apply(makeCommand()),
+      service.apply(makeCommand({ desiredEntry: secondDesiredEntry })),
     ]);
 
-    const [first, second] = await Promise.all([firstPromise, secondPromise]);
-
     assertApplied(first, "0.001");
-    assertApplied(second, "0.001");
+    assertAbsent(second);
     assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.amendOrderCalls.length, 1);
-    assert.equal(repo.get("instance-1", "cycle-1")?.desired_entry?.planned_entry_price, "101000");
+    assert.equal(bybit.cancelOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
   });
 });
 
@@ -1036,6 +1036,20 @@ function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
 }
 
+// The preflight query before a resent cancel (and the cancel-only replace
+// path) must see the order still live to actually dispatch cancelOrder;
+// once cancelOrder is actually called, this flips both query responses to
+// clean-empty so the subsequent confirmation query reports the order gone.
+function flipToAbsentAfterCancel(bybit: FakeBybitAdapter): void {
+  const original = bybit.cancelOrder.bind(bybit);
+  bybit.cancelOrder = async (payload) => {
+    const result = await original(payload);
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    return result;
+  };
+}
+
 // Structurally invalid: `list` present but not an array, so it can never
 // be mistaken for a clean "not found" or a real found order.
 function malformedResponse(): unknown {
@@ -1059,12 +1073,6 @@ function assertInternalError(result: EntryPackageHttpResult): void {
   assert.equal(result.statusCode, 500, JSON.stringify(result.body));
   const body = result.body as { error: { code: string } };
   assert.equal(body.error.code, "internal_error");
-}
-
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  while (!predicate()) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
 }
 
 async function withService(

@@ -33,20 +33,6 @@ export type BybitMarketCloseOrderPayload = {
   positionIdx?: number;
 };
 
-export type BybitAmendOrderPayload = {
-  category: string;
-  symbol: string;
-  orderLinkId: string;
-  triggerPrice: string;
-  qty: string;
-  triggerBy: string;
-  takeProfit?: string;
-  stopLoss?: string;
-  tpTriggerBy?: string;
-  slTriggerBy?: string;
-  tpslMode?: "Full";
-};
-
 export type BybitCancelOrderPayload = {
   category: string;
   symbol: string;
@@ -89,13 +75,12 @@ export type EntryPackageOrderInput = {
 
 export type EntryPackageOrderPayloads = {
   createEntryOrder: BybitCreateOrderPayload;
-  amendEntryOrder: BybitAmendOrderPayload;
   cancelEntryOrder: BybitCancelOrderPayload;
   getEntryOrder: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistory: BybitGetOrderHistoryPayload;
 };
 
-// Builds Bybit create/amend/cancel/query payloads for the entry-package
+// Builds Bybit create/cancel/query payloads for the entry-package
 // execution flow. Reuses EntryOrderSemanticsMapper for the side/trigger-
 // direction table and this file's own mapTriggerDirection numeric encoding.
 // The entry-package contract always supplies initial_take_price, so
@@ -126,23 +111,8 @@ export function mapEntryPackageToBybit(
     tpOrderType: "Market",
   };
 
-  const amendEntryOrder: BybitAmendOrderPayload = {
-    category: input.category,
-    symbol: input.symbol,
-    orderLinkId: input.orderLinkId,
-    triggerPrice: input.plannedEntryPrice,
-    qty: input.qty,
-    triggerBy: config.bybitTriggerBy,
-    tpslMode: "Full",
-    stopLoss: input.initialStopPrice,
-    slTriggerBy: config.bybitTriggerBy,
-    takeProfit: input.initialTakePrice,
-    tpTriggerBy: config.bybitTriggerBy,
-  };
-
   return {
     createEntryOrder,
-    amendEntryOrder,
     cancelEntryOrder: {
       category: input.category,
       symbol: input.symbol,

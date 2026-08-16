@@ -16,10 +16,13 @@ import { decodeOrderQueryResponse } from "./orderQueryResponseDecoder.js";
 const CONFIRMATION_ATTEMPTS = 2;
 const CONFIRMATION_RETRY_DELAY_MS = 300;
 
-const LIVE_UNFILLED_STATUSES = new Set(["New", "Untriggered", "Triggered"]);
-const FILLED_STATUSES = new Set(["Filled"]);
-const PARTIAL_FILL_STATUSES = new Set(["PartiallyFilled"]);
-const TERMINAL_WITHOUT_FILL_STATUSES = new Set(["Rejected", "Deactivated", "Cancelled"]);
+// Exported for reuse by entry-cycle-recovery-resolution, which composes its
+// own order-side signal from these same status sets rather than inventing a
+// second, independently-maintained classification.
+export const LIVE_UNFILLED_STATUSES = new Set(["New", "Untriggered", "Triggered"]);
+export const FILLED_STATUSES = new Set(["Filled"]);
+export const PARTIAL_FILL_STATUSES = new Set(["PartiallyFilled"]);
+export const TERMINAL_WITHOUT_FILL_STATUSES = new Set(["Rejected", "Deactivated", "Cancelled"]);
 
 export type ExpectedPackageFields = {
   qty: string;
@@ -56,7 +59,7 @@ type QueryResult =
   | { status: "not_found" }
   | { status: "query_failed" };
 
-// Bounded identity/state confirmation for a just-sent create/amend, or for
+// Bounded identity/state confirmation for a just-sent create, or for
 // revalidation of an already durable binding. The successful write itself
 // proves Bybit accepted the command; the read-back proves that the same
 // category/symbol/orderLinkId is now represented by a valid exchange order

@@ -367,6 +367,17 @@ test("protection and a concurrent entry-package command for the same pair never 
         ],
       },
     };
+    // A changed desired_entry against a live binding is now served by
+    // CANCEL only (no in-place amend) — once the cancel is actually
+    // dispatched, the order confirms gone so the concurrent entry-package
+    // command resolves entry_package_absent rather than staying ambiguous.
+    const originalCancelOrder = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const result = await originalCancelOrder(payload);
+      bybit.orderByLinkIdResponse = { retCode: 0, result: { category: "linear", list: [] } };
+      bybit.orderHistoryResponse = { retCode: 0, result: { category: "linear", list: [] } };
+      return result;
+    };
 
     const protectionService = new ProtectionApplicationService({
       config,

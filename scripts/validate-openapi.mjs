@@ -35,6 +35,20 @@ const expectedDocuments = [
     validate: validateOpenPositionDocument,
   },
   {
+    file: "abi-entry-cycle-recovery-api-v1.json",
+    title: "ABI Entry Cycle Recovery API",
+    operations: [
+      {
+        method: "get",
+        httpMethod: "GET",
+        path: `${routePrefix}/recovery-state`,
+        responses: ["200", "422", "500"],
+        requestBody: "absent",
+      },
+    ],
+    validate: validateEntryCycleRecoveryDocument,
+  },
+  {
     file: "abi-position-management-api-v1.json",
     title: "ABI Position Management API",
     operations: [
@@ -214,6 +228,46 @@ function validateOpenPositionDocument(document) {
     "positionIdx",
     "queryPositionForInstrument",
     "OpenPositionResolutionServicePort",
+  ]);
+}
+
+function validateEntryCycleRecoveryDocument(document) {
+  const schemas = document.components.schemas;
+
+  assert.equal(schemas.RecoveryStateResponse.oneOf.length, 4);
+  assert.equal(schemas.RecoveryStateBusinessError.oneOf.length, 2);
+  assert.equal(schemas.InternalError.properties.error.properties.code.const, "internal_error");
+
+  const stateConsts = ["EntryOrderLiveResponse", "PositionOpenResponse", "TerminalWithoutFillResponse", "TerminalAfterFillResponse"].map(
+    (name) => schemas[name].properties.recovery_state.const,
+  );
+  assert.deepEqual(stateConsts, [
+    "entry_order_live",
+    "position_open",
+    "terminal_without_fill",
+    "terminal_after_fill",
+  ]);
+
+  for (const name of ["EntryOrderLiveResponse", "PositionOpenResponse"]) {
+    assert.deepEqual(schemas[name].properties.applied_entry_package, {
+      $ref: "#/components/schemas/AppliedEntryPackage",
+    });
+  }
+  for (const name of ["TerminalWithoutFillResponse", "TerminalAfterFillResponse"]) {
+    assert.equal(schemas[name].properties.applied_entry_package.type, "null");
+  }
+
+  assert.equal(schemas.PositionOpenResponse.properties.first_fill_at_ms.type, "integer");
+  assert.equal(schemas.PositionOpenResponse.properties.average_entry_price.format, "positive-exact-decimal");
+  assert.equal(schemas.EntryOrderLiveResponse.properties.first_fill_at_ms.type, "null");
+
+  assertForbiddenText(document, [
+    "pending_create",
+    "pending_replace",
+    "pending_cancel",
+    "queryPositionForInstrument",
+    "EntryCycleRecoveryResolutionServicePort",
+    "unsupported_exchange_scope",
   ]);
 }
 

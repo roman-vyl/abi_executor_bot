@@ -63,6 +63,14 @@ export type CloseOperationOutcome =
   | "unsupported_exchange_scope"
   | "internal_error";
 
+export type RecoveryStateOperationOutcome =
+  | "entry_order_live"
+  | "position_open"
+  | "terminal_without_fill"
+  | "terminal_after_fill"
+  | "unknown_trade_cycle_binding"
+  | "internal_error";
+
 // Ties each execution operation to its own outcome union at the type
 // level — the single source of truth `ExecutionOperation` and
 // `withOperationEvents`'s `TOperation` inference both key off.
@@ -71,6 +79,7 @@ export type OperationOutcomeMap = {
   open_position: OpenPositionOperationOutcome;
   protection: ProtectionOperationOutcome;
   close_position: CloseOperationOutcome;
+  recovery_state: RecoveryStateOperationOutcome;
 };
 
 export type ExecutionOperation = keyof OperationOutcomeMap;
@@ -218,6 +227,29 @@ export function classifyOpenPositionResult(body: {
   switch (body.error?.code) {
     case "unknown_trade_cycle_binding":
     case "unsupported_exchange_scope":
+      return { outcome: body.error.code, failed: false };
+    case "internal_error":
+      return { outcome: "internal_error", failed: true };
+    default:
+      return { outcome: "internal_error", failed: true };
+  }
+}
+
+// recovery_state's success body carries its own resolved recovery_state
+// literal directly (already exactly this operation's outcome vocabulary for
+// the positive case), so no derivation is needed there — only the error
+// branch needs mapping, mirroring classifyCloseResult's shape minus the
+// unsupported_exchange_scope case this endpoint never returns.
+export function classifyRecoveryStateResult(body: {
+  recovery_state?: RecoveryStateOperationOutcome;
+  error?: { code: string };
+}): OperationClassification<"recovery_state"> {
+  if (body.recovery_state !== undefined) {
+    return { outcome: body.recovery_state, failed: false };
+  }
+
+  switch (body.error?.code) {
+    case "unknown_trade_cycle_binding":
       return { outcome: body.error.code, failed: false };
     case "internal_error":
       return { outcome: "internal_error", failed: true };
