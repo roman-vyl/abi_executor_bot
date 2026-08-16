@@ -146,6 +146,47 @@ NOT include an `AppliedEntryPackage`.
 - **WHEN** ABI resolves `terminal_without_fill` or `terminal_after_fill`
 - **THEN** the response does not include an `AppliedEntryPackage`
 
+### Requirement: A binding left mid-amend by a legacy pending_action never resolves a live-truth state
+A durable store may still contain a binding written by a pre-`abi-entry-cycle-recovery-v1`
+version of this service with `pending_action` `"amend"` or `"cancel_and_create"` (see
+`entry-package-execution`'s `LegacyEntryPackagePendingAction`). The old in-place-amend
+write path durably persisted the record's new `desired_entry` *before* sending the amend,
+while reusing the same `order_link_id` the prior `desired_entry` was already bound to — so
+for such a record, a live order found under that `order_link_id` may still physically be
+the pre-amend entry, not the stored `desired_entry`. ABI SHALL NOT resolve
+`entry_order_live` or `position_open` — the two states that include `AppliedEntryPackage`
+— for a record whose `pending_action` is `"amend"` or `"cancel_and_create"`, since doing so
+could report a replacement entry the exchange may never have actually applied. ABI SHALL
+fail safe (the same response already used for any other unresolvable attempt) instead.
+This limitation applies only to the two `AppliedEntryPackage`-carrying states: a legacy
+`pending_action` does NOT prevent `terminal_without_fill` or `terminal_after_fill` from
+resolving, since neither carries `AppliedEntryPackage` and both already require positive
+evidence via this capability's existing rules. No separate legacy recovery state machine
+is introduced to disambiguate the pre-amend and post-amend entries.
+
+#### Scenario: A legacy amend-pending binding with a live order and no position fails safe rather than reporting entry_order_live
+- **WHEN** a correlation record's `pending_action` is `"amend"` (or `"cancel_and_create"`),
+  the order query positively finds the order live and unfilled, and the position query
+  positively finds no open position
+- **THEN** ABI does NOT resolve `entry_order_live`, and does NOT include the record's
+  `desired_entry` as `AppliedEntryPackage`
+- **AND** ABI fails safe instead
+
+#### Scenario: A legacy amend-pending binding with a fill confirmed by an open position fails safe rather than reporting position_open
+- **WHEN** a correlation record's `pending_action` is `"amend"` (or `"cancel_and_create"`),
+  the order query positively observes a fill, and the position query positively confirms
+  an open position on the matching side
+- **THEN** ABI does NOT resolve `position_open`, and does NOT include the record's
+  `desired_entry` as `AppliedEntryPackage`
+- **AND** ABI fails safe instead
+
+#### Scenario: A legacy amend-pending binding still resolves a positively-proven terminal state
+- **WHEN** a correlation record's `pending_action` is `"amend"` (or `"cancel_and_create"`),
+  and the order and position queries otherwise positively agree on
+  `terminal_without_fill` or `terminal_after_fill` per this capability's existing rules
+- **THEN** ABI resolves that terminal state normally — neither terminal state includes
+  `AppliedEntryPackage`, so the legacy-amend ambiguity does not apply to them
+
 ### Requirement: Recovery resolution never causes an exchange side effect
 Resolving recovery state SHALL be read-only with respect to the exchange. ABI SHALL NOT
 cancel, amend, or create any order as part of resolving recovery state.

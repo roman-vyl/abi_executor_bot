@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
-import type { EntryPackageExecutionRecord } from "../../src/correlation/entryPackageExecutionRecord.js";
+import type {
+  EntryPackageExecutionRecord,
+  StoredEntryPackagePendingAction,
+} from "../../src/correlation/entryPackageExecutionRecord.js";
 import { EntryCycleRecoveryResolutionService } from "../../src/services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
@@ -229,6 +232,94 @@ test("resolution never causes an exchange side effect, including when it resolve
   });
 });
 
+// The old in-place-amend write path durably wrote the record's new
+// desired_entry (B) BEFORE sending the amend, reusing the SAME
+// order_link_id the prior desired_entry (A) was already bound to. If that
+// amend went ambiguous, a live order found under that identity may still
+// physically be A — so a legacy pending_action:"amend" (or
+// "cancel_and_create") binding must never report B as AppliedEntryPackage
+// via entry_order_live or position_open, even though the order/position
+// evidence would otherwise resolve one of those states cleanly.
+test("a legacy amend-pending binding with a live order and no position fails safe instead of reporting entry_order_live/B", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "amend" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New" })]);
+    bybit.openPositionsResponse = flatPosition();
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("a legacy cancel_and_create-pending binding with a live order and no position fails safe instead of reporting entry_order_live/B", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "cancel_and_create" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New" })]);
+    bybit.openPositionsResponse = flatPosition();
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+test("a legacy amend-pending binding with a fill confirmed by a matching-side open position fails safe instead of reporting position_open/B", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "amend" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "PartiallyFilled", cumExecQty: "0.0005" })]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, { statusCode: 500, body: { error: { code: "internal_error", message: "internal error" } } });
+  });
+});
+
+// Terminal states carry no AppliedEntryPackage, so the legacy-amend
+// ambiguity does not apply to them — they still resolve normally.
+test("a legacy amend-pending binding still resolves terminal_without_fill when positively proven", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "amend" }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([{ orderStatus: "Cancelled", cumExecQty: "0" }]);
+    bybit.openPositionsResponse = flatPosition();
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "terminal_without_fill",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+  });
+});
+
+test("a legacy amend-pending binding still resolves terminal_after_fill when positively proven", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "amend" }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]);
+    bybit.openPositionsResponse = flatPosition();
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "terminal_after_fill",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+  });
+});
+
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
 }
@@ -279,7 +370,9 @@ function openPosition(input: { side: "Buy" | "Sell"; avgPrice: string; openTime:
   };
 }
 
-function makeRecord(overrides: Partial<{ side: "long" | "short" }> = {}): EntryPackageExecutionRecord {
+function makeRecord(
+  overrides: Partial<{ side: "long" | "short"; pendingAction: StoredEntryPackagePendingAction | null }> = {},
+): EntryPackageExecutionRecord {
   return {
     strategy_instance_id: "instance-1",
     trade_cycle_id: "cycle-1",
@@ -304,7 +397,7 @@ function makeRecord(overrides: Partial<{ side: "long" | "short" }> = {}): EntryP
     status: "unknown",
     early_execution_observation: null,
     binding_history: [],
-    pending_action: "cancel",
+    pending_action: overrides.pendingAction === undefined ? "cancel" : overrides.pendingAction,
     current_binding_started_at: "2026-01-01T00:00:00.000Z",
   };
 }

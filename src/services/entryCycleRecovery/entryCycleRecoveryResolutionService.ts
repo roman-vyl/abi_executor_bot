@@ -138,6 +138,21 @@ export class EntryCycleRecoveryResolutionService {
       return terminalAfterFillResult();
     }
 
+    // A binding left mid-amend by a pre-abi-entry-cycle-recovery-v1 version
+    // of this service (see LegacyEntryPackagePendingAction) durably wrote
+    // its new desired_entry BEFORE the amend was sent, while reusing the
+    // SAME order_link_id the prior desired_entry was already bound to. If
+    // that amend's outcome went ambiguous, the live order under that
+    // identity may still physically be the pre-amend entry, not the stored
+    // desired_entry — so entry_order_live/position_open can never safely
+    // report AppliedEntryPackage for such a record: it would risk
+    // fabricating the replacement entry the exchange may never have
+    // actually applied. Fails safe instead; no legacy recovery state
+    // machine is introduced to try to disambiguate it.
+    if (record.pending_action === "amend" || record.pending_action === "cancel_and_create") {
+      return internalErrorResult();
+    }
+
     // entry_order_live and position_open both carry the applied entry
     // package — a non-null order_link_id always means a real binding was
     // created with its desired entry and calculated quantity persisted
