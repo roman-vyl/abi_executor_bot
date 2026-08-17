@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
+import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type { EntryPackageExecutionRecord } from "../../src/correlation/entryPackageExecutionRecord.js";
 import { handleOpenPositionRoutes } from "../../src/routes/openPositionRoutes.js";
@@ -14,7 +15,7 @@ import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
 test("success DTO is a closed object satisfying the cross-field invariant (open)", async () => {
   await withStack(async ({ invoke, repo, bybit }) => {
-    await repo.save(makeRecord({ status: "applied" }));
+    await repo.save(makeRecord({ status: "applied", firstFillAtMs: 111 }));
     bybit.openPositionsResponse = positionResponse();
 
     const response = await invoke();
@@ -130,7 +131,11 @@ function positionResponse(): unknown {
 }
 
 function makeRecord(
-  overrides: Partial<{ status: EntryPackageExecutionRecord["status"]; exchangeCategory: "linear" | "spot" }> = {},
+  overrides: Partial<{
+    status: EntryPackageExecutionRecord["status"];
+    exchangeCategory: "linear" | "spot";
+    firstFillAtMs: number | null;
+  }> = {},
 ): EntryPackageExecutionRecord {
   return {
     strategy_instance_id: "instance",
@@ -154,9 +159,21 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    first_fill_at_ms: overrides.firstFillAtMs ?? null,
     generation: 1,
     status: overrides.status ?? "applied",
-    early_execution_observation: null,
+    // Own-cycle fill sourcing (abi-pair-scoped-open-position-resolution-v1)
+    // requires this cycle's own attributable fill facts to report a
+    // position open; a final, filled observation avoids needing an
+    // own-order exchange fixture for every scenario in this file that
+    // doesn't care about that sourcing itself.
+    early_execution_observation: {
+      order_status: "Filled",
+      cumulative_filled_qty: "0.001",
+      remaining_qty: "0",
+      avg_execution_price: "100000",
+      observed_at: "2026-01-01T00:00:00.000Z",
+    },
     binding_history: [],
     pending_action: null,
     current_binding_started_at: "2026-01-01T00:00:00.000Z",
@@ -174,7 +191,7 @@ async function withStack(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   try {
     const bybit = new FakeBybitAdapter();
     const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const resolutionService = new OpenPositionResolutionService({ correlationRepository: repo, bybit });
+    const resolutionService = new OpenPositionResolutionService({ correlationRepository: repo, bybit, mutex: new KeyedMutex() });
 
     const invoke = async (options: { isReady?: () => boolean } = {}) => {
       const request = makeRequest(route());
@@ -199,7 +216,7 @@ async function invokeWithUrl(url: string): Promise<ReturnType<typeof makeRespons
   try {
     const bybit = new FakeBybitAdapter();
     const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const resolutionService = new OpenPositionResolutionService({ correlationRepository: repo, bybit });
+    const resolutionService = new OpenPositionResolutionService({ correlationRepository: repo, bybit, mutex: new KeyedMutex() });
 
     const request = makeRequest(url);
     const response = makeResponse();

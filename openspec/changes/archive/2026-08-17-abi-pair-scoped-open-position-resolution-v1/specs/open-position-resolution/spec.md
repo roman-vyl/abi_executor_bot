@@ -13,18 +13,18 @@ For a live-query-admissible record, ABI SHALL determine `position_open` and, whe
 `average_entry_price`, from this cycle's own attributable entry-order fill facts —
 `early_execution_observation`'s `cumulative_filled_qty` and `avg_execution_price` — never from the
 aggregate physical position's `size` or `avgPrice`. When the stored observation is already final (its
-`order_status` is terminal) and this cycle's `first_fill_at_ms` is already captured, ABI SHALL reuse the
-stored observation without an exchange call. Otherwise ABI SHALL perform one fresh, read-only query of
-this cycle's own entry order (the same primitive used to resolve close quantity) before answering.
-`average_entry_price` SHALL be reported only from this cycle's own resolved `avg_execution_price`; if
-this cycle's own evidence proves a fill (`cumulative_filled_qty` greater than zero) but carries no usable
-`avg_execution_price`, ABI SHALL NOT fabricate, estimate, or substitute a value and SHALL fail closed.
+`order_status` is terminal), ABI SHALL reuse the stored observation without an exchange call, regardless
+of whether `first_fill_at_ms` has been captured yet (a separate concern — see the `first_fill_at_ms`
+requirements below). Otherwise ABI SHALL perform one fresh, read-only query of this cycle's own entry
+order (the same primitive used to resolve close quantity) before answering. `average_entry_price` SHALL
+be reported only from this cycle's own resolved `avg_execution_price`; if this cycle's own evidence
+proves a fill (`cumulative_filled_qty` greater than zero) but carries no usable `avg_execution_price`,
+ABI SHALL NOT fabricate, estimate, or substitute a value and SHALL fail closed.
 
-#### Scenario: A final, already-captured observation needs no exchange call
-- **WHEN** this cycle's stored `early_execution_observation` is already final and its `first_fill_at_ms`
-  is already captured
+#### Scenario: A final observation needs no exchange call to resolve position_open/average_entry_price
+- **WHEN** this cycle's stored `early_execution_observation` is already final
 - **THEN** ABI answers `position_open` and `average_entry_price` from the stored observation, with no
-  fresh query of the entry order
+  fresh query of the entry order, regardless of whether `first_fill_at_ms` has been captured yet
 
 #### Scenario: A live or not-yet-final observation is freshly refreshed
 - **WHEN** this cycle's stored `early_execution_observation` is `null` or not yet final

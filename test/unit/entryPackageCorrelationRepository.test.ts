@@ -731,6 +731,7 @@ function makeRecord(
     orderId: string;
     closeOrderLinkId: string | null;
     closeOrderId: string | null;
+    firstFillAtMs: number | null;
     generation: number;
     status: EntryPackageExecutionStatus;
     exchangeSymbol: string;
@@ -753,6 +754,7 @@ function makeRecord(
     order_id: overrides.orderId ?? null,
     close_order_link_id: overrides.closeOrderLinkId ?? null,
     close_order_id: overrides.closeOrderId ?? null,
+    first_fill_at_ms: overrides.firstFillAtMs ?? null,
     generation: overrides.generation ?? 1,
     status: overrides.status ?? "pending_create",
     early_execution_observation: overrides.earlyExecutionObservation ?? null,

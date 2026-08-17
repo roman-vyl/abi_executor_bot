@@ -9,12 +9,21 @@ import type {
 } from "../../exchange/bybitOrderMapper.js";
 import type { BybitOrderView, ExpectedOrderIdentity } from "./orderQueryResponseDecoder.js";
 import { decodeOrderQueryResponse } from "./orderQueryResponseDecoder.js";
+import { decodeExecutionListResponsePage } from "./executionListResponseDecoder.js";
 
 // Starting point matches verifyPostCreateProtection.ts's existing
 // bounded-retry mechanics (2 attempts / 300ms); tunable independently since
 // this component's classification differs from protection read-back.
 const CONFIRMATION_ATTEMPTS = 2;
 const CONFIRMATION_RETRY_DELAY_MS = 300;
+
+// Page size for /v5/execution/list queries — mirrors this codebase's
+// existing single-page order queries' pragmatic sizing, not a Bybit
+// protocol requirement. EXECUTION_LIST_PAGE_CAP is defensive headroom, not
+// a realistic ceiling: a genuine entry order in this system is expected to
+// produce a handful of executions at most.
+const EXECUTION_LIST_LIMIT = "50";
+const EXECUTION_LIST_PAGE_CAP = 10;
 
 // Exported for reuse by entry-cycle-recovery-resolution, which composes its
 // own order-side signal from these same status sets rather than inventing a
@@ -327,6 +336,70 @@ export async function confirmEntryOrderNeutralized(input: {
   }
 
   return "ambiguous";
+}
+
+export type FirstAttributableFillResolution =
+  | { kind: "found"; firstFillAtMs: number }
+  | { kind: "no_executions_found" }
+  | { kind: "ambiguous" };
+
+// Sources this cycle's own raw attributable first-fill timestamp from
+// /v5/execution/list — the only Bybit primitive that records each
+// individual fill with its own timestamp, unlike order/realtime's or
+// order/history's own "current state" fields (abi-pair-scoped-open-
+// position-resolution-v1's design.md Decision 4). Pages to completion
+// before computing a result: never assumes record order, never returns a
+// candidate minimum from a partial page set. Attribution rests on the
+// query's own orderLinkId filter, this cycle's own deterministic identity —
+// the same trust level every other own-order query in this codebase already
+// places in its own orderLinkId filter. The only call site for this
+// function is OpenPositionResolutionService.resolve() — determine() itself
+// never queries /v5/execution/list.
+export async function resolveFirstAttributableFillAtMs(input: {
+  bybit: BybitAdapter;
+  category: string;
+  symbol: string;
+  orderLinkId: string;
+}): Promise<FirstAttributableFillResolution> {
+  const executions: { execTimeMs: number }[] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < EXECUTION_LIST_PAGE_CAP; page += 1) {
+    let response: unknown;
+    try {
+      response = await input.bybit.getExecutionList({
+        category: input.category,
+        symbol: input.symbol,
+        orderLinkId: input.orderLinkId,
+        limit: EXECUTION_LIST_LIMIT,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+    } catch {
+      return { kind: "ambiguous" };
+    }
+
+    const decoded = decodeExecutionListResponsePage({
+      response,
+      expected: { category: input.category, symbol: input.symbol },
+    });
+    if (decoded.kind === "protocol_failure") {
+      return { kind: "ambiguous" };
+    }
+
+    executions.push(...decoded.executions);
+
+    if (decoded.nextCursor === "") {
+      return executions.length === 0
+        ? { kind: "no_executions_found" }
+        : { kind: "found", firstFillAtMs: Math.min(...executions.map((execution) => execution.execTimeMs)) };
+    }
+
+    cursor = decoded.nextCursor;
+  }
+
+  // The page cap was exhausted without the cursor going empty — never
+  // compute a minimum over a known-incomplete set.
+  return { kind: "ambiguous" };
 }
 
 function confirmsAbsenceOrTerminal(result: QueryResult): boolean {

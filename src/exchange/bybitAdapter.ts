@@ -6,6 +6,7 @@ import type {
   BybitCancelOrderPayload,
   BybitCancelAllOrdersPayload,
   BybitCreateOrderPayload,
+  BybitGetExecutionListPayload,
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
   BybitMarketCloseOrderPayload,
@@ -95,6 +96,7 @@ export interface BybitAdapter {
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
+  getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>;
   getInstrumentInfo(category: string, symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
@@ -218,6 +220,25 @@ export class RestBybitAdapter implements BybitAdapter {
         limit: payload.limit,
       }),
     );
+  }
+
+  // "Get Trade History" — the only Bybit primitive that records each
+  // individual fill with its own timestamp (execTime), used by
+  // resolveFirstAttributableFillAtMs to source first_fill_at_ms
+  // (abi-pair-scoped-open-position-resolution-v1). Deliberately keyed on
+  // orderLinkId only, never orderId — see BybitGetExecutionListPayload.
+  async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
+    const params = new URLSearchParams({
+      category: payload.category,
+      symbol: payload.symbol,
+      orderLinkId: payload.orderLinkId,
+      limit: payload.limit,
+    });
+    if (payload.cursor !== undefined) {
+      params.set("cursor", payload.cursor);
+    }
+
+    return this.signedGet("/v5/execution/list", params);
   }
 
   // Public, unauthenticated — unlike every other bybitAdapter.ts method, this
@@ -381,6 +402,10 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     return stub("getOrderHistory", payload);
+  }
+
+  async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
+    return stub("getExecutionList", payload);
   }
 
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
