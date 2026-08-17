@@ -170,6 +170,31 @@
 > `GET .../open-position` не меняется по форме. Change 3 proposal ещё не создан этой ревизией —
 > только master-plan скорректирован.
 
+> **Ревизия v9 — коррекция границы ответственности First Fill (по итогам review v8, до proposal Change
+> 3).** v8's Decision 2 ошибочно назначила ABI ответственность за знание strategy timeframe/grid и за
+> durable-хранение canonical entry-bar identity. Это неверно и отменяется: ABI не знает и не должна
+> знать strategy timeframe/grid — этим уже владеет Runtime. Единственная ответственность ABI —
+> execution-факт конкретного cycle: `first_fill_at_ms` — это trustworthy timestamp первого
+> attributable fill **собственного** entry-ордера этого cycle, не более. ABI **не нормализует** этот
+> timestamp к strategy bar. Runtime (уже владеющий strategy timeframe/grid) получает от ABI raw
+> `first_fill_at_ms`, сам нормализует его к open time содержащей strategy bar и персистит это
+> immutable canonical значение в уже существующем на стороне Runtime `FrozenExecutedReceipt`/frozen
+> receipt lifecycle; Engine получает уже замороженную каноническую bar identity от Runtime, не от ABI.
+> Поток: `Bybit execution → ABI raw attributable first_fill_at_ms → Runtime + timeframe → canonical
+> entry bar open time → FrozenExecutedReceipt → Engine`. Из Change 3 **убрано**: требование к ABI знать
+> timeframe/grid; любая candle-grid normalization логика внутри ABI; durable ABI-поле вида
+> `entry_bar_open_time_ms`; claim "Change 3 добавляет одно новое additive durable поле"; тесты 3/4/5 из
+> v8's required-tests (cross-bar/same-bar normalization, durability канонического bar-поля). Из Change 3
+> **сохранено без изменений**: Decision 1 (aggregate — weak sanity только) и Decision 3
+> (`position_open` — fill-derived per cycle, `PartiallyFilled` с fill > 0 → `position_open = true`,
+> `average_entry_price` — из собственных cumulative execution facts, никогда aggregate `avgPrice`); в
+> `GET .../open-position` по-прежнему не добавляется quantity-поле. Единственный остающийся открытый
+> design-вопрос для будущего Change 3 OpenSpec: нужно ли ABI отдельно durable сохранять raw first-fill
+> execution timestamp, или существующих Bybit/correlation primitives достаточно для его надёжного
+> восстановления по требованию. Cross-repo следствие: нормализация + freeze на стороне Runtime —
+> отдельная будущая Runtime-side работа наряду с другими Runtime-изменениями этой программы, не
+> проектируется в этом master-plan.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -401,7 +426,7 @@ protection: lifecycle строится и тестируется в Change 7 pro
 |---|---|---|---|
 | 1 | `abi-virtual-exposure-state-foundation-v1` | новая: virtual-exposure-state (+ additive к entry-package-execution) | Data model, без изменения поведения |
 | 2 | `abi-pair-scoped-close-execution-v1` | `close-execution` + `abi-position-management-api` (contract change) | **Public contract change** (`DELETE .../open-position` → `POST .../close`, `exposure_fraction`) + consumer prep (owner-aware); требует скоординированного Runtime change |
-| 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений; +1 additive durable поле — canonical entry-bar identity) |
+| 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений; durable-поле — открытый design-вопрос, см. Change 3) |
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
 | 5 | `abi-same-side-virtual-exposure-ownership-v1` | супersedes `position-scope-exclusivity`; малый guard в `protection-execution` | **Activation #1** — базовое ownership |
 | 6 | `abi-pair-owned-protection-state-foundation-v1` | новая: pair-owned protection identity/state (+ additive к `protection-execution`) | Data model/identity, без изменения поведения |
@@ -769,63 +794,45 @@ execution evidence и aggregate sanity противоречат друг дру�
 уже принятой во всей программе error-философии; конкретный error-код (переиспользовать
 `internal_error` или ввести точный новый) — решение design-фазы Change 3, не master-plan.
 
-**Decision 2 — `first_fill_at_ms` — это canonical entry strategy-bar identity, не raw timestamp.**
-Окончательно согласовано: единственная причина существования этого поля — Runtime передаёт его
-Strategy Engine, чтобы Engine определил, в какой стратегической свече (candle) началась сделка. Engine
-не нуждается в миллисекундно точном exchange execution timestamp — только в идентичности содержащей
-эту сделку strategy bar. Системный факт:
+**Decision 2 (пересмотрена ревизией v9) — `first_fill_at_ms` — это ABI's own raw attributable
+first-fill timestamp, не canonical entry strategy-bar identity.** v8 ошибочно назначила ABI
+ответственность знать strategy timeframe/grid и вычислять/хранить canonical entry-bar identity. Это
+отменяется. Согласованная граница ответственности:
 
 ```
-first attributable fill of cycle
-→ determine containing strategy bar
-→ canonical bar open time
+Bybit execution
+→ ABI: raw attributable first_fill_at_ms (собственный entry-ордер этого cycle)
+→ Runtime (владеет strategy timeframe/grid): нормализация к open time содержащей strategy bar
+→ FrozenExecutedReceipt (Runtime-side frozen receipt lifecycle): immutable canonical значение
+→ Engine: получает уже замороженную каноническую bar identity от Runtime
 ```
 
-Пример: timeframe 5m, первый собственный fill в `12:03:41.827` → canonical entry bar open time =
-`12:00:00.000`. Это и есть настоящий долгоживущий бизнес-факт; после определения он **immutable**.
+- **ABI не знает и не должна знать** strategy timeframe/interval/grid ни сейчас, ни после Change 3.
+  Единственная ответственность ABI — execution-факт конкретного cycle: `first_fill_at_ms` — это
+  trustworthy timestamp первого attributable fill **собственного** entry-ордера этого cycle
+  (переиспользует уже существующие own-order confirmation-примитивы, `packageConfirmation.ts`'s
+  `confirmEntryPackage`/`classifyEntryOrderTerminality` — не новый query-механизм).
+- **ABI не нормализует** этот timestamp к strategy bar. Никакой candle-grid normalization логики
+  внутри ABI не вводится — ни в этом change, ни позже в рамках этой программы.
+- **Никакого нового ABI-durable canonical-bar поля.** v8's claim "Change 3 добавляет ровно одно новое
+  additive durable поле (canonical entry-bar open time)" — retracted. Нормализацию и durable freeze
+  выполняет Runtime через уже существующий на его стороне `FrozenExecutedReceipt`/frozen receipt
+  lifecycle — концепция, которой в `abi_executor_bot` нет и не будет.
+- **Wire-naming не меняется.** `first_fill_at_ms` в публичном ответе ABI остаётся собственным raw
+  attributable first-fill timestamp этого cycle — trustworthy, own-order-sourced, не canonical
+  strategy-bar open time (это описание теперь относится к производному значению Runtime, не к
+  значению, которое отдаёт ABI).
 
-**Durable decision.** Этот canonical entry-bar identity ДОЛЖЕН сохраняться durable в ABI — не
-переопределяться заново при каждом `GET .../open-position` через повторный поиск earliest execution
-на Bybit. Один раз, когда ABI получает достаточное attributable own-order/execution evidence для
-первого fill cycle, ABI вычисляет содержащую strategy bar и персистит её canonical open time; все
-последующие `GET .../open-position` читают уже сохранённое durable значение. Это меняет
-"Затрагиваемые слои" по сравнению с более ранними ревизиями этого документа: в отличие от Change 1/2
-(которые сознательно не добавили ни одного нового поля), **Change 3 добавляет ровно одно новое
-additive durable поле** на существующую correlation-запись (`EntryPackageExecutionRecord`) —
-canonical entry-bar open time этого cycle. Точное имя этого internal domain-поля здесь намеренно не
-фиксируется (см. следующий абзац); рабочий пример для обсуждения — `entry_bar_open_time_ms`, но
-design-фаза Change 3 обязана выбрать честное имя по итогам исследования существующих domain models
-(`DesiredEntryDto`, `EntryPackageExecutionRecord`, `EarlyExecutionObservation`), а не фиксировать его
-здесь без этого исследования.
+**Единственный остающийся открытый design-вопрос для будущего Change 3 OpenSpec (не решается здесь).**
+Нужно ли ABI отдельно durable сохранять raw first-fill execution timestamp этого cycle, или
+существующих Bybit/correlation primitives достаточно, чтобы надёжно восстановить/reconstruct его по
+требованию при каждом `GET .../open-position`. Design-фаза Change 3 решает это по факту исследования
+существующих own-order query-примитивов, не master-plan.
 
-**Wire-naming.** `first_fill_at_ms` в публичном контракте **не переименовывается** — Runtime/Engine
-совместимость сохраняется. Master-plan явно фиксирует: для Live V1 семантика этого поля — canonical
-entry strategy-bar identity, а не обещание точного raw exchange first-fill timestamp. Wire-проекция:
-`durable canonical entry-bar identity → response.first_fill_at_ms` (значение в миллисекундах остаётся
-open-времени свечи, не момента фактического исполнения).
-
-**Открытый design-вопрос (обязателен к исследованию перед proposal Change 3, не решается здесь).**
-Нормализация `raw first-fill execution time → strategy bar open time` требует знания
-strategy timeframe/grid этого cycle. **Предварительное code-исследование в рамках этой ревизии
-master-plan показало: сегодня ABI не хранит и не получает нигде timeframe/interval/grid ни на
-уровне `DesiredEntryDto` (`src/domain/entryPackageApi.ts:1-8`: только `side`,
-`source_plan_bar_open_time_ms`, `planned_entry_price`, `initial_stop_price`, `initial_take_price`,
-`locked_exit_profile` — ни одного поля-длительности), ни на уровне `EntryPackageCommand`, ни в
-`AbiConfig`, ни где-либо ещё в кодовой базе** (проверено прямым поиском по `interval`/`kline`/
-`candle`/`timeframe`/`grid` — ни одного совпадения вне этого документа). `source_plan_bar_open_time_ms`
-— это одна конкретная временная метка (bar открытия ПЛАНА, до отправки ордера), а не длительность/грид,
-и сама по себе не позволяет детерминированно определить, какому bar принадлежит ПРОИЗВОЛЬНЫЙ более
-поздний timestamp (момент реального fill). Это значит: до design-фазы Change 3 неизвестно, обязана ли
-ABI вообще владеть знанием timeframe. Design-фаза Change 3 обязана явно исследовать и определить:
-знает ли ABI timeframe уже сейчас (по итогам этой ревизии — нет); можно ли вывести grid из уже
-существующих данных без нового поля; или нужен минимальный дополнительный immutable input/state — и
-именно design-фаза решает, у какой стороны (ABI vs. Runtime/Engine) на самом деле должно жить это
-знание, если текущая граница окажется architectural mismatch. Master-plan **не придумывает** новый
-Runtime/Engine API заранее и не тащит это изменение в чужой репозиторий здесь — это либо чисто ABI-
-internal решение (если достаточно уже присылаемых данных), либо отдельный явный design-вопрос для
-будущего Runtime-companion change, обнаруживаемый только в design-фазе. Инвариант, которому должно
-удовлетворять любое решение: `same execution fact + same strategy configuration → same canonical
-entry-bar identity`, стабильно через retry/restart.
+**Cross-repo следствие.** Нормализация `raw first-fill timestamp → strategy bar open time` и её freeze
+в `FrozenExecutedReceipt` — отдельная будущая работа на стороне Runtime, ведётся вместе с другими
+Runtime-изменениями этой программы (например, Change 2's coordinated `exposure_fraction`-companion),
+не проектируется и не оформляется как ABI OpenSpec change в этом документе.
 
 **Decision 3 — `position_open` — fill-derived per cycle, а не aggregate-existence-derived.** Для
 конкретного cycle `position_open` больше не определяется фактом существования aggregate Bybit
@@ -870,8 +877,9 @@ order state, не как "нет открытой exposure"; собственн�
   `isFillFactFinal` (живой/partial), сервис выполняет целевой refresh (переиспользуя существующий
   query/decode из `packageConfirmation.ts`, без нового механизма) и отвечает актуальным cumulative
   avgPrice.
-- `first_fill_at_ms` читается из нового durable canonical entry-bar поля (Decision 2), вычисленного и
-  сохранённого один раз при первом attributable fill — не пересчитывается заново на каждый запрос.
+- `first_fill_at_ms` отдаёт собственный raw attributable timestamp первого fill entry-ордера этого
+  cycle (Decision 2, пересмотрена v9) — trustworthy own-order-sourced значение, без какой-либо
+  candle-grid нормализации внутри ABI; нормализацию к strategy bar выполняет Runtime отдельно.
 - Live-запрос агрегированной позиции (`queryPositionForInstrument`) сохраняется только как weak
   existence/side sanity-check (Decision 1) — никогда как источник quantity/цены/времени и никогда с
   quantity-сравнением/tolerance.
@@ -896,33 +904,35 @@ physical scope, и независимо от того, терминализир�
 
 **Затрагиваемые слои.** `src/services/openPosition/openPositionResolutionService.ts` (новая
 зависимость на query/decode-примитивы из `packageConfirmation.ts` для refresh-пути; новая логика
-position_open/canonical entry-bar). `src/correlation/entryPackageExecutionRecord.ts` — **ровно одно**
-новое additive durable поле (canonical entry-bar open time; имя выбирается в design-фазе). Routes/DTO
-слой (`src/routes/openPositionRoutes.ts`, `src/domain/openPositionApi.ts`) не меняется по форме — поле
+position_open/own-attributable first-fill sourcing). `src/correlation/entryPackageExecutionRecord.ts`
+— затронут ли этот файл вообще, и если да, то каким конкретно additive-полем (durable raw first-fill
+timestamp), решает **design-фаза Change 3** по итогам единственного открытого design-вопроса
+(Decision 2 выше) — master-plan не фиксирует это заранее. Routes/DTO слой
+(`src/routes/openPositionRoutes.ts`, `src/domain/openPositionApi.ts`) не меняется по форме — поле
 quantity туда не добавляется, `first_fill_at_ms`/`average_entry_price`/`position_open` остаются теми
 же именами и типами.
 
 **HTTP-контракты.** `GET .../open-position` — схема ответа (имена, типы, nullability полей) не
 меняется. Семантика двух полей уточняется в prose `abi-open-position-lookup-api`: `first_fill_at_ms` —
-canonical entry strategy-bar open time этого cycle (не raw exchange timestamp); `average_entry_price` —
-собственная cumulative average execution price этого cycle, не aggregate Bybit avgPrice.
-`position_open` — явно документируется как fill-derived, включая live partial-fill случай.
+собственный raw attributable first-fill timestamp этого cycle (own-order-sourced, не производится
+никакой candle-grid нормализацией внутри ABI — эта нормализация происходит на стороне Runtime);
+`average_entry_price` — собственная cumulative average execution price этого cycle, не aggregate
+Bybit avgPrice. `position_open` — явно документируется как fill-derived, включая live partial-fill
+случай.
 
 **Обязательные тесты.** Минимум:
 1. Single-owner регрессия (значения идентичны сегодняшним, поведение observably не меняется).
 2. Два same-side synthetic owners с разным собственным `average_entry_price`.
-3. Два owners, чьи первые fills принадлежат разным strategy bars → разные durable canonical
-   entry-bar identities.
-4. Raw first-fill timestamps внутри одной strategy bar нормализуются в один и тот же canonical
-   bar-open time.
-5. Canonical entry-bar identity переживает repository replay/restart без изменений.
-6. Живой `PartiallyFilled` собственный entry-ордер с ненулевым cumulative fill → `position_open = true`.
-7. Целевой refresh обновляет актуальный собственный cumulative avgPrice.
-8. Aggregate-позиция, принадлежащая только sibling cycle, НЕ делает запрошенный cycle
+3. Живой `PartiallyFilled` собственный entry-ордер с ненулевым cumulative fill → `position_open = true`.
+4. Целевой refresh обновляет актуальный собственный cumulative avgPrice.
+5. Aggregate-позиция, принадлежащая только sibling cycle, НЕ делает запрошенный cycle
    `position_open = true`.
-9. Расхождение aggregate existence/side sanity с own-cycle evidence — fail closed, если такой
+6. Расхождение aggregate existence/side sanity с own-cycle evidence — fail closed, если такой
    sanity-check остаётся в реализации.
-10. Сериализованный ответ по-прежнему не содержит quantity-поля.
+7. Сериализованный ответ по-прежнему не содержит quantity-поля.
+8. `first_fill_at_ms` в ответе — собственный raw attributable first-fill timestamp этого cycle, не
+   подвергается никакой candle-grid/bar-normalization логике внутри ABI (регрессионный тест против
+   случайного повторного введения bar-normalization).
 
 **Зависит от.** Change 1.
 
@@ -935,9 +945,12 @@ canonical entry strategy-bar open time этого cycle (не raw exchange times
 (`exposure_fraction < 1`); protection redesign; close-order identity/retry-семантика (уже реализовано
 Change 2); generic execution ledger; fill-level dedup subsystem; WebSocket execution ingestion; global
 reconciliation mode; cross-cycle scope mutex; implementation Changes 4–8; Runtime companion
-close-contract change (Change 2's забота). Изменение error-таксономии `abi-open-position-lookup-api`
-сверх уже существующей (кроме, возможно, нового кода на явное aggregate/own-evidence
-противоречие — решение design-фазы).
+close-contract change (Change 2's забота); **знание strategy timeframe/grid внутри ABI и любая
+candle-grid normalization логика внутри ABI (v9 — явно и окончательно отменено, не входит в scope ни
+этого, ни будущих ABI changes)**; нормализация `first_fill_at_ms → canonical entry bar open time` и её
+freeze в `FrozenExecutedReceipt` — это отдельная будущая Runtime-side работа, не ABI OpenSpec. Изменение
+error-таксономии `abi-open-position-lookup-api` сверх уже существующей (кроме, возможно, нового кода на
+явное aggregate/own-evidence противоречие — решение design-фазы).
 
 ---
 
@@ -1287,9 +1300,12 @@ Change 1 (foundation: exposure state)
   удаляем физически (история), но переводим в архивный/historical статус, а действующей capability
   становится новая (`virtual-exposure-ownership` или аналог).
 - **`open-position-resolution`** — **изменяется** Change 3: `position_open` определение (aggregate
-  existence → fill-derived) и avgPrice/first_fill sourcing заменяются (см. Change 3 выше;
-  HTTP wire-контракт остаётся прежним, но correlation-запись получает одно новое additive durable
-  поле — canonical entry-bar identity), остальное сохраняется.
+  existence → fill-derived) и avgPrice/first_fill sourcing заменяются (см. Change 3 выше; HTTP
+  wire-контракт остаётся прежним). `first_fill_at_ms` остаётся ABI's own raw attributable first-fill
+  timestamp — ABI не нормализует его к strategy bar и не знает timeframe/grid (v9-коррекция; эта
+  нормализация — отдельная будущая работа Runtime через `FrozenExecutedReceipt`, не ABI). Появится ли
+  на correlation-записи новое additive durable поле, и какое — открытый design-вопрос Change 3, не
+  решено здесь. Остальное сохраняется.
 - **`close-execution`** — **изменяется дважды**: Change 2 (ключевой разворот в источнике qty **и**
   публичный HTTP-контракт — `DELETE .../open-position` заменяется на `POST .../close` с
   `exposure_fraction`), затем Change 8 (дополнительное постусловие про protection-ордера); остальное
@@ -1441,9 +1457,10 @@ Change 1 (foundation: exposure state)
 4. **Change 3** → apply → аналогично → smoke: `GET open-position` на реальной Demo-позиции, включая
    момент, когда entry-ордер ещё partial — `average_entry_price` в ответе актуален, а не устаревший, и
    `position_open = true` уже при живом `PartiallyFilled` собственном ордере с ненулевым fill; после
-   полного fill убедиться, что `first_fill_at_ms` отражает canonical entry-bar open time и не
-   пересчитывается заново при повторных запросах (durable); ответ по-прежнему не содержит
-   quantity-поля.
+   полного fill убедиться, что `first_fill_at_ms` — это собственный trustworthy raw attributable
+   first-fill timestamp этого cycle (own-order-sourced, стабильный при повторных запросах), а не
+   пересчитывается через какую-либо candle-grid/bar-normalization внутри ABI — эта нормализация
+   явно не входит в ABI's scope (v9); ответ по-прежнему не содержит quantity-поля.
 5. **Change 4** → apply → smoke: убить/перезапустить процесс посреди активного trade cycle (в т.ч. с
    partial fill) на Demo, подтвердить recovery-state не изменился относительно baseline.
 6. **Change 5 (Activation #1)** → apply → это шаг с наибольшим риском живого поведения для базового
