@@ -152,6 +152,24 @@
 > единственный exchange-write pipeline, способный затронуть shared-scope exposure, это close, и он уже
 > безопасен на всех проверенных crash-windows.
 
+> **Ревизия v8 — окончательная семантика Change 3 (`abi-pair-scoped-open-position-resolution-v1`),
+> Change 2 уже applied/архивирован пользователем.** Применяет к open-position тот же
+> attributable-evidence-vs-weak-aggregate-sanity паттерн, который Change 2 уже подтвердил для close.
+> Три решения: (1) aggregate position остаётся weak sanity (`exists AND side compatible`) — никакого
+> `size ≥ cumulative_filled_qty`-сравнения и quantity-drift tolerance, та же причина, что и в v6/v7 для
+> close; (2) `first_fill_at_ms` формально определён как canonical entry strategy-bar identity (не raw
+> timestamp), вычисляется один раз из первого attributable fill и сохраняется **durable** — это первое
+> новое additive-поле на correlation-записи с момента Change 1 (имя — design-фаза Change 3, рабочий
+> пример `entry_bar_open_time_ms`); wire-имя `first_fill_at_ms` не меняется. Открыт явный design-вопрос:
+> предварительное code-исследование (см. Change 3 ниже) показало, что ABI сегодня **нигде** не хранит
+> strategy timeframe/interval/grid — только одну временную метку `source_plan_bar_open_time_ms`
+> (`src/domain/entryPackageApi.ts:3`), не длительность; design-фаза должна определить, знает ли ABI
+> достаточно, или нужен минимальный immutable input, не изобретая Runtime/Engine API заранее; (3)
+> `position_open` переопределён как fill-derived (`own cumulative fill > 0 AND not terminal_closed`),
+> а не aggregate-existence-derived — верно и при живом `PartiallyFilled` entry-ордере. Wire-контракт
+> `GET .../open-position` не меняется по форме. Change 3 proposal ещё не создан этой ревизией —
+> только master-plan скорректирован.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -383,7 +401,7 @@ protection: lifecycle строится и тестируется в Change 7 pro
 |---|---|---|---|
 | 1 | `abi-virtual-exposure-state-foundation-v1` | новая: virtual-exposure-state (+ additive к entry-package-execution) | Data model, без изменения поведения |
 | 2 | `abi-pair-scoped-close-execution-v1` | `close-execution` + `abi-position-management-api` (contract change) | **Public contract change** (`DELETE .../open-position` → `POST .../close`, `exposure_fraction`) + consumer prep (owner-aware); требует скоординированного Runtime change |
-| 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений) |
+| 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений; +1 additive durable поле — canonical entry-bar identity) |
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
 | 5 | `abi-same-side-virtual-exposure-ownership-v1` | супersedes `position-scope-exclusivity`; малый guard в `protection-execution` | **Activation #1** — базовое ownership |
 | 6 | `abi-pair-owned-protection-state-foundation-v1` | новая: pair-owned protection identity/state (+ additive к `protection-execution`) | Data model/identity, без изменения поведения |
@@ -722,79 +740,204 @@ trade cycle, а не агрегированной физической пози�
 `average_entry_price` (`src/domain/openPositionApi.ts:4-14`) — никакой quantity/size-поле не
 добавляется.
 
-**Уточнение роли `first_fill_at_ms` (после ревизии v4).** Это поле нужно ровно для одной цели:
-Runtime передаёт его Strategy Engine по open-trade ветке, чтобы Engine определил стратегическую
-свечу, в которой началась сделка. Оно не нужно для ownership quantity, close, protection или virtual
-exposure accounting — это уже решено в Change 1 (там оно намеренно не вводится как ABI-internal
-durable факт). **Change 3 — единственное место в программе, которое должно исследовать и решить**,
-какое минимально достаточное own-order/execution evidence (не обязательно ABI-шное время первого
-наблюдения fill, которое может отставать от границы следующей strategy bar) даёт корректную entry-bar
-identity для этого wire-поля при multi-owner scope. Точность timestamp ради точности как
-самостоятельная цель не требуется — требование системного уровня — корректно идентифицировать
-entry strategy bar, не более и не менее.
+**Ревизия v8 — окончательная семантика Change 3** (по итогам review, применяющего к open-position тот
+же architectural pattern, что Change 2 уже применил и подтвердил для close: собственная
+attributable order/execution evidence — источник истины; агрегированная Bybit-позиция — только
+weak sanity/reconciliation evidence, никогда gate). Ниже — три согласованных решения.
+
+**Decision 1 — aggregate position остаётся слабым sanity-слоем, без quantity-сравнения.** Change 2
+уже показал (ревизия v6/v7), что сравнение `aggregate vs. ABI-resolved quantity` небезопасно как
+proof — aggregate физической позиции shared и асинхронно меняется при multi-owner scope, а local
+per-pair mutex не делает aggregate delta attributable. Та же логика применяется здесь: Change 3
+**не вводит** сравнение вида `aggregate size ≥ cumulative_filled_qty этого cycle, в пределах
+допуска`, и никакого quantity-drift tolerance под это сравнение. Формулировки из более ранних ревизий
+этого документа про такое сравнение — устарели и заменяются этой ревизией (см. §9 "Consistency
+check" ниже). Если существующей семантике (side-match) вообще нужен sanity-check против aggregate,
+он должен быть **не строже**, чем:
+
+```
+aggregate physical position exists
+AND
+physical side is compatible with this cycle's own side
+```
+
+— то есть ровно то, что `open-position-resolution` уже делает сегодня как "plausibility check, не
+proof of attribution" (spec L166-177), не более. Aggregate НЕ является и не становится источником
+`position_open`, `average_entry_price`, `first_fill_at_ms` или per-cycle quantity. Если own-cycle
+execution evidence и aggregate sanity противоречат друг другу (например: собственный ордер cycle
+показывает fill, но aggregate физической позиции вообще не существует) — ABI fail closed, согласно
+уже принятой во всей программе error-философии; конкретный error-код (переиспользовать
+`internal_error` или ввести точный новый) — решение design-фазы Change 3, не master-plan.
+
+**Decision 2 — `first_fill_at_ms` — это canonical entry strategy-bar identity, не raw timestamp.**
+Окончательно согласовано: единственная причина существования этого поля — Runtime передаёт его
+Strategy Engine, чтобы Engine определил, в какой стратегической свече (candle) началась сделка. Engine
+не нуждается в миллисекундно точном exchange execution timestamp — только в идентичности содержащей
+эту сделку strategy bar. Системный факт:
+
+```
+first attributable fill of cycle
+→ determine containing strategy bar
+→ canonical bar open time
+```
+
+Пример: timeframe 5m, первый собственный fill в `12:03:41.827` → canonical entry bar open time =
+`12:00:00.000`. Это и есть настоящий долгоживущий бизнес-факт; после определения он **immutable**.
+
+**Durable decision.** Этот canonical entry-bar identity ДОЛЖЕН сохраняться durable в ABI — не
+переопределяться заново при каждом `GET .../open-position` через повторный поиск earliest execution
+на Bybit. Один раз, когда ABI получает достаточное attributable own-order/execution evidence для
+первого fill cycle, ABI вычисляет содержащую strategy bar и персистит её canonical open time; все
+последующие `GET .../open-position` читают уже сохранённое durable значение. Это меняет
+"Затрагиваемые слои" по сравнению с более ранними ревизиями этого документа: в отличие от Change 1/2
+(которые сознательно не добавили ни одного нового поля), **Change 3 добавляет ровно одно новое
+additive durable поле** на существующую correlation-запись (`EntryPackageExecutionRecord`) —
+canonical entry-bar open time этого cycle. Точное имя этого internal domain-поля здесь намеренно не
+фиксируется (см. следующий абзац); рабочий пример для обсуждения — `entry_bar_open_time_ms`, но
+design-фаза Change 3 обязана выбрать честное имя по итогам исследования существующих domain models
+(`DesiredEntryDto`, `EntryPackageExecutionRecord`, `EarlyExecutionObservation`), а не фиксировать его
+здесь без этого исследования.
+
+**Wire-naming.** `first_fill_at_ms` в публичном контракте **не переименовывается** — Runtime/Engine
+совместимость сохраняется. Master-plan явно фиксирует: для Live V1 семантика этого поля — canonical
+entry strategy-bar identity, а не обещание точного raw exchange first-fill timestamp. Wire-проекция:
+`durable canonical entry-bar identity → response.first_fill_at_ms` (значение в миллисекундах остаётся
+open-времени свечи, не момента фактического исполнения).
+
+**Открытый design-вопрос (обязателен к исследованию перед proposal Change 3, не решается здесь).**
+Нормализация `raw first-fill execution time → strategy bar open time` требует знания
+strategy timeframe/grid этого cycle. **Предварительное code-исследование в рамках этой ревизии
+master-plan показало: сегодня ABI не хранит и не получает нигде timeframe/interval/grid ни на
+уровне `DesiredEntryDto` (`src/domain/entryPackageApi.ts:1-8`: только `side`,
+`source_plan_bar_open_time_ms`, `planned_entry_price`, `initial_stop_price`, `initial_take_price`,
+`locked_exit_profile` — ни одного поля-длительности), ни на уровне `EntryPackageCommand`, ни в
+`AbiConfig`, ни где-либо ещё в кодовой базе** (проверено прямым поиском по `interval`/`kline`/
+`candle`/`timeframe`/`grid` — ни одного совпадения вне этого документа). `source_plan_bar_open_time_ms`
+— это одна конкретная временная метка (bar открытия ПЛАНА, до отправки ордера), а не длительность/грид,
+и сама по себе не позволяет детерминированно определить, какому bar принадлежит ПРОИЗВОЛЬНЫЙ более
+поздний timestamp (момент реального fill). Это значит: до design-фазы Change 3 неизвестно, обязана ли
+ABI вообще владеть знанием timeframe. Design-фаза Change 3 обязана явно исследовать и определить:
+знает ли ABI timeframe уже сейчас (по итогам этой ревизии — нет); можно ли вывести grid из уже
+существующих данных без нового поля; или нужен минимальный дополнительный immutable input/state — и
+именно design-фаза решает, у какой стороны (ABI vs. Runtime/Engine) на самом деле должно жить это
+знание, если текущая граница окажется architectural mismatch. Master-plan **не придумывает** новый
+Runtime/Engine API заранее и не тащит это изменение в чужой репозиторий здесь — это либо чисто ABI-
+internal решение (если достаточно уже присылаемых данных), либо отдельный явный design-вопрос для
+будущего Runtime-companion change, обнаруживаемый только в design-фазе. Инвариант, которому должно
+удовлетворять любое решение: `same execution fact + same strategy configuration → same canonical
+entry-bar identity`, стабильно через retry/restart.
+
+**Decision 3 — `position_open` — fill-derived per cycle, а не aggregate-existence-derived.** Для
+конкретного cycle `position_open` больше не определяется фактом существования aggregate Bybit
+позиции (сегодняшнее поведение: `OpenPositionResolutionService.determine()`,
+`src/services/openPosition/openPositionResolutionService.ts:101-140`, читает `firstFillAtMs`/
+`averageEntryPrice` напрямую из `queryResult.row` — агрегированной live-позиции). В текущей
+full-close-only архитектуре (`exposure_fraction` только `"1"`, partial close — future work, здесь не
+проектируется) логическая семантика:
+
+```
+own attributable cumulative entry fill > 0
+AND
+cycle is not terminal_closed
+→ position_open = true
+```
+
+Entry-ордер **не обязан** быть terminal. Пример: `calculated_quantity = 10`, `cumExecQty = 3`,
+`order_status = PartiallyFilled` → `position_open = true` для этого cycle. Если durable
+`early_execution_observation` может быть stale (живой/partial ордер), `OpenPositionResolutionService`
+обязан выполнить **целевой refresh** собственного entry-ордера через уже существующие
+confirmation/query примитивы (`packageConfirmation.ts`), а не полагаться на aggregate position для
+attribution. `average_entry_price` сохраняет уже принятое направление: это собственная cumulative
+average execution price cycle (из `early_execution_observation`/refresh), никогда aggregate Bybit
+`avgPrice`. При live partial fill целевой refresh должен возвращать актуальный cumulative average
+execution price. Ни один новый execution ledger не вводится, если существующих cumulative order
+facts (`cumulative_filled_qty`/`avg_execution_price`) для этого достаточно — design-фаза Change 3
+обязана это подтвердить, не предполагать.
+
+**Industry-pattern rationale (кратко, не обзор продуктов).** FIX/OMS-архитектуры отделяют order/
+execution identity от aggregate position state; NautilusTrader — logical position/exposure
+fill-derived, не aggregate-derived; LEAN/Hummingbot трактуют `PartiallyFilled` как нормальное live
+order state, не как "нет открытой exposure"; собственные Bybit order/execution/history primitives
+(уже используемые ABI в `packageConfirmation.ts`) дают достаточную attributable per-cycle evidence
+без обращения к aggregate. Change 3 применяет тот же паттерн, что и Change 2, к чтению вместо записи.
 
 **Что меняется.** `OpenPositionResolutionService.determine()`
 (`src/services/openPosition/openPositionResolutionService.ts:101-140`):
-- `first_fill_at_ms` для ответа этого cycle сурсится из own-order/execution evidence, которое Change 3
-  сам определит как минимально достаточное для entry-bar identity (см. выше) — не обязательно из
-  нового durable ABI-поля; Change 1 такого поля не вводит.
+- `position_open` резолвится из own attributable cumulative fill (> 0) и статуса `terminal_closed`,
+  не из факта существования aggregate live-позиции (Decision 3).
 - `average_entry_price` сурсится из `cumulative_filled_qty`/`avg_execution_price`
-  (`early_execution_observation`, формализованного Change 1), если собственный entry-ордер cycle уже
-  `isFillFactFinal`; если ещё нет (живой/partial), сервис выполняет **целевой refresh** — переспрашивает
-  собственный ордер этого cycle (переиспользуя существующий query/decode из `packageConfirmation.ts`,
-  не изобретая новый механизм) и отвечает актуальным cumulative avgPrice. Это новая
-  под-ответственность сервиса по сравнению с сегодняшним "всегда один live query агрегированной
-  позиции".
-- Live-запрос агрегированной позиции (`queryPositionForInstrument`) сохраняется, но переопределяется
-  как **sanity-check существования и стороны** ("aggregate exists, side matches, size ≥
-  `cumulative_filled_qty` этого cycle в пределах допуска"), а не как источник истины по цене/времени
-  входа. Quantity-факты используются здесь **только** для sanity-check, наружу в ответе не попадают.
+  (`early_execution_observation`, формализованного Change 1); если entry-ордер cycle ещё не
+  `isFillFactFinal` (живой/partial), сервис выполняет целевой refresh (переиспользуя существующий
+  query/decode из `packageConfirmation.ts`, без нового механизма) и отвечает актуальным cumulative
+  avgPrice.
+- `first_fill_at_ms` читается из нового durable canonical entry-bar поля (Decision 2), вычисленного и
+  сохранённого один раз при первом attributable fill — не пересчитывается заново на каждый запрос.
+- Live-запрос агрегированной позиции (`queryPositionForInstrument`) сохраняется только как weak
+  existence/side sanity-check (Decision 1) — никогда как источник quantity/цены/времени и никогда с
+  quantity-сравнением/tolerance.
 
 **Какие инварианты отменяются/заменяются.**
 - open-position-resolution spec L166-177 (side-match — "plausibility check, не proof of attribution")
-  — сохраняется как sanity-слой, но перестаёт быть единственной проверкой.
+  — сохраняется как sanity-слой в том же слабом виде, не усиливается до quantity-проверки.
 - L193-199 ("avgPrice/first_fill sourced напрямую из live row, never estimated") — заменяется:
   при единственном owner источник фактически тот же (совпадает), при множественном — обязателен
   собственный источник per-cycle, т.к. агрегированная Bybit-позиция физически не может отдать
-  раздельные avgPrice/first-fill на владельца.
+  раздельные avgPrice/first-fill на владельца. `position_open`'s текущее определение через факт
+  существования aggregate-позиции — заменяется на fill-derived определение (Decision 3).
 
-**Новые инварианты.** "Ответ open-position для cycle отражает `average_entry_price`/`first_fill_at_ms`
-именно этого cycle, независимо от того, сколько ещё активных cycles делят тот же physical scope, и
-независимо от того, терминализирован ли уже собственный entry-ордер cycle. Ответ никогда не содержит и
-не подразумевает per-cycle quantity — это исключительно внутреннее понятие."
+**Новые инварианты.** "Ответ open-position для cycle отражает `position_open`/`average_entry_price`/
+`first_fill_at_ms` именно этого cycle, независимо от того, сколько ещё активных cycles делят тот же
+physical scope, и независимо от того, терминализирован ли уже собственный entry-ордер cycle."
+"`position_open = true` возможен при живом `PartiallyFilled` entry-ордере, если cumulative fill > 0."
+"Canonical entry-bar identity вычисляется один раз и durable — повторные запросы не пересчитывают её
+заново." "Ответ никогда не содержит и не подразумевает per-cycle quantity — это исключительно
+внутреннее понятие." "Aggregate position никогда не является gate/proof — только weak sanity evidence
+(Decision 1)."
 
 **Затрагиваемые слои.** `src/services/openPosition/openPositionResolutionService.ts` (новая
-зависимость на query/decode-примитивы из `packageConfirmation.ts` для refresh-пути; возможно новая
-логика определения entry-bar evidence). Не трогает routes/DTO слой (`src/routes/openPositionRoutes.ts`,
-`src/domain/openPositionApi.ts`) — форма ответа идентична, поле quantity туда не добавляется.
+зависимость на query/decode-примитивы из `packageConfirmation.ts` для refresh-пути; новая логика
+position_open/canonical entry-bar). `src/correlation/entryPackageExecutionRecord.ts` — **ровно одно**
+новое additive durable поле (canonical entry-bar open time; имя выбирается в design-фазе). Routes/DTO
+слой (`src/routes/openPositionRoutes.ts`, `src/domain/openPositionApi.ts`) не меняется по форме — поле
+quantity туда не добавляется, `first_fill_at_ms`/`average_entry_price`/`position_open` остаются теми
+же именами и типами.
 
-**HTTP-контракты.** `GET .../open-position` — схема ответа не меняется. Текстовая правка prose в
-`abi-open-position-lookup-api` (пояснение, что `average_entry_price`/`first_fill_at_ms` относятся к доле
-этого trade cycle).
+**HTTP-контракты.** `GET .../open-position` — схема ответа (имена, типы, nullability полей) не
+меняется. Семантика двух полей уточняется в prose `abi-open-position-lookup-api`: `first_fill_at_ms` —
+canonical entry strategy-bar open time этого cycle (не raw exchange timestamp); `average_entry_price` —
+собственная cumulative average execution price этого cycle, не aggregate Bybit avgPrice.
+`position_open` — явно документируется как fill-derived, включая live partial-fill случай.
 
-**Обязательные тесты.**
-- Single-owner регрессия: значения идентичны сегодняшним (aggregate == собственная доля).
-- Multi-owner (синтетические фикстуры): два cycle одной стороны на одном scope получают **разные**
-  корректные `average_entry_price`/`first_fill_at_ms`, соответствующие их собственным ордерам, а не общей
-  агрегированной позиции.
-- Cycle с ещё живым (`PartiallyFilled`) собственным entry-ордером: `GET open-position` вызывает
-  refresh-путь и отвечает актуальным `average_entry_price`, а не устаревшим значением из записи.
-- Response DTO-тест подтверждает отсутствие quantity-поля в сериализованном ответе (защита от будущего
-  случайного расширения публичного контракта).
-- Sanity-check срабатывает: если aggregate meaningfully не согласуется с суммой quantity-полей —
-  fail closed (internal_error либо новый код), не тихая деградация.
-- Отдельный тест-набор на корректность entry-bar evidence при multi-owner scope (конкретная форма
-  определяется в design-фазе Change 3).
+**Обязательные тесты.** Минимум:
+1. Single-owner регрессия (значения идентичны сегодняшним, поведение observably не меняется).
+2. Два same-side synthetic owners с разным собственным `average_entry_price`.
+3. Два owners, чьи первые fills принадлежат разным strategy bars → разные durable canonical
+   entry-bar identities.
+4. Raw first-fill timestamps внутри одной strategy bar нормализуются в один и тот же canonical
+   bar-open time.
+5. Canonical entry-bar identity переживает repository replay/restart без изменений.
+6. Живой `PartiallyFilled` собственный entry-ордер с ненулевым cumulative fill → `position_open = true`.
+7. Целевой refresh обновляет актуальный собственный cumulative avgPrice.
+8. Aggregate-позиция, принадлежащая только sibling cycle, НЕ делает запрошенный cycle
+   `position_open = true`.
+9. Расхождение aggregate existence/side sanity с own-cycle evidence — fail closed, если такой
+   sanity-check остаётся в реализации.
+10. Сериализованный ответ по-прежнему не содержит quantity-поля.
 
 **Зависит от.** Change 1.
 
-**Состояние после.** Open-position готов к multi-owner и к живому partial-fill; в проде поведение
-идентично сегодняшнему до Change 5.
+**Состояние после.** Open-position готов к multi-owner и к живому partial-fill; `position_open`
+корректен для partial-fill cycle; canonical entry-bar identity durable и стабилен через restart; в
+проде поведение идентично сегодняшнему до Change 5.
 
-**Осознанно вне scope.** Любое расширение wire-контракта `GET .../open-position` (quantity-поле туда не
-добавляется ни в этом change, ни позже в рамках этой программы). Изменение error-таксономии
-`abi-open-position-lookup-api` сверх уже существующей (кроме, возможно, нового кода на явный
-drift-случай — решается как часть §6 рисков).
+**Осознанно вне scope.** Любое расширение wire-контракта `GET .../open-position` (quantity-поле туда
+не добавляется ни в этом change, ни позже в рамках этой программы); user-facing partial close
+(`exposure_fraction < 1`); protection redesign; close-order identity/retry-семантика (уже реализовано
+Change 2); generic execution ledger; fill-level dedup subsystem; WebSocket execution ingestion; global
+reconciliation mode; cross-cycle scope mutex; implementation Changes 4–8; Runtime companion
+close-contract change (Change 2's забота). Изменение error-таксономии `abi-open-position-lookup-api`
+сверх уже существующей (кроме, возможно, нового кода на явное aggregate/own-evidence
+противоречие — решение design-фазы).
 
 ---
 
@@ -1143,8 +1286,10 @@ Change 1 (foundation: exposure state)
 - **`position-scope-exclusivity`** — **superseded** Change 5. Центральный инвариант заменяется. Спеку не
   удаляем физически (история), но переводим в архивный/historical статус, а действующей capability
   становится новая (`virtual-exposure-ownership` или аналог).
-- **`open-position-resolution`** — **изменяется** Change 3 (два конкретных требования заменяются, см.
-  Change 3 выше; wire-контракт остаётся прежним), остальное сохраняется.
+- **`open-position-resolution`** — **изменяется** Change 3: `position_open` определение (aggregate
+  existence → fill-derived) и avgPrice/first_fill sourcing заменяются (см. Change 3 выше;
+  HTTP wire-контракт остаётся прежним, но correlation-запись получает одно новое additive durable
+  поле — canonical entry-bar identity), остальное сохраняется.
 - **`close-execution`** — **изменяется дважды**: Change 2 (ключевой разворот в источнике qty **и**
   публичный HTTP-контракт — `DELETE .../open-position` заменяется на `POST .../close` с
   `exposure_fraction`), затем Change 8 (дополнительное постусловие про protection-ордера); остальное
@@ -1294,8 +1439,11 @@ Change 1 (foundation: exposure state)
    (`close_order_link_id`), никогда не отправляет второй Bybit-ордер, пока судьба первого не
    подтверждена по его own identity.
 4. **Change 3** → apply → аналогично → smoke: `GET open-position` на реальной Demo-позиции, включая
-   момент, когда entry-ордер ещё partial — `average_entry_price` в ответе актуален, а не устаревший;
-   ответ по-прежнему не содержит quantity-поля.
+   момент, когда entry-ордер ещё partial — `average_entry_price` в ответе актуален, а не устаревший, и
+   `position_open = true` уже при живом `PartiallyFilled` собственном ордере с ненулевым fill; после
+   полного fill убедиться, что `first_fill_at_ms` отражает canonical entry-bar open time и не
+   пересчитывается заново при повторных запросах (durable); ответ по-прежнему не содержит
+   quantity-поля.
 5. **Change 4** → apply → smoke: убить/перезапустить процесс посреди активного trade cycle (в т.ч. с
    partial fill) на Demo, подтвердить recovery-state не изменился относительно baseline.
 6. **Change 5 (Activation #1)** → apply → это шаг с наибольшим риском живого поведения для базового
