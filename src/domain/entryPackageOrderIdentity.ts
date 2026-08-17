@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type EntryPackageOrderRole = "entry";
+export type EntryPackageOrderRole = "entry" | "close";
 
 // Bybit documents a 36-character limit on orderLinkId. The `abi-ep-` prefix
 // (7 chars) + a 20-character hex digest stays comfortably under that limit,

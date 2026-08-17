@@ -11,6 +11,7 @@ import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
+import { buildEntryPackageOrderLinkId } from "../../src/domain/entryPackageOrderIdentity.js";
 import type { BybitAdapter } from "../../src/exchange/bybitAdapter.js";
 import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
@@ -83,10 +84,16 @@ for (const status of ["absent", "terminal_unfilled"] as const) {
   });
 }
 
-test("a scope-ownership mismatch fails closed with internal_error", async () => {
+// Two same-side records sharing a physical scope is not corruption under
+// the corrected ownership check (design.md Decision 1) — it is exactly the
+// synthetic multi-owner state this pipeline must already handle safely,
+// ahead of abi-same-side-virtual-exposure-ownership-v1's production
+// activation. See the "multi-owner close" tests below for that path;
+// disagreeing sides (below) is the actual corruption case now.
+test("disagreeing sides among a scope's active records fails closed with internal_error", async () => {
   await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }));
+    await repo.save(makeRecord({ side: "long" }));
+    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "short" }));
 
     const result = await service.apply(makeCommand());
 
@@ -395,6 +402,201 @@ test("a repeated close after terminal_closed performs no exchange write", async 
   });
 });
 
+// -- abi-pair-scoped-close-execution-v1: multi-owner attributable close --
+// Two active records sharing one physical scope, seeded directly at the
+// repository level (bypassing EntryPackageApplicationService's claim guard,
+// same technique as abi-virtual-exposure-state-foundation-v1's
+// findActiveRecordsForScope tests) — this is unreachable in production
+// today, but is exactly the state Change 2 must already handle safely
+// ahead of same-side ownership activation.
+
+test("multi-owner close dispatches under its own identity, closes only the requesting cycle's resolved exposure, and never touches the sibling — all within one request", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo);
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.010" });
+    // A market close order settles immediately once queried — this is what
+    // makes dispatch and confirmation complete within one request (design.md
+    // Decision 4's crash-window D/E collapsed into a single call).
+    setOrderStatus(bybit, closeOrderLinkId, { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.body, {
+      strategy_instance_id: "instance-A",
+      trade_cycle_id: "cycle-A",
+      status: "trade_cycle_closed",
+    });
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls[0].qty, "0.004", "closes A's own resolved exposure, never the raw aggregate (0.010)");
+    assert.equal((bybit.createOrderCalls[0] as { orderLinkId?: string }).orderLinkId, closeOrderLinkId);
+    assert.equal((bybit.createOrderCalls[0] as { side?: string }).side, "Sell", "reduce-only against the aggregate's live Buy side");
+
+    const closedA = repo.get("instance-A", "cycle-A");
+    assert.equal(closedA?.status, "terminal_closed");
+    assert.equal(closedA?.close_order_link_id, closeOrderLinkId);
+    assert.equal(closedA?.early_execution_observation, null, "close never writes to early_execution_observation");
+
+    const untouchedB = repo.get("instance-B", "cycle-B");
+    assert.equal(untouchedB?.status, "applied", "sibling is untouched by closing A");
+    assert.equal(untouchedB?.close_order_link_id, null);
+    assert.deepEqual(
+      repo.findActiveRecordsForScope("linear", "BTCUSDT").map((record) => record.trade_cycle_id),
+      ["cycle-B"],
+      "closing A leaves B as the scope's sole remaining active owner",
+    );
+  });
+});
+
+test("a cycle with zero resolved exposure sends no close order even while a sibling keeps the aggregate positive", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    await seedTwoOwners(repo);
+    setOrderStatus(bybit, "link-a", { orderStatus: "Cancelled", cumExecQty: "0", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0, "no aggregate read when nothing needs closing");
+    assert.equal(bybit.createOrderCalls.length, 0);
+    const closedA = repo.get("instance-A", "cycle-A");
+    assert.equal(closedA?.status, "terminal_closed");
+    assert.equal(closedA?.close_order_link_id, null, "no identity is ever written for a zero-exposure cycle");
+
+    const untouchedB = repo.get("instance-B", "cycle-B");
+    assert.equal(untouchedB?.status, "applied");
+  });
+});
+
+test("scenario B: a close order dispatched and confirmed filled by an earlier attempt is recovered, not resent", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo, { closeOrderLinkId });
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    setOrderStatus(bybit, closeOrderLinkId, { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 0, "no new close order is ever sent for an already-confirmed identity");
+    assert.equal(repo.get("instance-A", "cycle-A")?.status, "terminal_closed");
+  });
+});
+
+test("scenario C: a close order whose fate stays live/ambiguous blocks success without a replacement order", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo, { closeOrderLinkId });
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    // The close order itself is found but never reaches a terminal status
+    // within the bounded window.
+    setOrderStatus(bybit, closeOrderLinkId, { orderStatus: "New", cumExecQty: "0", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 0, "no replacement order while the prior one's fate is unresolved");
+    assert.notEqual(repo.get("instance-A", "cycle-A")?.status, "terminal_closed");
+  });
+});
+
+test("scenario D: a definitively zero-execution close order fails closed with close_execution_incomplete", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo, { closeOrderLinkId });
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    setOrderStatus(bybit, closeOrderLinkId, { orderStatus: "Cancelled", cumExecQty: "0", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 422);
+    assert.deepEqual(result.body, {
+      error: {
+        code: "close_execution_incomplete",
+        message: "the requested cycle's own close order did not fully execute the resolved exposure",
+      },
+    });
+    assert.equal(bybit.createOrderCalls.length, 0, "no resubmission under the same or a new identity");
+    assert.notEqual(repo.get("instance-A", "cycle-A")?.status, "terminal_closed");
+  });
+});
+
+test("scenario E: a confirmed partial execution is not accepted as success", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo, { closeOrderLinkId });
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    // Terminal (Cancelled), but only half of the requested 0.004 executed.
+    setOrderStatus(bybit, closeOrderLinkId, { orderStatus: "Cancelled", cumExecQty: "0.002", qty: "0.004" });
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 422);
+    assert.equal(result.body.error.code, "close_execution_incomplete");
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.notEqual(repo.get("instance-A", "cycle-A")?.status, "terminal_closed");
+  });
+});
+
+test("a close-order identity genuinely never created is safely resent under the same identity, then confirmed", async () => {
+  await withMultiOwnerService(async ({ service, bybit, repo }) => {
+    const closeOrderLinkId = closeIdentityFor("instance-A", "cycle-A");
+    await seedTwoOwners(repo, { closeOrderLinkId });
+    setOrderStatus(bybit, "link-a", { orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" });
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.010" });
+    // No response configured for closeOrderLinkId at all — genuinely
+    // not_found, until the resend settles it.
+    settleOrderQueryAfterCreate(
+      bybit,
+      closeOrderLinkId,
+      orderListResponse({ orderStatus: "Filled", cumExecQty: "0.004", qty: "0.004" }),
+    );
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 1, "resent exactly once, reusing the same identity");
+    assert.equal((bybit.createOrderCalls[0] as { orderLinkId?: string }).orderLinkId, closeOrderLinkId);
+    assert.equal(repo.get("instance-A", "cycle-A")?.status, "terminal_closed");
+  });
+});
+
+async function seedTwoOwners(
+  repo: EntryPackageCorrelationRepository,
+  overridesA: Partial<Parameters<typeof makeRecord>[0]> = {},
+  overridesB: Partial<Parameters<typeof makeRecord>[0]> = {},
+): Promise<void> {
+  await repo.save(
+    makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A",
+      orderLinkId: "link-a",
+      calculatedQuantity: "0.004",
+      side: "long",
+      ...overridesA,
+    }),
+  );
+  await repo.save(
+    makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B",
+      orderLinkId: "link-b",
+      calculatedQuantity: "0.006",
+      side: "long",
+      ...overridesB,
+    }),
+  );
+}
+
+function closeIdentityFor(strategyInstanceId: string, tradeCycleId: string, generation = 1): string {
+  return buildEntryPackageOrderLinkId(strategyInstanceId, tradeCycleId, "close", generation);
+}
+
+async function withMultiOwnerService(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+  await withService(fn);
+}
+
 test("close and a concurrent entry-package command for the same pair never interleave", async () => {
   const dir = await mkdtemp(join(tmpdir(), "abi-close-concurrency-"));
   try {
@@ -543,10 +745,30 @@ async function withService(
 // treats that as terminal (design.md: the same clean-absence condition
 // confirmEntryPackageCancelled already treats as confirmed non-live), so
 // most tests above never need to configure an order response at all.
-function setOrderStatus(bybit: FakeBybitAdapter, orderLinkId: string, input: { orderStatus: string; cumExecQty: string }): void {
+function setOrderStatus(
+  bybit: FakeBybitAdapter,
+  orderLinkId: string,
+  input: { orderStatus: string; cumExecQty: string; qty?: string },
+): void {
   const response = orderListResponse(input);
   bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
   bybit.orderHistoryResponseByLinkId.set(orderLinkId, response);
+}
+
+// Simulates a resent close order settling once actually dispatched: the
+// identity reads not_found until createOrder is called with it, then reads
+// `response` from then on — mirrors settleOrderAfterCancel's pattern for
+// the "genuinely never created, safe to resend" crash window.
+function settleOrderQueryAfterCreate(bybit: FakeBybitAdapter, orderLinkId: string, response: unknown): void {
+  const realCreateOrder = bybit.createOrder.bind(bybit);
+  bybit.createOrder = async (payload) => {
+    const result = await realCreateOrder(payload);
+    if ("orderLinkId" in payload && payload.orderLinkId === orderLinkId) {
+      bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
+      bybit.orderHistoryResponseByLinkId.set(orderLinkId, response);
+    }
+    return result;
+  };
 }
 
 // Simulates a real cancel taking effect: once cancelOrder is called for
@@ -579,7 +801,7 @@ function settlePositionAfterClose(bybit: FakeBybitAdapter, openResponse: unknown
   };
 }
 
-function orderListResponse(input: { orderStatus: string; cumExecQty: string }): unknown {
+function orderListResponse(input: { orderStatus: string; cumExecQty: string; qty?: string }): unknown {
   return {
     retCode: 0,
     result: {
@@ -587,7 +809,7 @@ function orderListResponse(input: { orderStatus: string; cumExecQty: string }): 
         {
           orderStatus: input.orderStatus,
           triggerPrice: "100000",
-          qty: "0.003",
+          qty: input.qty ?? "0.003",
           cumExecQty: input.cumExecQty,
           stopLoss: "99000",
           takeProfit: "103000",
@@ -617,6 +839,10 @@ function makeRecord(
     exchangeCategory: "linear" | "spot";
     orderLinkId: string | null;
     calculatedQuantity: string;
+    side: "long" | "short";
+    generation: number;
+    closeOrderLinkId: string | null;
+    closeOrderId: string | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -628,7 +854,7 @@ function makeRecord(
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {
-      side: "long",
+      side: overrides.side ?? "long",
       source_plan_bar_open_time_ms: 1785000000000,
       planned_entry_price: "100000",
       initial_stop_price: "99000",
@@ -639,7 +865,9 @@ function makeRecord(
     calculated_quantity: overrides.calculatedQuantity ?? "0.003",
     order_link_id: overrides.orderLinkId === undefined ? "link-1" : overrides.orderLinkId,
     order_id: overrides.orderLinkId === null ? null : "order-1",
-    generation: 1,
+    close_order_link_id: overrides.closeOrderLinkId ?? null,
+    close_order_id: overrides.closeOrderId ?? null,
+    generation: overrides.generation ?? 1,
     status: overrides.status ?? "applied",
     early_execution_observation: null,
     binding_history: [],

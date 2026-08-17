@@ -1,5 +1,5 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
-import { isPositiveExactDecimalText } from "./entryPackageApi.js";
+import { isExactDecimalText, isPositiveExactDecimalText } from "./entryPackageApi.js";
 import { decimalEquals } from "./exactDecimal.js";
 
 export type ProtectionRequestBody = {
@@ -22,9 +22,14 @@ export type ProtectionAppliedResponse = {
   take_price: string | null;
 };
 
+// V1 accepts only a canonical exposureFraction — an exact-decimal string
+// numerically equal to "1" (validateCloseCommand enforces this; any other
+// value never reaches a CloseCommand at all). No caller-supplied absolute
+// quantity is ever accepted here — ABI resolves that itself.
 export type CloseCommand = {
   strategyInstanceId: string;
   tradeCycleId: string;
+  exposureFraction: string;
 };
 
 export type TradeCycleClosedResponse = {
@@ -40,6 +45,7 @@ export type PositionManagementErrorCode =
   | "unknown_trade_cycle_binding"
   | "unsupported_exchange_scope"
   | "position_not_open"
+  | "close_execution_incomplete"
   | "internal_error";
 
 export type PositionManagementErrorResponse = {
@@ -153,11 +159,21 @@ export function validateProtectionCommand(
 // Builds the close endpoint's command independently of whatever the route's
 // own path-matching already checked — the domain layer validates its own
 // inputs rather than trusting a caller's prior pass (mirrors
-// validateProtectionCommand's independent path-opaqueness check).
-export function validateCloseCommand(path: {
-  strategyInstanceId: unknown;
-  tradeCycleId: unknown;
-}): CloseValidationResult {
+// validateProtectionCommand's independent path-opaqueness check). The body
+// is validated the same way validateProtectionCommand validates its own:
+// exposure_fraction must be present, exact-decimal text, and numerically
+// equal to 1 (decimalEquals, not literal string equality — "1.0" is
+// accepted the same way it is for stop_price/take_price elsewhere in this
+// file) — any other value, malformed text, a missing/null field, or an
+// unrecognized extra field fails closed here, before CloseApplicationService
+// is ever invoked, before any exchange call or durable write.
+export function validateCloseCommand(
+  path: {
+    strategyInstanceId: unknown;
+    tradeCycleId: unknown;
+  },
+  payload: unknown,
+): CloseValidationResult {
   const details: EntryPackageValidationDetail[] = [];
 
   validateOpaqueNonEmptyString(
@@ -168,7 +184,30 @@ export function validateCloseCommand(path: {
   );
   validateOpaqueNonEmptyString(path.tradeCycleId, "/path/trade_cycle_id", "trade_cycle_id", details);
 
-  if (details.length > 0) {
+  if (!isRecord(payload)) {
+    details.push({
+      path: "/",
+      message: "request body must be a JSON object",
+    });
+    return { ok: false, details };
+  }
+
+  validateClosedObject(payload, ["exposure_fraction"], "/", details);
+
+  let exposureFraction: string | undefined;
+  if (Object.hasOwn(payload, "exposure_fraction")) {
+    const value = payload.exposure_fraction;
+    if (typeof value !== "string" || !isExactDecimalText(value) || !decimalEquals(value, "1")) {
+      details.push({
+        path: "/exposure_fraction",
+        message: 'exposure_fraction must be exact-decimal text numerically equal to "1"',
+      });
+    } else {
+      exposureFraction = value;
+    }
+  }
+
+  if (details.length > 0 || exposureFraction === undefined) {
     return { ok: false, details };
   }
 
@@ -177,6 +216,7 @@ export function validateCloseCommand(path: {
     command: {
       strategyInstanceId: path.strategyInstanceId as string,
       tradeCycleId: path.tradeCycleId as string,
+      exposureFraction,
     },
   };
 }
@@ -318,6 +358,20 @@ export function unsupportedExchangeScopeResult(): PositionManagementHttpResult {
 
 export function positionNotOpenResult(): PositionManagementHttpResult {
   return errorResult(422, "position_not_open", "no live position exists for the requested pair");
+}
+
+// Close-only: the requested cycle's own close order (multi-owner path)
+// reached a terminal outcome whose confirmed executed quantity does not
+// exactly equal the quantity ABI resolved and submitted for it — zero
+// execution (rejected/cancelled) and partial execution both land here,
+// differing only in degree. Never sent for the single-owner path, which has
+// no comparable per-cycle quantity to fall short of.
+export function closeExecutionIncompleteResult(): PositionManagementHttpResult {
+  return errorResult(
+    422,
+    "close_execution_incomplete",
+    "the requested cycle's own close order did not fully execute the resolved exposure",
+  );
 }
 
 export function internalErrorResult(): PositionManagementHttpResult {

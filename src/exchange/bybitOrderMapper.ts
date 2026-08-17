@@ -31,6 +31,12 @@ export type BybitMarketCloseOrderPayload = {
   qty: string;
   reduceOnly: true;
   positionIdx?: number;
+  // Only the multi-owner close path (abi-pair-scoped-close-execution-v1)
+  // sets this — a stable, attributable identity so a crash/retry can
+  // resolve this specific close order's own fate before ever sending a
+  // second one. The single-owner path's payload construction is unchanged
+  // and omits it entirely.
+  orderLinkId?: string;
 };
 
 export type BybitCancelOrderPayload = {
@@ -135,6 +141,23 @@ export function mapEntryPackageToBybit(
 
 export function mapPositionSideToCloseSide(side: string): BybitOrderSide {
   return side === "Buy" ? "Sell" : "Buy";
+}
+
+// Reads Bybit's own assigned orderId out of a create-order response.
+// Generic to any /v5/order/create call (entry, or a multi-owner close order)
+// — nothing here is specific to which kind of order was created.
+export function readBybitOrderId(response: unknown): string | null {
+  if (typeof response !== "object" || response === null || !("result" in response)) {
+    return null;
+  }
+
+  const result = (response as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null || !("orderId" in result)) {
+    return null;
+  }
+
+  const orderId = (result as Record<string, unknown>).orderId;
+  return typeof orderId === "string" && orderId !== "" ? orderId : null;
 }
 
 function mapTriggerDirection(direction: "rises_to" | "falls_to"): BybitTriggerDirection {

@@ -17,7 +17,7 @@ import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIden
 import { positionScopeKey } from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
-import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
+import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
@@ -252,6 +252,12 @@ export class EntryPackageApplicationService {
       calculated_quantity: calculatedQuantity,
       order_link_id: orderLinkId,
       order_id: null,
+      // A new generation never inherits a stale close-order identity from
+      // an earlier one — see abi-pair-scoped-close-execution-v1's design.md
+      // Decision 3 for why this explicit reset (not a spread of
+      // priorRecord) is what makes that guarantee hold by construction.
+      close_order_link_id: null,
+      close_order_id: null,
       generation,
       status: "pending_create",
       early_execution_observation: null,
@@ -653,6 +659,8 @@ export class EntryPackageApplicationService {
       calculated_quantity: null,
       order_link_id: null,
       order_id: null,
+      close_order_link_id: null,
+      close_order_id: null,
       generation: 0,
       status: "absent",
       early_execution_observation: null,
@@ -758,16 +766,3 @@ function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstru
   throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
 }
 
-function readBybitOrderId(response: unknown): string | null {
-  if (typeof response !== "object" || response === null || !("result" in response)) {
-    return null;
-  }
-
-  const result = (response as Record<string, unknown>).result;
-  if (typeof result !== "object" || result === null || !("orderId" in result)) {
-    return null;
-  }
-
-  const orderId = (result as Record<string, unknown>).orderId;
-  return typeof orderId === "string" && orderId !== "" ? orderId : null;
-}

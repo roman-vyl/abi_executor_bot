@@ -134,11 +134,11 @@
         }
       }
     },
-    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position": {
-      "delete": {
-        "operationId": "closeTradeCyclePosition",
-        "summary": "Close 100% of the current remainder of an already-open, Runtime-owned trade cycle position",
-        "description": "Accepts no request body and no quantity, percentage, or close-fraction field of any kind: closing always means the full current remainder, as ABI determines it from the exchange, plus every order ABI attributes to the pair.",
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/close": {
+      "post": {
+        "operationId": "closeTradeCycle",
+        "summary": "Close exposure_fraction of an already-open, Runtime-owned trade cycle's own resolved exposure",
+        "description": "V1 accepts only exposure_fraction values numerically equal to 1 (the canonical value meaning the requested trade cycle's entire resolved exposure) — no caller-supplied absolute quantity is ever accepted; ABI resolves that itself. Replaces the retired empty-bodied DELETE .../open-position route, which no longer exists.",
         "parameters": [
           {
             "name": "strategy_instance_id",
@@ -153,9 +153,22 @@
             "schema": { "type": "string", "minLength": 1 }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CloseRequest" },
+              "examples": {
+                "fullClose": {
+                  "value": { "exposure_fraction": "1" }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "The pair's open position size is verified zero and no order ABI attributes to the pair remains active",
+            "description": "The requested cycle's own resolved exposure is verified closed and no order ABI attributes to the pair remains active",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/TradeCycleClosedResponse" },
@@ -171,8 +184,28 @@
               }
             }
           },
+          "400": {
+            "description": "Missing or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MalformedJsonError" },
+                "example": { "error": { "code": "malformed_json", "message": "request body must be valid JSON" } }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UnsupportedMediaTypeError" },
+                "example": {
+                  "error": { "code": "unsupported_media_type", "message": "content-type must be application/json" }
+                }
+              }
+            }
+          },
           "422": {
-            "description": "A non-empty request body was sent, no correlation record exists for the pair, or the resolved scope's exchange category is out of scope",
+            "description": "Transport validation failed (including a non-canonical exposure_fraction), no correlation record exists for the pair, the resolved scope's exchange category is out of scope, or the requested cycle's own close order did not fully execute its resolved exposure",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/CloseBusinessError" },
@@ -182,7 +215,7 @@
                       "error": {
                         "code": "validation_failed",
                         "message": "request validation failed",
-                        "details": [{ "path": "/", "message": "request body must be empty" }]
+                        "details": [{ "path": "/exposure_fraction", "message": "exposure_fraction must be exact-decimal text numerically equal to \"1\"" }]
                       }
                     }
                   },
@@ -199,6 +232,14 @@
                       "error": {
                         "code": "unsupported_exchange_scope",
                         "message": "resolved position's exchange category is not supported"
+                      }
+                    }
+                  },
+                  "close_execution_incomplete": {
+                    "value": {
+                      "error": {
+                        "code": "close_execution_incomplete",
+                        "message": "the requested cycle's own close order did not fully execute the resolved exposure"
                       }
                     }
                   }
@@ -243,6 +284,17 @@
           "stop_price": { "type": "string", "format": "positive-exact-decimal" },
           "take_price": {
             "oneOf": [{ "type": "string", "format": "positive-exact-decimal" }, { "type": "null" }]
+          }
+        }
+      },
+      "CloseRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["exposure_fraction"],
+        "properties": {
+          "exposure_fraction": {
+            "type": "string",
+            "description": "V1 accepts only exact-decimal text numerically equal to 1 (the requested cycle's entire resolved exposure). Reserved for a future fractional value; no partial-close behavior exists in V1."
           }
         }
       },
@@ -367,6 +419,22 @@
           }
         }
       },
+      "CloseExecutionIncompleteError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "close_execution_incomplete" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
       "ProtectionBusinessError": {
         "oneOf": [
           { "$ref": "#/components/schemas/ValidationFailedError" },
@@ -379,7 +447,8 @@
         "oneOf": [
           { "$ref": "#/components/schemas/ValidationFailedError" },
           { "$ref": "#/components/schemas/UnknownTradeCycleBindingError" },
-          { "$ref": "#/components/schemas/UnsupportedExchangeScopeError" }
+          { "$ref": "#/components/schemas/UnsupportedExchangeScopeError" },
+          { "$ref": "#/components/schemas/CloseExecutionIncompleteError" }
         ]
       },
       "InternalError": {

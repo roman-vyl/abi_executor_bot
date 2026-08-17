@@ -1,77 +1,77 @@
 ## 1. Order identity: widen the existing role type
 
-- [ ] 1.1 In `src/domain/entryPackageOrderIdentity.ts`, widen `EntryPackageOrderRole` from `"entry"` to
+- [x] 1.1 In `src/domain/entryPackageOrderIdentity.ts`, widen `EntryPackageOrderRole` from `"entry"` to
       `"entry" | "close"`. `buildEntryPackageOrderLinkId` itself needs no change — its hash already
       includes `role` — design.md Decision 2.
 
 ## 2. Correlation record: two new nullable fields, additive only
 
-- [ ] 2.1 Add `close_order_link_id: string | null` and `close_order_id: string | null` to
+- [x] 2.1 Add `close_order_link_id: string | null` and `close_order_id: string | null` to
       `EntryPackageExecutionRecord` (`src/correlation/entryPackageExecutionRecord.ts`), placed next to
       `order_link_id`/`order_id` with a comment distinguishing them as the close operation's own identity,
       independent of the entry order's — design.md Decision 3.
-- [ ] 2.2 Update `isValidEntryPackageExecutionRecord` to accept both new fields as `undefined`, `null`, or
+- [x] 2.2 Update `isValidEntryPackageExecutionRecord` to accept both new fields as `undefined`, `null`, or
       a string — explicitly tolerating the key being entirely absent, unlike `order_link_id`/`order_id`'s
       stricter clause — so durable rows written before this change ships still replay — design.md
       Decision 3's validator note.
-- [ ] 2.3 In `EntryPackageApplicationService.createOrder()`'s `provisional` record literal
+- [x] 2.3 In `EntryPackageApplicationService.createOrder()`'s `provisional` record literal
       (`entryPackageApplicationService.ts:246-266`, unrelated service, touched only for this one literal),
       add explicit `close_order_link_id: null, close_order_id: null` — proves a new generation never
       inherits a stale close identity from an earlier one, with no other change to that function.
 
 ## 3. Exchange payload: optional close-order identity
 
-- [ ] 3.1 Add `orderLinkId?: string` to `BybitMarketCloseOrderPayload`
+- [x] 3.1 Add `orderLinkId?: string` to `BybitMarketCloseOrderPayload`
       (`src/exchange/bybitOrderMapper.ts`) — optional, so the single-owner branch's existing payload
       literal in `closeApplicationService.ts` needs no change.
 
 ## 4. Domain: request/response contract (unchanged from the first draft)
 
-- [ ] 4.1 In `src/domain/positionManagementApi.ts`, change `CloseCommand` to
+- [x] 4.1 In `src/domain/positionManagementApi.ts`, change `CloseCommand` to
       `{ strategyInstanceId: string; tradeCycleId: string; exposureFraction: string }`.
-- [ ] 4.2 Change `validateCloseCommand` to also accept `payload: unknown` (mirroring
+- [x] 4.2 Change `validateCloseCommand` to also accept `payload: unknown` (mirroring
       `validateProtectionCommand`'s signature), validate the body is a closed JSON object with exactly
       `exposure_fraction` (required, non-null, exact-decimal text per `isExactDecimalText`, numerically
       equal to `1` per `decimalEquals(value, "1")`).
-- [ ] 4.3 Add `"close_execution_incomplete"` to `PositionManagementErrorCode` and a
+- [x] 4.3 Add `"close_execution_incomplete"` to `PositionManagementErrorCode` and a
       `closeExecutionIncompleteResult()` helper (422) — replaces the first draft's
       `position_exposure_drift`/`positionExposureDriftResult()`, not additive to it.
-- [ ] 4.4 Do not change `TradeCycleClosedResponse`'s shape.
+- [x] 4.4 Do not change `TradeCycleClosedResponse`'s shape.
 
 ## 5. Routes: POST /close replacing DELETE /open-position (unchanged from the first draft)
 
-- [ ] 5.1 In `src/routes/positionManagementRoutes.ts`, change `matchCloseRoute` to match `POST` and path
+- [x] 5.1 In `src/routes/positionManagementRoutes.ts`, change `matchCloseRoute` to match `POST` and path
       segment `"close"` (was `DELETE`/`"open-position"`); keep the same 7-segment shape and
       `decodeOpaquePathValue` calls for both path identifiers.
-- [ ] 5.2 Change `handleClose` to the same content-type/JSON-parse flow `handleProtection` already uses.
-- [ ] 5.3 Delete the now-unused `readRawBody` helper.
-- [ ] 5.4 Confirm (no code change expected) that a request to the old `DELETE .../open-position` route
+- [x] 5.2 Change `handleClose` to the same content-type/JSON-parse flow `handleProtection` already uses.
+- [x] 5.3 Delete the now-unused `readRawBody` helper.
+- [x] 5.4 Confirm (no code change expected) that a request to the old `DELETE .../open-position` route
       falls through every route matcher to the server's generic 404.
 
 ## 6. `CloseApplicationService`: ownership check and branching (unchanged from the first draft)
 
-- [ ] 6.1 Replace the `findOwnerByScope`-based reconfirmation with a call to
+- [x] 6.1 Replace the `findOwnerByScope`-based reconfirmation with a call to
       `correlationRepository.findActiveRecordsForScope(category, symbol)`; assert the requested pair's own
       record is among the results, else `internal_error`.
-- [ ] 6.2 When the active-record count is more than one, additionally assert every active record's
+- [x] 6.2 When the active-record count is more than one, additionally assert every active record's
       `physical_side` agrees; else `internal_error`.
-- [ ] 6.3 Branch on `activeRecords.length`: `=== 1` keeps every subsequent step as the existing,
+- [x] 6.3 Branch on `activeRecords.length`: `=== 1` keeps every subsequent step as the existing,
       unmodified single-owner code (task 7); `> 1` proceeds to tasks 8-10. Do not merge the two branches.
 
 ## 7. `CloseApplicationService`: single-owner branch — no changes
 
-- [ ] 7.1 Confirm (as a diff-review step, not a code change) that the single-owner branch's Bybit calls,
+- [x] 7.1 Confirm (as a diff-review step, not a code change) that the single-owner branch's Bybit calls,
       quantity source (`row.size`), and `verifyBothPostconditions` call/signature are byte-for-byte
       identical to the pre-correction code — design.md Decision 1.
 
 ## 8. `CloseApplicationService`: multi-owner quantity resolution (unchanged from the first draft)
 
-- [ ] 8.1 After the existing entry-order neutralization step confirms no live remainder, resolve
+- [x] 8.1 After the existing entry-order neutralization step confirms no live remainder, resolve
       `resolvedQty` via a fresh, read-only `confirmEntryPackage` call against the entry order's own
       identity, with `expected: { qty: record.calculated_quantity }` (`internal_error` if
       `calculated_quantity` is null). Map `full_fill`/`partial_fill` → `observation.cumulative_filled_qty`;
       `terminal_without_fill` → `"0"`; `not_found`/`ambiguous` → `internal_error`.
-- [ ] 8.2 Do not pass this observation to `correlationRepository.save()` or otherwise write it to the
+- [x] 8.2 Do not pass this observation to `correlationRepository.save()` or otherwise write it to the
       record — transient/read-only, reaffirmed by design.md Decision 6.
 
 ## 9. `CloseApplicationService`: attributable close-order dispatch and retry resolution
@@ -84,16 +84,16 @@ and its explicit crash-window table (A-E).
 
 **Step 1 — ensure dispatched** (this step is a no-op if `record.close_order_link_id !== null` already —
 proceed directly to Step 2):
-- [ ] 9.1 If `resolvedQty === "0"`: send no close order, write no `close_order_link_id`, proceed directly
+- [x] 9.1 If `resolvedQty === "0"`: send no close order, write no `close_order_link_id`, proceed directly
       to task 10's durable write — design.md Decision 4, Step 1.2.
-- [ ] 9.2 Otherwise, read the live aggregate once (for `side`); if it is `no_position` while
+- [x] 9.2 Otherwise, read the live aggregate once (for `side`); if it is `no_position` while
       `resolvedQty !== "0"`, return `internal_error` (a pre-dispatch contradiction, distinct from Step 2's
       post-dispatch outcome) — design.md Decision 4, Step 1.3.
-- [ ] 9.3 Compute `closeOrderLinkId = buildEntryPackageOrderLinkId(strategyInstanceId, tradeCycleId,
+- [x] 9.3 Compute `closeOrderLinkId = buildEntryPackageOrderLinkId(strategyInstanceId, tradeCycleId,
       "close", record.generation)`. Durably write `close_order_link_id: closeOrderLinkId` (and
       `close_order_id: null`) to the record **before** calling `executeMarketCloseOrder` — design.md
       Decision 4, Step 1.4.
-- [ ] 9.4 Send the reduce-only close order for `resolvedQty` on `mapPositionSideToCloseSide(row.side)`,
+- [x] 9.4 Send the reduce-only close order for `resolvedQty` on `mapPositionSideToCloseSide(row.side)`,
       `orderLinkId: closeOrderLinkId`. On a thrown exception or `skipped_live_execution`, leave the
       already-written `close_order_link_id` as-is (do not revert it) and return `internal_error`
       immediately, without running Step 2 this request — design.md Decision 4, Step 1.5. On any other
@@ -103,7 +103,7 @@ proceed directly to Step 2):
 **Step 2 — always resolve and gate on the dispatched identity's fate** (runs whenever
 `record.close_order_link_id !== null`, whether just set by Step 1 in this same request or found already
 set from an earlier one):
-- [ ] 9.5 Re-derive `resolvedQty` fresh (task 8.1 again), then call `confirmEntryPackage` on
+- [x] 9.5 Re-derive `resolvedQty` fresh (task 8.1 again), then call `confirmEntryPackage` on
       `close_order_link_id` with `expected: { qty: resolvedQty }`, and branch exactly per design.md
       Decision 4's Step 2:
       - confirmed quantity equals `resolvedQty` (exact, `decimalEquals`) → proceed to task 10, no new
@@ -117,76 +117,76 @@ set from an earlier one):
         same `close_order_link_id` (no new identity is computed), then fall through into Step 2 again for
         the resulting dispatch.
       - `ambiguous` → `internal_error`, no order sent.
-- [ ] 9.6 Do not add a generation-scoped close-identity bump or any automatic resubmission path beyond
+- [x] 9.6 Do not add a generation-scoped close-identity bump or any automatic resubmission path beyond
       task 9.5's `not_found` case — design.md's explicit V1 scope boundary (Decision 4's closing note).
 
 ## 10. `CloseApplicationService`: durable write (multi-owner)
 
-- [ ] 10.1 On success (task 9.1's zero-exposure case, or task 9.5's confirmed-equal case): durably write
+- [x] 10.1 On success (task 9.1's zero-exposure case, or task 9.5's confirmed-equal case): durably write
       `{ ...record, status: "terminal_closed", pending_action: null, updated_at }` — same shape as the
       single-owner branch's existing write; `close_order_link_id`/`close_order_id` are carried through via
       the spread (audit trail), not reset.
 
 ## 11. OpenAPI
 
-- [ ] 11.1 In `docs/openapi/abi-position-management-api-v1.json`, replace the `delete` operation on
+- [x] 11.1 In `docs/openapi/abi-position-management-api-v1.json`, replace the `delete` operation on
       `/v1/.../open-position` with a `post` operation on `/v1/.../close`, with a required `CloseRequest`
       schema (`{ exposure_fraction: string }`) and a `400`/`415` response pair matching the protection
       operation's shape.
-- [ ] 11.2 Extend `CloseBusinessError`'s `oneOf` to include a new `CloseExecutionIncompleteError` schema
+- [x] 11.2 Extend `CloseBusinessError`'s `oneOf` to include a new `CloseExecutionIncompleteError` schema
       (`const: "close_execution_incomplete"`), mirroring `PositionNotOpenError`'s existing shape — not
       `PositionExposureDriftError` (that name is dropped, not renamed in place, since it never shipped in
       code).
-- [ ] 11.3 Remove the retired `/v1/.../open-position` `delete` path entry entirely.
+- [x] 11.3 Remove the retired `/v1/.../open-position` `delete` path entry entirely.
 
 ## 12. Test suite
 
-- [ ] 12.1 `exposure_fraction` validation — unchanged from the first draft (canonical `"1"`/`"1.0"`
+- [x] 12.1 `exposure_fraction` validation — unchanged from the first draft (canonical `"1"`/`"1.0"`
       accepted; non-canonical, malformed, missing, extra-field bodies rejected before any exchange call).
-- [ ] 12.2 Single-owner regression: every existing `closeApplicationService.test.ts` case passes
+- [x] 12.2 Single-owner regression: every existing `closeApplicationService.test.ts` case passes
       unmodified — assert the diff added a branch rather than edited existing single-owner code.
-- [ ] 12.3 **Scenario A (never dispatched):** multi-owner close for a cycle with `close_order_link_id ===
+- [x] 12.3 **Scenario A (never dispatched):** multi-owner close for a cycle with `close_order_link_id ===
       null` and a positive `resolvedQty` dispatches exactly one close order under the deterministic
       identity, durably recorded before the exchange call.
-- [ ] 12.4 **Scenario B (dispatched, verification lost, actually filled):** seed a record with
+- [x] 12.4 **Scenario B (dispatched, verification lost, actually filled):** seed a record with
       `close_order_link_id` already set and `status` not `terminal_closed`; stub the exchange so a query
       for that identity finds it `Filled` for the full `resolvedQty`. Retrying the close request sends
       **no** new close order, and completes the durable `terminal_closed` write from the recovered
       evidence.
-- [ ] 12.5 **Scenario C (dispatched, still live/ambiguous):** stub the exchange so a query for the
+- [x] 12.5 **Scenario C (dispatched, still live/ambiguous):** stub the exchange so a query for the
       dispatched identity is inconclusive across the bounded retry window. The retry sends no replacement
       order and returns `internal_error`; the record is not durably terminalized.
-- [ ] 12.6 **Scenario D (dispatched, definitively zero execution):** stub the exchange so the dispatched
+- [x] 12.6 **Scenario D (dispatched, definitively zero execution):** stub the exchange so the dispatched
       identity resolves to `terminal_without_fill`. The retry returns `close_execution_incomplete`, sends
       no new order under any identity, and does not durably terminalize.
-- [ ] 12.7 **Scenario E (partial execution):** stub the exchange so the dispatched identity resolves
+- [x] 12.7 **Scenario E (partial execution):** stub the exchange so the dispatched identity resolves
       terminal with a confirmed quantity less than `resolvedQty`. Returns `close_execution_incomplete`,
       does not durably terminalize, and does not treat the partial fill as success.
-- [ ] 12.8 **Not-found resend:** stub the exchange so a query for the dispatched identity returns
+- [x] 12.8 **Not-found resend:** stub the exchange so a query for the dispatched identity returns
       genuinely `not_found` across the bounded window. The retry resends a close order reusing the exact
       same `close_order_link_id` (no new identity computed), and a subsequent successful confirmation
       completes the close normally.
-- [ ] 12.9 A cycle with zero resolved exposure while a sibling keeps the aggregate positive: no close order
+- [x] 12.9 A cycle with zero resolved exposure while a sibling keeps the aggregate positive: no close order
       is sent, no `close_order_link_id` is ever written, and the requested cycle still reaches
       `terminal_closed`; the sibling is untouched.
-- [ ] 12.10 `early_execution_observation` (and therefore `avg_execution_price`) for the closed cycle and
+- [x] 12.10 `early_execution_observation` (and therefore `avg_execution_price`) for the closed cycle and
       any sibling is bit-for-bit unchanged in the durable store as a result of close, in every scenario
       above.
-- [ ] 12.11 A sibling record's `close_order_link_id`/`close_order_id`/status/active-record membership are
+- [x] 12.11 A sibling record's `close_order_link_id`/`close_order_id`/status/active-record membership are
       unchanged by closing a different active record for the same scope.
-- [ ] 12.12 Replay backward-compatibility: a durable row written without `close_order_link_id`/
+- [x] 12.12 Replay backward-compatibility: a durable row written without `close_order_link_id`/
       `close_order_id` keys at all (simulating pre-change data) replays successfully, with both fields
       reading as absent/`null`.
-- [ ] 12.13 Route/DTO tests for `POST .../close` — unchanged from the first draft (method/path match, old
+- [x] 12.13 Route/DTO tests for `POST .../close` — unchanged from the first draft (method/path match, old
       `DELETE` route falls through to generic 404, shared error codes reachable).
-- [ ] 12.14 `GET .../open-position` — full existing regression, unmodified by this change.
-- [ ] 12.15 **Same-request fall-through:** stub the exchange so a freshly dispatched close order settles
+- [x] 12.14 `GET .../open-position` — full existing regression, unmodified by this change.
+- [x] 12.15 **Same-request fall-through:** stub the exchange so a freshly dispatched close order settles
       (to full confirmed execution) within the bounded confirmation window. A single close request both
       dispatches the order and completes the durable `terminal_closed` write — assert no second HTTP
       request is needed, i.e. `apply()` returns the success result directly from the request that
       performed the dispatch — design.md Decision 4's crash-window table, window D/E collapsed into one
       request.
-- [ ] 12.16 **Conflicting entry-package mutation during an unresolved close:** seed a multi-owner record
+- [x] 12.16 **Conflicting entry-package mutation during an unresolved close:** seed a multi-owner record
       with `close_order_link_id` already set, `status` not `terminal_closed`, and its entry order showing
       a recorded fill (as it always does once a close identity exists). Send a null-desired-entry
       (cancel-intent) `PUT .../entry-package` for the same pair — assert it returns `internal_error`
@@ -195,15 +195,15 @@ set from an earlier one):
       non-null `PUT .../entry-package` carrying a desired entry different from the one currently stored —
       design.md Decision 8; this exercises existing, unmodified `entryPackageApplicationService.ts` code,
       not new logic.
-- [ ] 12.17 Full regression: `entryPackageCorrelationRepository.test.ts`,
+- [x] 12.17 Full regression: `entryPackageCorrelationRepository.test.ts`,
       `entryPackageApplicationService.test.ts` (including the `createOrder()` provisional-literal change
       from task 2.3), `protectionApplicationService.test.ts`, `openPositionResolutionService.test.ts`,
       `entryCycleRecoveryResolutionService.test.ts` all pass unchanged in observable behavior.
 
 ## 13. Verification
 
-- [ ] 13.1 Run `npm test`, `npm run typecheck`, `npm run build`.
-- [ ] 13.2 Review the diff to confirm: `EntryPackageCorrelationRepository`'s indexing/replay/`byScope`,
+- [x] 13.1 Run `npm test`, `npm run typecheck`, `npm run build`.
+- [x] 13.2 Review the diff to confirm: `EntryPackageCorrelationRepository`'s indexing/replay/`byScope`,
       `findOwnerByScope`, `applyScopeClaimOnWrite`, `rebuildScopeIndexFromReplay`,
       `EntryPackageApplicationService`'s claim logic (the `createOrder()` provisional literal aside),
       `OpenPositionResolutionService`, `ProtectionApplicationService`, and

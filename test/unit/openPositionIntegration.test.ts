@@ -315,6 +315,8 @@ function makeRecord(
     calculated_quantity: overrides.calculatedQuantity ?? "0.001",
     order_link_id: "link-1",
     order_id: "order-1",
+    close_order_link_id: null,
+    close_order_id: null,
     generation: 1,
     status: overrides.status ?? "applied",
     early_execution_observation: null,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  closeExecutionIncompleteResult,
   internalErrorResult,
   isNumericallyEqualExactDecimal,
   malformedJsonResult,
@@ -335,22 +336,95 @@ test("serializeTradeCycleClosed fails closed on empty identifiers even with all 
   );
 });
 
-test("validateCloseCommand builds a typed command from opaque non-empty path values", () => {
-  const result = validateCloseCommand({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+test("validateCloseCommand builds a typed command from opaque non-empty path values and a canonical exposure_fraction", () => {
+  const result = validateCloseCommand(
+    { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    { exposure_fraction: "1" },
+  );
 
   assert.deepEqual(result, {
     ok: true,
-    command: { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    command: { strategyInstanceId: "instance", tradeCycleId: "cycle", exposureFraction: "1" },
   });
 });
 
+// "1.0" is numerically equal to 1, not literal-string equal — accepted the
+// same way stop_price/take_price tolerate formatting differences elsewhere
+// in this file (design.md Decision 6: numeric equality, not string match).
+test("validateCloseCommand accepts any exact-decimal formatting numerically equal to 1", () => {
+  for (const exposureFraction of ["1", "1.0", "+1", "1e0"]) {
+    const result = validateCloseCommand(
+      { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+      { exposure_fraction: exposureFraction },
+    );
+    assert.equal(result.ok, true, exposureFraction);
+  }
+});
+
 test("validateCloseCommand rejects empty or missing path identifiers", () => {
-  const result = validateCloseCommand({ strategyInstanceId: "", tradeCycleId: undefined });
+  const result = validateCloseCommand(
+    { strategyInstanceId: "", tradeCycleId: undefined },
+    { exposure_fraction: "1" },
+  );
 
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.ok(result.details.some((detail) => detail.path === "/path/strategy_instance_id"));
     assert.ok(result.details.some((detail) => detail.path === "/path/trade_cycle_id"));
+  }
+});
+
+test("validateCloseCommand rejects a non-canonical exposure_fraction before any exchange call", () => {
+  for (const exposureFraction of ["0.5", "0", "2", "-1"]) {
+    const result = validateCloseCommand(
+      { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+      { exposure_fraction: exposureFraction },
+    );
+    assert.equal(result.ok, false, exposureFraction);
+    if (!result.ok) {
+      assert.ok(result.details.some((detail) => detail.path === "/exposure_fraction"), exposureFraction);
+    }
+  }
+});
+
+test("validateCloseCommand rejects malformed, missing, null, or extra-field bodies", () => {
+  const malformed = validateCloseCommand(
+    { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    { exposure_fraction: "not-a-number" },
+  );
+  assert.equal(malformed.ok, false);
+  if (!malformed.ok) {
+    assert.ok(malformed.details.some((detail) => detail.path === "/exposure_fraction"));
+  }
+
+  const missing = validateCloseCommand({ strategyInstanceId: "instance", tradeCycleId: "cycle" }, {});
+  assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.ok(missing.details.some((detail) => detail.path === "/exposure_fraction"));
+  }
+
+  const nullValue = validateCloseCommand(
+    { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    { exposure_fraction: null },
+  );
+  assert.equal(nullValue.ok, false);
+
+  const extraField = validateCloseCommand(
+    { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    { exposure_fraction: "1", quantity: "4" },
+  );
+  assert.equal(extraField.ok, false);
+  if (!extraField.ok) {
+    assert.ok(extraField.details.some((detail) => detail.path === "/quantity"));
+  }
+
+  const nonObject = validateCloseCommand(
+    { strategyInstanceId: "instance", tradeCycleId: "cycle" },
+    "not-an-object",
+  );
+  assert.equal(nonObject.ok, false);
+  if (!nonObject.ok) {
+    assert.deepEqual(nonObject.details, [{ path: "/", message: "request body must be a JSON object" }]);
   }
 });
 
@@ -395,6 +469,15 @@ test("error result builders map to the documented codes and statuses", () => {
     statusCode: 422,
     body: {
       error: { code: "position_not_open", message: "no live position exists for the requested pair" },
+    },
+  });
+  assert.deepEqual(closeExecutionIncompleteResult(), {
+    statusCode: 422,
+    body: {
+      error: {
+        code: "close_execution_incomplete",
+        message: "the requested cycle's own close order did not fully execute the resolved exposure",
+      },
     },
   });
   assert.deepEqual(internalErrorResult(), {
