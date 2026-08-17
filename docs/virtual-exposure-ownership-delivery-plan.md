@@ -290,9 +290,11 @@ Changes 2, 3, 4 формально зависят только от Change 1 и 
 
 ### Change 1 — `abi-virtual-exposure-state-foundation-v1`
 
-> Статус: OpenSpec-предложение (proposal/design/tasks/spec delta) уже создано в
-> `openspec/changes/abi-virtual-exposure-state-foundation-v1/` и синхронизировано с этим разделом.
-> Ещё не применено.
+> Статус: **применено**. Реализация — `isFillFactFinal` (`packageConfirmation.ts`), monotonicity-
+> валидация в `save()`/`replay()` и `findActiveRecordsForScope` (`entryPackageCorrelationRepository.ts`)
+> — landed, все задачи `tasks.md` отмечены `[x]`, полный тестовый набор (531/531) и `typecheck`/`build`
+> зелёные. OpenSpec change ещё не заархивирован (`openspec/changes/abi-virtual-exposure-state-foundation-v1/`
+> не перемещён в `archive/`, `openspec/specs/` не синхронизирован) — это отдельный шаг.
 
 **Цель.** Формализовать и усилить уже существующие per-cycle own-order fill facts
 (`EarlyExecutionObservation`), чтобы следующие changes могли безопасно использовать их для virtual

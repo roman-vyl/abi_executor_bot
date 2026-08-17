@@ -235,6 +235,18 @@ function isLiveOrderStatus(orderStatus: string): boolean {
   return LIVE_UNFILLED_STATUSES.has(orderStatus) || PARTIAL_FILL_STATUSES.has(orderStatus);
 }
 
+// Whether a trade cycle's own recorded fill facts (cumulative_filled_qty /
+// avg_execution_price) are settled rather than a live snapshot. Bybit order
+// statuses do not un-terminalize, so a terminal order_status makes the
+// observation permanently final; a live order_status (including a still-open
+// PartiallyFilled) means the entry order can still add exposure, so the
+// recorded quantity/price must not be treated as authoritative without a
+// fresh re-check. No separate durable finality flag is introduced — this
+// derives the fact from the already-durable order_status.
+export function isFillFactFinal(observation: EarlyExecutionObservation | null): boolean {
+  return observation !== null && isTerminalOrderStatus(observation.order_status);
+}
+
 // Single fresh classification of the current entry order's terminal-vs-live
 // status. Never sends a cancel itself — the caller decides whether and when
 // to cancel, and checks the live-execution guard, exactly as every other

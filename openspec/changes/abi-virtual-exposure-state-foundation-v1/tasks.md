@@ -1,19 +1,19 @@
 ## 1. Predicates (no type changes)
 
-- [ ] 1.1 Export `isFillFactFinal(observation: EarlyExecutionObservation | null): boolean` from
+- [x] 1.1 Export `isFillFactFinal(observation: EarlyExecutionObservation | null): boolean` from
       `src/services/entryPackage/packageConfirmation.ts`, reusing the existing private
       `isTerminalOrderStatus` (design.md Decision 2). Do not add or modify any field on
       `EarlyExecutionObservation` or `EntryPackageExecutionRecord`.
 
 ## 2. Repository: monotonicity validation
 
-- [ ] 2.1 In `EntryPackageCorrelationRepository.save()`, before the durable append, compare the
+- [x] 2.1 In `EntryPackageCorrelationRepository.save()`, before the durable append, compare the
       incoming record's `early_execution_observation.cumulative_filled_qty` against the
       currently-indexed record for the same pair (if any) and reject (throw) if it is smaller
       (exact-decimal comparison via `compareDecimal` from `src/domain/exactDecimal.ts`) — design.md
       Decision 7. Do not add any check on `avg_execution_price` or `observed_at` (design.md
       Decision 7's closing note: no monotonicity requirement on price).
-- [ ] 2.2 In `EntryPackageCorrelationRepository.replay()`'s existing per-line Phase 1 loop, add the
+- [x] 2.2 In `EntryPackageCorrelationRepository.replay()`'s existing per-line Phase 1 loop, add the
       same check immediately before each line's `indexRecord()` call, comparing against the
       previously-indexed record for that same pair; on violation, return `{ok: false, reason: ...}`
       the same way existing structural/schema corruption already does. Do not touch Phase 2
@@ -22,7 +22,7 @@
 
 ## 3. Repository: additive multi-owner-capable query
 
-- [ ] 3.1 Add `findActiveRecordsForScope(category, symbol): EntryPackageExecutionRecord[]` to
+- [x] 3.1 Add `findActiveRecordsForScope(category, symbol): EntryPackageExecutionRecord[]` to
       `EntryPackageCorrelationRepository` as a linear scan over `byCompositeKey.values()`, reusing
       `positionScopeKey` and `isDurablyClosedEntryPackageStatus` (design.md Decision 6). Do not add
       a new maintained index and do not modify `byScope`, `findOwnerByScope`,
@@ -30,25 +30,25 @@
 
 ## 4. Test suite
 
-- [ ] 4.1 Partial-then-full-fill sequence for one binding (repeat-PUT revalidation observing the
+- [x] 4.1 Partial-then-full-fill sequence for one binding (repeat-PUT revalidation observing the
       same order twice): `cumulative_filled_qty` increases across the two observations;
       `avg_execution_price` may change either direction; `isFillFactFinal` is false after the
       partial observation and true after the full-fill observation.
-- [ ] 4.2 `save()` rejects a write whose `cumulative_filled_qty` is less than the previously-indexed
+- [x] 4.2 `save()` rejects a write whose `cumulative_filled_qty` is less than the previously-indexed
       value for the same pair; accepts a write that only increases or holds it steady, regardless of
       how `avg_execution_price` moves.
-- [ ] 4.3 Replay: a valid, monotonically-consistent sequence of lines for one pair replays
+- [x] 4.3 Replay: a valid, monotonically-consistent sequence of lines for one pair replays
       successfully. A sequence containing a `cumulative_filled_qty` regression fails replay closed
       with a descriptive reason.
-- [ ] 4.4 `isFillFactFinal`: `null` observation → false; observation with a live `order_status`
+- [x] 4.4 `isFillFactFinal`: `null` observation → false; observation with a live `order_status`
       (e.g. `PartiallyFilled`, `New`) → false; observation with a terminal `order_status` (`Filled`,
       `Cancelled`, `Rejected`, `Deactivated`) → true.
-- [ ] 4.5 `findActiveRecordsForScope`: seeded directly at the repository level (bypassing
+- [x] 4.5 `findActiveRecordsForScope`: seeded directly at the repository level (bypassing
       `EntryPackageApplicationService`), two same-side, non-durably-closed records for the same
       scope under two different pairs are both returned; a durably-closed record for that scope is
       excluded; an empty/no-match scope returns an empty array. This proves the repository layer's
       capability without exercising or relying on any production claim-policy change.
-- [ ] 4.6 Full regression: existing `entryPackageCorrelationRepository.test.ts`,
+- [x] 4.6 Full regression: existing `entryPackageCorrelationRepository.test.ts`,
       `entryPackageApplicationService.test.ts`, `closeApplicationService.test.ts`,
       `protectionApplicationService.test.ts`, `openPositionResolutionService.test.ts`, and
       `entryCycleRecoveryResolutionService.test.ts` all pass unchanged — none of them read the new
@@ -56,8 +56,8 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run `npm test`, `npm run typecheck`, `npm run build`.
-- [ ] 5.2 Review the diff to confirm: zero fields added to `EntryPackageExecutionRecord` or
+- [x] 5.1 Run `npm test`, `npm run typecheck`, `npm run build`.
+- [x] 5.2 Review the diff to confirm: zero fields added to `EntryPackageExecutionRecord` or
       `EarlyExecutionObservation`; no public HTTP DTO, route, or error-code change;
       `byScope`/`findOwnerByScope`/`applyScopeClaimOnWrite`/`rebuildScopeIndexFromReplay`/
       `EntryPackageApplicationService`'s claim logic are byte-for-byte unmodified;

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type {
+  EarlyExecutionObservation,
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
   StoredEntryPackagePendingAction,
@@ -510,6 +511,194 @@ test("replay does not fail closed on an empty exchange_symbol under a real categ
   });
 });
 
+// -- abi-virtual-exposure-state-foundation-v1: fill-fact monotonicity --
+
+test("save rejects a write whose cumulative_filled_qty regresses for the same pair", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    await repo.save(
+      makeRecord({
+        orderLinkId: "link-1",
+        status: "applied",
+        earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0006" }),
+      }),
+    );
+
+    await assert.rejects(() =>
+      repo.save(
+        makeRecord({
+          orderLinkId: "link-1",
+          status: "applied",
+          earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0004" }),
+        }),
+      ),
+    );
+
+    // The rejected write must not have been durably appended or indexed.
+    assert.equal(
+      repo.get("instance-1", "cycle-1")?.early_execution_observation?.cumulative_filled_qty,
+      "0.0006",
+    );
+  });
+});
+
+test("save accepts a write whose cumulative_filled_qty holds steady or grows, regardless of avg_execution_price direction", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    await repo.save(
+      makeRecord({
+        orderLinkId: "link-1",
+        status: "applied",
+        earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0004", avg_execution_price: "100000" }),
+      }),
+    );
+
+    // Same quantity, price moves down — accepted (price is never monotonic).
+    await repo.save(
+      makeRecord({
+        orderLinkId: "link-1",
+        status: "applied",
+        earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0004", avg_execution_price: "99000" }),
+      }),
+    );
+
+    // Quantity grows, price moves up — accepted.
+    await repo.save(
+      makeRecord({
+        orderLinkId: "link-1",
+        status: "applied",
+        earlyExecutionObservation: observation({
+          cumulative_filled_qty: "0.001",
+          order_status: "Filled",
+          avg_execution_price: "101000",
+        }),
+      }),
+    );
+
+    assert.equal(repo.get("instance-1", "cycle-1")?.early_execution_observation?.cumulative_filled_qty, "0.001");
+  });
+});
+
+test("replay accepts a monotonically consistent fill-fact sequence for one pair", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const partial = makeRecord({
+      orderLinkId: "link-1",
+      status: "applied",
+      earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0004", order_status: "PartiallyFilled" }),
+    });
+    const full = makeRecord({
+      orderLinkId: "link-1",
+      status: "applied",
+      earlyExecutionObservation: observation({ cumulative_filled_qty: "0.001", order_status: "Filled" }),
+    });
+    await writeFile(path, `${JSON.stringify(partial)}\n${JSON.stringify(full)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), full);
+  });
+});
+
+test("replay fails closed when a pair's fill facts regress across lines", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const full = makeRecord({
+      orderLinkId: "link-1",
+      status: "applied",
+      earlyExecutionObservation: observation({ cumulative_filled_qty: "0.001", order_status: "Filled" }),
+    });
+    const regressed = makeRecord({
+      orderLinkId: "link-1",
+      status: "applied",
+      earlyExecutionObservation: observation({ cumulative_filled_qty: "0.0004", order_status: "PartiallyFilled" }),
+    });
+    await writeFile(path, `${JSON.stringify(full)}\n${JSON.stringify(regressed)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+// -- abi-virtual-exposure-state-foundation-v1: findActiveRecordsForScope --
+// Seeded directly at the repository level, bypassing EntryPackageApplicationService's
+// single-owner claim guard entirely — proving the repository layer itself has no
+// single-owner assumption baked in, without exercising or relying on any production
+// claim-policy change (design.md Decision 6).
+
+test("findActiveRecordsForScope returns multiple synthetically seeded same-side active records for one scope", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    const a = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-a1",
+      status: "applied",
+    });
+    const b = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-b1",
+      status: "applied",
+    });
+    await repo.save(a);
+    await repo.save(b);
+
+    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+
+    assert.equal(active.length, 2);
+    assert.deepEqual(
+      active.map((record) => record.trade_cycle_id).sort(),
+      ["cycle-A1", "cycle-B1"],
+    );
+  });
+});
+
+test("findActiveRecordsForScope excludes durably-closed records", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    await repo.save(
+      makeRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1", orderLinkId: "link-a1", status: "applied" }),
+    );
+    await repo.save(
+      makeRecord({
+        strategyInstanceId: "instance-B",
+        tradeCycleId: "cycle-B1",
+        orderLinkId: null,
+        status: "terminal_closed",
+      }),
+    );
+
+    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+
+    assert.equal(active.length, 1);
+    assert.equal(active[0]?.trade_cycle_id, "cycle-A1");
+  });
+});
+
+test("findActiveRecordsForScope returns an empty array for a scope with no matching records", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    await repo.save(makeRecord({ orderLinkId: "link-1", status: "applied" }));
+
+    assert.deepEqual(repo.findActiveRecordsForScope("linear", "ETHUSDT"), []);
+  });
+});
+
 function makeRecord(
   overrides: Partial<{
     strategyInstanceId: string;
@@ -520,6 +709,7 @@ function makeRecord(
     status: EntryPackageExecutionStatus;
     exchangeSymbol: string;
     pendingAction: StoredEntryPackagePendingAction;
+    earlyExecutionObservation: EarlyExecutionObservation;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -537,11 +727,22 @@ function makeRecord(
     order_id: overrides.orderId ?? null,
     generation: overrides.generation ?? 1,
     status: overrides.status ?? "pending_create",
-    early_execution_observation: null,
+    early_execution_observation: overrides.earlyExecutionObservation ?? null,
     binding_history: [],
     pending_action:
       overrides.pendingAction ?? (overrides.orderLinkId !== undefined ? "create" : null),
     current_binding_started_at: overrides.orderLinkId !== undefined ? "2026-01-01T00:00:00.000Z" : null,
+  };
+}
+
+function observation(overrides: Partial<EarlyExecutionObservation> = {}): EarlyExecutionObservation {
+  return {
+    order_status: "PartiallyFilled",
+    cumulative_filled_qty: "0.0004",
+    remaining_qty: "0.0006",
+    avg_execution_price: "99950",
+    observed_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
   };
 }
 
