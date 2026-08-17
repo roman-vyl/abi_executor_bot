@@ -177,6 +177,37 @@ having been created.
 - **THEN** ABI dispatches a close order for that same generation reusing the same identity, never
   computing a new one
 
+#### Scenario: A successful dispatch resolves its own fate within the same request, without requiring a second close request
+- **WHEN** ABI dispatches a close order for a cycle under a newly computed identity within a single
+  close request, and the exchange settles that order (to any terminal outcome, or to a confirmed full
+  execution) within the bounded confirmation window this same request already performs
+- **THEN** that same request completes the requested cycle's postcondition check and, on success, its
+  durable termination — without requiring Runtime to send a second close request purely to obtain
+  confirmation of what the first request already dispatched
+
+### Requirement: A durably unresolved close identity is protected from a conflicting entry-package mutation for the same pair
+While a close-order identity is durably recorded for a cycle's current generation and that cycle's
+record status is not `terminal_closed`, ABI SHALL NOT transition that record to `absent` (and
+therefore SHALL NOT begin a new entry-package generation for that pair, which would compute a
+different close-order identity) as a result of any entry-package request for the same pair, for as
+long as that cycle's entry order retains any recorded execution — which it always does once a
+close-order identity has been durably recorded for it, since a close is never dispatched for a cycle
+with zero resolved exposure (per the requirement above). This protection is provided entirely by
+entry-package execution's own existing fill-evidence check, not by any new guard this pipeline
+introduces.
+
+#### Scenario: A cancel-intent request during an unresolved close does not transition the pair to absent
+- **WHEN** a null-desired-entry request arrives for a pair whose close-order identity is durably
+  recorded and unresolved
+- **THEN** ABI does not transition that pair's record to `absent`, does not clear its close-order
+  identity, and does not permit a new entry-package generation to begin for that pair
+
+#### Scenario: A new non-null entry-package request during an unresolved close does not corrupt the close identity
+- **WHEN** a non-null-desired-entry request that differs from the pair's currently stored desired
+  entry arrives for a pair whose close-order identity is durably recorded and unresolved
+- **THEN** ABI's own recorded execution evidence for that pair's entry order prevents that request
+  from succeeding as a fresh binding, and the pair's close-order identity remains exactly as it was
+
 ### Requirement: The requested cycle's own close order is the exclusive proof that its exposure was closed
 For a scope with more than one active record, ABI SHALL treat the requested cycle's own close
 order's confirmed executed quantity — read from that order's own execution report, keyed by its own

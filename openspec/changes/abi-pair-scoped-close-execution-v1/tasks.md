@@ -76,24 +76,36 @@
 
 ## 9. `CloseApplicationService`: attributable close-order dispatch and retry resolution
 
+Structured as **one sequential flow per request** — Step 1 (ensure dispatched) followed unconditionally
+by Step 2 (always resolve and gate) — not two alternate branches selected once per request. A successful
+Step 1 dispatch falls straight through into Step 2 within the same request; a request that finds
+`close_order_link_id` already set skips straight to Step 2. See design.md Decision 4's corrected framing
+and its explicit crash-window table (A-E).
+
+**Step 1 — ensure dispatched** (this step is a no-op if `record.close_order_link_id !== null` already —
+proceed directly to Step 2):
 - [ ] 9.1 If `resolvedQty === "0"`: send no close order, write no `close_order_link_id`, proceed directly
-      to task 10's durable write — design.md Decision 4, branch A step 2.
-- [ ] 9.2 If `record.close_order_link_id === null` and `resolvedQty !== "0"`: read the live aggregate once
-      (for `side`); if it is `no_position` while `resolvedQty !== "0"`, return `internal_error` (a
-      pre-dispatch contradiction, distinct from task 9.5's post-dispatch outcome) — design.md Decision 4,
-      branch A step 3.
+      to task 10's durable write — design.md Decision 4, Step 1.2.
+- [ ] 9.2 Otherwise, read the live aggregate once (for `side`); if it is `no_position` while
+      `resolvedQty !== "0"`, return `internal_error` (a pre-dispatch contradiction, distinct from Step 2's
+      post-dispatch outcome) — design.md Decision 4, Step 1.3.
 - [ ] 9.3 Compute `closeOrderLinkId = buildEntryPackageOrderLinkId(strategyInstanceId, tradeCycleId,
       "close", record.generation)`. Durably write `close_order_link_id: closeOrderLinkId` (and
       `close_order_id: null`) to the record **before** calling `executeMarketCloseOrder` — design.md
-      Decision 4, branch A step 4.
+      Decision 4, Step 1.4.
 - [ ] 9.4 Send the reduce-only close order for `resolvedQty` on `mapPositionSideToCloseSide(row.side)`,
       `orderLinkId: closeOrderLinkId`. On a thrown exception or `skipped_live_execution`, leave the
-      already-written `close_order_link_id` as-is (do not revert it) and return `internal_error` —
-      design.md Decision 4, branch A step 5. On success, save `close_order_id` from the response (audit
-      only).
-- [ ] 9.5 If `record.close_order_link_id !== null` (a retry/restart finding a prior dispatch): re-derive
-      `resolvedQty` fresh (task 8.1 again), then call `confirmEntryPackage` on `close_order_link_id` with
-      `expected: { qty: resolvedQty }`, and branch exactly per design.md Decision 4 branch B:
+      already-written `close_order_link_id` as-is (do not revert it) and return `internal_error`
+      immediately, without running Step 2 this request — design.md Decision 4, Step 1.5. On any other
+      (successful) response, save `close_order_id` from it (audit only) and **fall straight through into
+      Step 2 within this same request** — do not return between Step 1 and Step 2 on a successful dispatch.
+
+**Step 2 — always resolve and gate on the dispatched identity's fate** (runs whenever
+`record.close_order_link_id !== null`, whether just set by Step 1 in this same request or found already
+set from an earlier one):
+- [ ] 9.5 Re-derive `resolvedQty` fresh (task 8.1 again), then call `confirmEntryPackage` on
+      `close_order_link_id` with `expected: { qty: resolvedQty }`, and branch exactly per design.md
+      Decision 4's Step 2:
       - confirmed quantity equals `resolvedQty` (exact, `decimalEquals`) → proceed to task 10, no new
         order sent.
       - confirmed quantity is less than `resolvedQty` and the order's own terminality
@@ -101,8 +113,9 @@
       - `terminal_without_fill` → `close_execution_incomplete`, no order sent.
       - terminality is `live` → bounded re-poll (reuse the existing bounded-retry shape); still live after
         the bounded window → `internal_error`, no order sent.
-      - genuinely `not_found` after the bounded window → return to task 9.2 onward, reusing the same
-        `close_order_link_id` (no new identity is computed).
+      - genuinely `not_found` after the bounded window → return to Step 1's task 9.2 onward, reusing the
+        same `close_order_link_id` (no new identity is computed), then fall through into Step 2 again for
+        the resulting dispatch.
       - `ambiguous` → `internal_error`, no order sent.
 - [ ] 9.6 Do not add a generation-scoped close-identity bump or any automatic resubmission path beyond
       task 9.5's `not_found` case — design.md's explicit V1 scope boundary (Decision 4's closing note).
@@ -167,7 +180,22 @@
 - [ ] 12.13 Route/DTO tests for `POST .../close` — unchanged from the first draft (method/path match, old
       `DELETE` route falls through to generic 404, shared error codes reachable).
 - [ ] 12.14 `GET .../open-position` — full existing regression, unmodified by this change.
-- [ ] 12.15 Full regression: `entryPackageCorrelationRepository.test.ts`,
+- [ ] 12.15 **Same-request fall-through:** stub the exchange so a freshly dispatched close order settles
+      (to full confirmed execution) within the bounded confirmation window. A single close request both
+      dispatches the order and completes the durable `terminal_closed` write — assert no second HTTP
+      request is needed, i.e. `apply()` returns the success result directly from the request that
+      performed the dispatch — design.md Decision 4's crash-window table, window D/E collapsed into one
+      request.
+- [ ] 12.16 **Conflicting entry-package mutation during an unresolved close:** seed a multi-owner record
+      with `close_order_link_id` already set, `status` not `terminal_closed`, and its entry order showing
+      a recorded fill (as it always does once a close identity exists). Send a null-desired-entry
+      (cancel-intent) `PUT .../entry-package` for the same pair — assert it returns `internal_error`
+      (via `confirmEntryPackageCancelled`'s existing `filled_before_cancel` path), does **not** transition
+      the record to `absent`, and leaves `close_order_link_id`/`close_order_id` unchanged. Repeat for a
+      non-null `PUT .../entry-package` carrying a desired entry different from the one currently stored —
+      design.md Decision 8; this exercises existing, unmodified `entryPackageApplicationService.ts` code,
+      not new logic.
+- [ ] 12.17 Full regression: `entryPackageCorrelationRepository.test.ts`,
       `entryPackageApplicationService.test.ts` (including the `createOrder()` provisional-literal change
       from task 2.3), `protectionApplicationService.test.ts`, `openPositionResolutionService.test.ts`,
       `entryCycleRecoveryResolutionService.test.ts` all pass unchanged in observable behavior.

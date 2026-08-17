@@ -130,6 +130,28 @@
 > коррекцией не затронут — он безопасен структурно иначе (aggregate==0 доказывает "мой close" именно
 > потому, что владелец один), и остаётся byte-for-byte нетронутым. См. corrected Change 2 ниже.
 
+> **Ревизия v7 — второй architecture-review проход по паттернам execution/reconciliation зрелых
+> trading-систем (FIX, Bybit primitives, NautilusTrader, LEAN, Hummingbot — изучены только как проверка
+> инвариантов, не скопированы).** 14 находок классифицированы (A/B/C/D); подробности и полная таблица —
+> review report сессии, не воспроизводится здесь целиком. Итог: v6-модель (Change 2) подтверждена верной
+> почти по всем пунктам — никакого aggregate-delta success proof, никакого scope-wide lock, exact-quantity
+> (не `>=`) execution matching, только cumulative- (не per-fill-) based confirmation, никакого нового
+> generic ledger/OMS. Найдено ровно **две** category-A коррекции (обе — в `design.md`/спеке Change 2, без
+> расширения его scope): (1) исходный текст decision про dispatch/retry описывал только failure-path
+> успешной отправки close-ордера, не explicit crash-window coverage — исправлено явным sequential
+> ensure-dispatched-then-always-confirm flow и таблицей из пяти crash-windows (A–E); (2) свойство "durable
+> unresolved close identity защищена от конфликтующей entry-package мутации" уже верно в существующем,
+> неизменённом коде (`confirmEntryPackageCancelled`'s `hasFill`-check), но никогда не было
+> зафиксировано как явный `close-execution` requirement и не тестировалось — теперь зафиксировано и
+> покрыто тестом, без новой логики. Остальные находки — category B (уже верно, ничего не добавлено) или
+> category C (future-only заметки, размещены здесь и в Changes 2/7/8/§6, не расширяют Change 2's
+> implementation scope): fill-derived exposure equation (Change 2's "Future partial-close seam"), individual-
+> execution dedup / multi-channel convergence (§6 риск 13), protection resize по exposure_fraction (Change
+> 7), OCO-style sibling-leg neutralization (Change 8). Sequencing-вывод: Change 2 (corrected) уже полностью
+> владеет close retry/restart recovery; Change 4 (recovery) менять не требуется — до Change 5 activation
+> единственный exchange-write pipeline, способный затронуть shared-scope exposure, это close, и он уже
+> безопасен на всех проверенных crash-windows.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -486,7 +508,10 @@ command**: "закрыть `exposure_fraction` виртуальной exposure �
 trade_cycle_id)`", материализуемую ABI из собственного per-cycle state (quantity ownership boundary,
 Change 1). V1 реализует единственное canonical значение `exposure_fraction = "1"`. Это меняет
 **публичный HTTP-контракт**, не только внутреннюю реализацию close — см. ревизию v5. **Ревизия v6**
-скорректировала безопасность multi-owner confirmation — см. ниже и ревизию v6 выше.
+скорректировала безопасность multi-owner confirmation — см. ниже и ревизию v6 выше. **Ревизия v7**
+уточнила dispatch/confirm control flow и explicit crash-window coverage по итогам второго
+architecture-review — см. ревизию v7 выше; сам HTTP-контракт и multi-owner identity model этой
+ревизией не меняются.
 
 **High-level flow:**
 
@@ -635,7 +660,14 @@ spec для close переписывается по существу (метод
 значение, но не реализует его. Вне scope: partial close execution; mutable owned remainder; cycle
 остаётся active после частичного закрытия; resize/cancel-recreate protection-ордеров; protection
 coverage fraction; partial-close reconciliation policy; generation-scoped close-identity bump для
-auto-retry после нулевого/частичного исполнения (fail closed в V1 — намеренно).
+auto-retry после нулевого/частичного исполнения (fail closed в V1 — намеренно). **Будущий инвариант
+(зафиксирован ревью по итогам изучения FIX/NautilusTrader/LEAN/Hummingbot-style execution-архитектур,
+не проектируется здесь):** долгосрочная virtual exposure cycle — это `attributable entry fills −
+attributable close fills`, а не отдельное mutable поле; V1's full-close-only модель (`final entry fill
+qty → full close attributable execution той же qty → terminal_closed`) уже является частным случаем
+этого уравнения при `close fills == entry fills`, и уже полностью реализована corrected Change 2 без
+отдельного ledger. Partial-close stage должен применить то же уравнение с `close fills < entry fills`,
+не изобретать новую модель.
 
 **Обязательные тесты.**
 - `exposure_fraction = "1"` принимается; `"0.5"`, `"0"`, `"2"`, malformed, отсутствующее значение — fail
@@ -1001,7 +1033,13 @@ lifecycle, существующий production-decision path не меняетс
 поведение `PUT .../protection` не изменилось — multi-owner scope по-прежнему получает guard-отказ.
 
 **Осознанно вне scope.** Подключение lifecycle к production-decision path и снятие guard (Change 8);
-интеграция с close (Change 8); поддержка opposite-side.
+интеграция с close (Change 8); поддержка opposite-side. **[Future note, зафиксировано ревью Change 2]**
+Долгосрочно protection принадлежит cycle, а не физической позиции, и должна следовать за
+`exposure_fraction` этого cycle: как только появится настоящий partial close (`exposure_fraction < 1`,
+вне текущей программы), успешное partial close того же cycle обязано соответственно уменьшить qty его
+собственных stop/take-ордеров (`stop qty == take qty == оставшаяся exposure cycle`, не старая полная
+величина) — resize-алгоритм этим change не проектируется, только фиксируется как инвариант, который
+Change 6/7's `qty = ABI-resolved authoritative exposure этого cycle` формулировка уже совместима с ним.
 
 ---
 
@@ -1068,6 +1106,11 @@ long+short остаётся запрещённым, пока жива проти
 проходил через небезопасное промежуточное production-состояние.
 
 **Осознанно вне scope.** Полноценный portfolio/netting engine; hedge mode; opposite-side coexistence.
+**[Future note, зафиксировано ревью Change 2]** Этот change покрывает "manual close A neutralizes A's
+own protection orders" — но OCO-style автоматическая нейтрализация (take-нога исполнилась полностью →
+sibling stop-нога того же cycle автоматически нейтрализуется, и наоборот, независимо от manual close)
+нигде явно не зафиксирована в текущем описании Changes 6–8. Это открытый вопрос **design-фазы Change 7
+или 8** (какая из двух — решается на месте), не решаемый и не проектируемый здесь.
 
 ---
 
@@ -1210,6 +1253,20 @@ Change 1 (foundation: exposure state)
     зафиксировать (до apply Change 2): допустим ли короткий переходный период с обоими endpoint'ами
     одновременно, или ожидается атомарный cutover; кто и как валидирует отсутствие иных потребителей
     старого `DELETE`, кроме самого Runtime.
+
+13. **[Future-only, не открытый риск сейчас] Individual-execution dedup и multi-channel convergence.**
+    Зафиксировано по итогам архитектурного ревью execution/reconciliation паттернов (FIX order/execution
+    model, Bybit orderLinkId/order-status/execution primitives, NautilusTrader, LEAN, Hummingbot —
+    изучены только как проверка инвариантов, не скопированы). Сегодня ABI подтверждает исполнение
+    исключительно через cumulative `cumExecQty`/`order_status` одного REST-запроса
+    (`confirmEntryPackage`), никогда не применяет individual execution/trade events инкрементально — это
+    верно и для entry, и для close (Change 2), поэтому fill-level deduplication сейчас не нужна ни там,
+    ни там. Если в будущем ABI начнёт принимать individual execution events из нескольких каналов
+    (например, REST reconciliation вперемешку с гипотетическим WebSocket execution stream), они должны
+    идемпотентно дедуплицироваться по стабильному exchange execution/trade identity, а оба канала
+    обязаны сходиться к одному state machine, а не стать двумя независимыми source of truth. Ни ledger,
+    ни WebSocket-интеграция, ни background polling не вводятся ни этим ревью, ни Change 2 — чисто
+    forward-note для гипотетической будущей capability, не для реализации сейчас.
 
 ---
 

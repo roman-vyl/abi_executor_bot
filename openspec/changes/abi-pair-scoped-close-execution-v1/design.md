@@ -10,6 +10,21 @@ with one built on an *attributable close-order identity* — the same architectu
 entry-package pipeline already uses for exactly this reason. See "Root cause" below for the precise failure,
 and Decisions 1-6 for the replacement.
 
+**Second-pass review note (this revision).** A follow-up architecture review, cross-checking this design
+against FIX/NautilusTrader/LEAN/Hummingbot-style execution/reconciliation invariants, found the corrected
+model (Decisions 1-6) sound on every substantive point — no aggregate-delta success proof, no scope-wide
+lock, exact-equality (not `>=`) execution matching, cumulative- not per-fill-based confirmation, no new
+subsystem. It found exactly one real gap, closed by Decision 4's revised text and the new Decision 8
+below: the original text of Decision 4
+described a successful dispatch's *failure* path but never stated what happens after a *successful* one
+within the same request, leaving the crash-window coverage implicit rather than explicit; and it found one
+load-bearing safety property that already holds in existing, unmodified code but was never stated as a
+`close-execution` requirement or tested — that a durably unresolved close identity is protected from a
+conflicting entry-package mutation by the entry order's own permanent fill evidence. Everything else
+reviewed (fill-derived exposure equation, fill-level deduplication, wire-vs-domain identity encapsulation)
+was confirmed already satisfied and needed no change; those findings are recorded, not designed, in
+`docs/virtual-exposure-ownership-delivery-plan.md`.
+
 ### Root cause of the original draft's unsafe model
 
 The original draft's multi-owner postcondition was: read the live aggregate once, compute
@@ -202,16 +217,27 @@ for close attempts. Two flat fields answer every question this change's retry/re
 answered (Decision 4); a ledger would be solving a generality this pipeline does not need — a trade cycle
 has at most one close identity, ever, in V1.
 
-### 4. Retry/restart state machine (multi-owner branch)
+### 4. Retry/restart flow: ensure-dispatched, then always-confirm — one sequential flow, not two alternate branches
+
+**Correction (this revision):** the first pass of this decision described "no close ever dispatched" and
+"a close was already dispatched" as if they were two alternate branches a request chooses between once.
+Read literally, that phrasing leaves unstated what happens immediately after a *successful* dispatch within
+the same request — which, if implemented as written, could mean a successful dispatch just returns without
+confirming, requiring a second `POST /close` purely to obtain confirmation (not unsafe, since Decision 4's
+second half already handles that second call correctly, but inconsistent with the single-owner branch,
+which dispatches, verifies, and durably writes all in one request). The corrected framing: every request
+performs the same two sequential steps — **ensure a close order is dispatched** (a no-op if one already is),
+**then always resolve and gate on its current fate** — whether that identity was just dispatched in this
+same request or was already dispatched by an earlier one.
 
 After the existing entry-order neutralization step (shared, unchanged) confirms the requested cycle's own
 entry order has no live remainder:
 
-**A — No close ever dispatched** (`record.close_order_link_id === null`):
+**Step 1 — Ensure dispatched** (skipped entirely if `record.close_order_link_id !== null` already):
 1. Resolve `resolvedQty` from the entry order's own fill facts via `confirmEntryPackage` (transient,
    in-memory only — Decision 6; unchanged from the original draft).
 2. If `resolvedQty === "0"`: no close order is needed or ever will be for this generation (the entry order
-   is terminal and immutable, so this is stable across any number of retries) — skip straight to the
+   is terminal and immutable, so this is stable across any number of retries) — skip straight to Step 2's
    durable write. No identity is written; nothing was, or ever will be, dispatched.
 3. Otherwise, read the live aggregate once (for `side`, and a pre-dispatch sanity check: if the aggregate
    is already `no_position` while `resolvedQty > 0`, this is an unexplained pre-dispatch contradiction —
@@ -222,18 +248,18 @@ entry order has no live remainder:
 5. Send the reduce-only close order for `resolvedQty` on the aggregate's own live side, carrying
    `orderLinkId: closeOrderLinkId`. A thrown exception or a `skipped_live_execution` result leaves the
    durable write exactly as it is — never reverted, mirroring `createOrder()`'s identical handling — and
-   returns `internal_error`; the next attempt finds `close_order_link_id` already set and proceeds via
-   branch B below, which itself safely resends under the same identity once a fresh query proves nothing
-   was actually created (the same "not_found ⇒ safe to resend the same identity" proof
-   `shouldResendPendingAction` already relies on for entry).
+   returns `internal_error` immediately (Step 2 does not run this request). Otherwise — a normal, successful
+   dispatch response — proceed immediately into Step 2 within this same request; no second HTTP call is
+   required to obtain confirmation when the exchange settles within Step 2's bounded window.
 
-**B — A close was already dispatched for this generation** (`record.close_order_link_id !== null`, `status
-!== "terminal_closed"` — a retry or a post-crash restart): re-derive `resolvedQty` fresh (step A.1 again;
+**Step 2 — Always resolve and gate on the dispatched identity's fate** (runs whenever
+`record.close_order_link_id !== null`, whether just set by Step 1 in this same request or found already set
+from an earlier one, and `status !== "terminal_closed"`): re-derive `resolvedQty` fresh (Step 1.1 again;
 cheap, and the entry order cannot have changed since it is already terminal), then call `confirmEntryPackage`
 on `close_order_link_id` with `expected.qty = resolvedQty`, and branch on its outcome:
 - **`full_fill` / `partial_fill` with `decimalEquals(observation.cumulative_filled_qty, resolvedQty)`**:
-  the previously-dispatched close order fully executed the requested quantity. No new order is sent.
-  Proceed to the durable write (Decision 5).
+  the close order fully executed the requested quantity. No new order is sent. Proceed to the durable write
+  (Decision 5).
 - **`full_fill` / `partial_fill` with a confirmed quantity less than `resolvedQty`, and the order's own
   terminality (`classifyEntryOrderTerminality` on the same identity) reads `terminal`**: the order is done
   executing and under-executed relative to what this cycle needed closed — `close_execution_incomplete`.
@@ -247,15 +273,28 @@ on `close_order_link_id` with `expected.qty = resolvedQty`, and branch on its ou
   unresolved.
 - **`not_found`, genuinely, after the bounded query window**: Bybit has no record of this identity ever
   being created — the one case `shouldResendPendingAction` already proves safe to resend under the *same*
-  identity. Return to branch A's step 3 onward, reusing `close_order_link_id` unchanged (no new identity is
-  minted).
+  identity. Return to Step 1's step 3 onward, reusing `close_order_link_id` unchanged (no new identity is
+  minted), then fall through into Step 2 again for the resulting dispatch.
 - **`ambiguous`** (a query failure within the bounded window, or a found-but-inconclusive result):
   `internal_error`. No order is sent.
 
 This directly satisfies the required invariant: **ABI never sends a second close order for the same
-full-close intent while the previously dispatched one's fate is unconfirmed** — branch B always resolves
-the existing identity's fate first, and only ever "resends" (reuses the same identity) in the one case
-proven safe by precedent (genuinely never created).
+full-close intent while the previously dispatched one's fate is unconfirmed** — Step 2 always resolves the
+existing identity's fate first, and only ever "resends" (reuses the same identity) in the one case proven
+safe by precedent (genuinely never created).
+
+**Crash-window coverage, made explicit:**
+
+| Window | Durable state left behind | Resolution on the next request |
+|---|---|---|
+| A. Crash before Step 1 writes anything | Nothing written; record unchanged | Equivalent to the request never having happened — starts fresh |
+| B. Crash after the Step 1.4 write, before the Step 1.5 exchange call | `close_order_link_id` set; Bybit has no record of it | Step 2's `confirmEntryPackage` query returns clean `not_found` → safe resend under the same identity |
+| C. Crash during the exchange call itself (in flight) | Same durable state as B; ABI cannot locally tell whether Bybit received it | Same as B — a fresh Step 2 query reveals Bybit's actual state either way |
+| D. Exchange accepted the order, the response was lost before ABI read it | `close_order_link_id` set; an order genuinely exists at Bybit under it | Step 2's query finds it (live or terminal) via that identity; no new order is ever sent while a prior one's fate is anything other than clean `not_found` |
+| E. Exchange filled the order, ABI crashed before the Step-2-gated durable write | Same as D, now terminal with a confirmed fill | Step 2 confirms full execution directly from that evidence and completes the durable write — no new order is sent |
+
+Every window converges on the same mechanism: a fresh, bounded query of the one durable identity. None is
+handled by a separate code path.
 
 **Why no automatic fresh-identity retry after a definitive zero/partial execution (scenario D/E in the
 review):** an orderLinkId Bybit has already accepted and processed (found, not `not_found`) cannot safely
@@ -319,6 +358,43 @@ partial execution and outright zero-execution rejection/cancellation — both ar
 what was requested," differing only in degree). Strict equality, no tolerance: the value being compared
 against is the exact string ABI itself submitted moments earlier in the same request lineage, not a
 value independently re-derived from a different source.
+
+### 8. A durably unresolved close identity is already protected from conflicting entry-package mutation — made explicit, not newly built
+
+**Finding (this revision's review):** while a close identity is durably recorded and unresolved
+(`close_order_link_id !== null`, `status !== "terminal_closed"`), could a *different*, sequential (not
+concurrent — the pair mutex already serializes concurrent in-process calls) request for the same pair —
+a cancel-intent (`null`-desired-entry) `PUT .../entry-package`, or a new non-null `PUT .../entry-package`
+— corrupt this pipeline's assumptions by transitioning the record to `absent` and starting a new
+generation out from under an in-progress close?
+
+**Answer: no, and this is already true today, by construction, without any change.** By the time
+`close_order_link_id` is written (Decision 4, Step 1.4), the entry order has already been proven to have
+a recorded fill on the exchange — `resolvedQty` is derived from it and is non-zero on the path that writes
+`close_order_link_id` at all. Every path that could transition a record to `absent` —
+`confirmCancelOutcomeAndPersist` for a cancel-intent PUT, and `cancelLiveOrder` for a non-null PUT against
+an existing live binding — routes through `confirmEntryPackageCancelled`, whose `hasFill` check
+(`packageConfirmation.ts:187,198`) unconditionally classifies a found order with any recorded execution as
+`filled_before_cancel`, never `cancelled_confirmed`. `entryPackageApplicationService.ts:550-561` handles
+`filled_before_cancel` by keeping `status: "applied"` (not transitioning to `absent`) and returning
+`internal_error` — it *cannot* fabricate a null-intent success once a fill exists. Since Bybit's own
+execution history for an order is permanent, this holds no matter how long the close identity stays
+unresolved, and no matter which of `close_execution_incomplete`, an unresolved retry, or a genuine
+crash produced that state. A new generation — the only thing that could mint a *different* close identity
+for the same pair — is therefore unreachable while any close identity for the current generation remains
+unresolved.
+
+**This is a pre-existing, unmodified-by-this-change property**, not new logic Change 2 adds. What Change 2
+adds is making it an explicit, tested `close-execution` requirement, so a future reader (in particular,
+`abi-same-side-virtual-exposure-ownership-v1`, which is what will make this scenario reachable via real
+concurrent same-side cycles rather than only synthetic fixtures) does not have to re-derive it from first
+principles across two unrelated services.
+
+**Rejected: a durable "close in progress" guard inside `EntryPackageApplicationService` itself**, checking
+`close_order_link_id` before allowing a cancel-intent or re-entry PUT. Unnecessary — the existing
+fill-evidence check already produces the correct outcome for every case that matters, and adding a second,
+parallel guard that has to agree with the first would be exactly the kind of redundant state this program
+has consistently avoided (see `virtual-exposure-state`'s own "no separate durable finality flag" precedent).
 
 ## Risks / Trade-offs
 
