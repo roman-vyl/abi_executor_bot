@@ -21,16 +21,16 @@
 ## 3. New Bybit adapter primitive: `/v5/execution/list`
 
 - [ ] 3.1 Add `BybitGetExecutionListPayload` (`{ category: string; symbol: string; orderLinkId: string;
-      startTime: string; endTime: string; limit: string; cursor?: string }`) — new type, alongside the
-      existing `BybitGetOrderByLinkIdPayload`/`BybitGetOrderHistoryPayload` — design.md Decision 4a.
-      Deliberately no `orderId` field: Bybit's own documented parameter-priority rule for this endpoint
-      (`orderId > orderLinkId > symbol > baseCoin`) means sending both would let `orderId` silently
-      override the intended filter.
+      limit: string; cursor?: string }`) — new type, alongside the existing
+      `BybitGetOrderByLinkIdPayload`/`BybitGetOrderHistoryPayload` — design.md Decision 4a. Deliberately no
+      `orderId` field: Bybit's own documented parameter-priority rule for this endpoint (`orderId >
+      orderLinkId > symbol > baseCoin`) means sending both would let `orderId` silently override the
+      intended filter.
 - [ ] 3.2 Add `getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>` to the
       `BybitAdapter` interface. Implement in `RestBybitAdapter` via `signedGet("/v5/execution/list",
-      new URLSearchParams({ category, symbol, orderLinkId, startTime, endTime, limit, ...(cursor ?
-      { cursor } : {}) }))` — the same pattern every other read on this adapter already uses. Implement in
-      `StubBybitAdapter` via the existing `stub(...)` placeholder.
+      new URLSearchParams({ category, symbol, orderLinkId, limit, ...(cursor ? { cursor } : {}) }))` — the
+      same pattern every other read on this adapter already uses. Implement in `StubBybitAdapter` via the
+      existing `stub(...)` placeholder.
 
 ## 4. New decoder: `executionListResponseDecoder.ts`
 
@@ -47,28 +47,25 @@
 - [ ] 4.3 Per item: `symbol` must match expected (`symbol_mismatch` otherwise); `execType` must equal
       exactly `"Trade"` (`invalid_exec_type` otherwise — design.md Decision 4's `execType` filtering note);
       `execTime` must be present, a numeric string, and parse to a non-negative integer
-      (`invalid_exec_time` otherwise). Deliberately do **not** validate or compare the item's own
-      `orderLinkId` field against the query's filter — design.md Decision 4's documented Bybit quirk (this
-      endpoint reports an empty `orderLinkId` for maker-side trades). Malformed non-object items →
+      (`invalid_exec_time` otherwise). Attribution rests on the query's own `orderLinkId` filter (this
+      cycle's own deterministic, durable identity) — design.md Decision 4. Malformed non-object items →
       `malformed_item`.
 
 ## 5. New orchestration: `resolveFirstAttributableFillAtMs`
 
 - [ ] 5.1 In `src/services/entryPackage/packageConfirmation.ts`, add
       `resolveFirstAttributableFillAtMs(input: { bybit: BybitAdapter; category: string; symbol: string;
-      orderLinkId: string; windowStartMs: number }): Promise<{ kind: "found"; firstFillAtMs: number } |
-      { kind: "no_executions_found" } | { kind: "ambiguous" }>` — design.md Decision 4a.
-- [ ] 5.2 Compute `startTime = max(input.windowStartMs, Date.now() - (7 days in ms) + a small safety
-      margin)`, `endTime = Date.now()` (both as millisecond-epoch numeric strings) — design.md Decision 4c.
-- [ ] 5.3 Page through `getExecutionList` in a bounded loop (a small fixed page cap — e.g. 10 pages at the
+      orderLinkId: string }): Promise<{ kind: "found"; firstFillAtMs: number } | { kind:
+      "no_executions_found" } | { kind: "ambiguous" }>` — design.md Decision 4a.
+- [ ] 5.2 Page through `getExecutionList` in a bounded loop (a small fixed page cap — e.g. 10 pages at the
       existing query `limit` convention this codebase already uses elsewhere), passing each page's
       `nextCursor` as the next request's `cursor`, decoding each page via
       `decodeExecutionListResponsePage`, and accumulating every valid execution across all pages into one
       set — never computing a candidate result from a partial page — design.md Decision 4b.
-- [ ] 5.4 Any page's `protocol_failure`, or a transport-level failure from `getExecutionList` itself, or
+- [ ] 5.3 Any page's `protocol_failure`, or a transport-level failure from `getExecutionList` itself, or
       exceeding the page-cap bound while `nextCursor` is still non-empty → `{ kind: "ambiguous" }` —
       design.md Decision 4b.
-- [ ] 5.5 After the loop ends (`nextCursor === ""`): if the accumulated set is empty →
+- [ ] 5.4 After the loop ends (`nextCursor === ""`): if the accumulated set is empty →
       `{ kind: "no_executions_found" }`; otherwise → `{ kind: "found"; firstFillAtMs: min(execTimeMs across
       the set) }` — design.md Decision 4.
 
@@ -120,11 +117,10 @@
       write.
 - [ ] 7.6 If `determination.kind === "open"` and `freshRecord.first_fill_at_ms === null`: call
       `resolveFirstAttributableFillAtMs({ bybit, category: freshRecord.exchange_category, symbol:
-      freshRecord.exchange_symbol, orderLinkId: freshRecord.order_link_id, windowStartMs:
-      freshRecord.current_binding_started_at })`. On `"found"`: durably `save({ ...freshRecord,
-      first_fill_at_ms: captured.firstFillAtMs, updated_at: <now> })`, then build the success response from
-      `determination.averageEntryPrice` and the captured value. On `"no_executions_found"` or `"ambiguous"`:
-      `internal_error`, no durable write — design.md Decision 4c.
+      freshRecord.exchange_symbol, orderLinkId: freshRecord.order_link_id })`. On `"found"`: durably
+      `save({ ...freshRecord, first_fill_at_ms: captured.firstFillAtMs, updated_at: <now> })`, then build
+      the success response from `determination.averageEntryPrice` and the captured value. On
+      `"no_executions_found"` or `"ambiguous"`: `internal_error`, no durable write — design.md Decision 4c.
 - [ ] 7.7 A `save()` failure (not a logic error — e.g. a disk error) does not convert an otherwise-successful
       determination into an error response — return the freshly-captured value in this response anyway; the
       next `GET` retries the capture, since `first_fill_at_ms` was never durably set — design.md Decision
@@ -173,46 +169,43 @@
 - [ ] 10.7 **Bounded pagination fails closed, not silently, when the page cap is exceeded:** stub
       `getExecutionList` to always return a non-empty `nextPageCursor` — the capture returns
       `internal_error`, not a value computed from a partial set.
-- [ ] 10.8 **Retention/recovery: no executions found for an order own-evidence already proves filled fails
-      closed distinctly.** Stub `getExecutionList` to return an empty (fully-paged) result while
-      `confirmEntryPackage`/the stored observation shows `cumulative_filled_qty > 0` — `internal_error`, no
-      durable write, no fabricated timestamp — design.md Decision 4c.
+- [ ] 10.8 **No executions found for an order own-evidence already proves filled fails closed.** Stub
+      `getExecutionList` to return an empty (fully-paged) result while `confirmEntryPackage`/the stored
+      observation shows `cumulative_filled_qty > 0` — `internal_error`, no durable write, no fabricated
+      timestamp — design.md Decision 4.
 - [ ] 10.9 **`execType` filtering:** a page containing one item with `execType: "Trade"` and one with a
       different `execType` — only the `"Trade"` item's `execTime` is considered a candidate; an item whose
       `execType` is present but not `"Trade"` at all in the whole result set is treated as
       `invalid_exec_type` (`internal_error`), not silently skipped.
-- [ ] 10.10 **Maker-trade empty `orderLinkId` does not cause a false rejection:** a decoded execution item
-      whose own `orderLinkId` field is an empty string is still accepted (matching Bybit's documented
-      per-item echo behavior) — design.md Decision 4's documented quirk.
-- [ ] 10.11 **First capture is durable and stable across repeated `GET`s:** the first `GET` for a
+- [ ] 10.10 **First capture is durable and stable across repeated `GET`s:** the first `GET` for a
       newly-filled cycle durably writes `first_fill_at_ms`; a second `GET` (stubbed with additional/different
       executions this time, simulating further order movement) returns the *original* captured value
       unchanged, with no second write attempted and `getExecutionList` never called again (assert call
       counts).
-- [ ] 10.12 **Backward-compat backfill:** a record with `isFillFactFinal` true, `cumulative_filled_qty > 0`,
+- [ ] 10.11 **Backward-compat backfill:** a record with `isFillFactFinal` true, `cumulative_filled_qty > 0`,
       but `first_fill_at_ms === null` (simulating pre-existing data) triggers exactly one
       `getExecutionList`-based capture (no `confirmEntryPackage` re-query, since the stored observation is
       already final), durably captures `first_fill_at_ms`, and returns it in the response.
-- [ ] 10.13 **Immutability at the repository layer:** `save()` and `replay()` both reject a record whose
+- [ ] 10.12 **Immutability at the repository layer:** `save()` and `replay()` both reject a record whose
       `first_fill_at_ms` differs from the previously stored non-null value for the same pair.
-- [ ] 10.14 **Own fill without a usable average price fails closed:** own evidence shows
+- [ ] 10.13 **Own fill without a usable average price fails closed:** own evidence shows
       `cumulative_filled_qty > 0` with no `avg_execution_price` available — `internal_error`, no fabricated
       price.
-- [ ] 10.15 **Aggregate/own-evidence disagreement fails closed:** own evidence proves a fill, but the
+- [ ] 10.14 **Aggregate/own-evidence disagreement fails closed:** own evidence proves a fill, but the
       aggregate query returns `no_position` or a side-mismatched row — `internal_error`.
-- [ ] 10.16 **`PUT .../protection` regression, full suite:** `protectionApplicationService.test.ts` passes
+- [ ] 10.15 **`PUT .../protection` regression, full suite:** `protectionApplicationService.test.ts` passes
       unchanged — its already-satisfied short-circuit and its live-position gate both still receive
       `confirmedStopLoss`/`confirmedTakeProfit` and the correct `kind` from `determine()`; `determine()`
       never calls `getExecutionList` on protection's call path (assert call count is zero).
-- [ ] 10.17 **Concurrency:** a `GET` for a live-query-admissible record and a concurrent `PUT
+- [ ] 10.16 **Concurrency:** a `GET` for a live-query-admissible record and a concurrent `PUT
       .../entry-package` repeat-revalidation for the same pair are serialized by the shared mutex — neither
       write is lost (construct via the existing `KeyedMutex` test harness pattern, if one exists, or a
       controlled-interleaving stub).
-- [ ] 10.18 `orderLinkId`/`orderId` query construction: `getExecutionList` is called with `orderLinkId` only
+- [ ] 10.17 `orderLinkId`/`orderId` query construction: `getExecutionList` is called with `orderLinkId` only
       — assert the request never includes an `orderId` param — design.md Decision 4's priority-rule note.
-- [ ] 10.19 Replay backward-compatibility: a durable row written without a `first_fill_at_ms` key at all
+- [ ] 10.18 Replay backward-compatibility: a durable row written without a `first_fill_at_ms` key at all
       replays successfully, reading as `null`.
-- [ ] 10.20 Full regression: `entryPackageCorrelationRepository.test.ts`, `entryPackageApplicationService.test.ts`,
+- [ ] 10.19 Full regression: `entryPackageCorrelationRepository.test.ts`, `entryPackageApplicationService.test.ts`,
       `closeApplicationService.test.ts`, `entryCycleRecoveryResolutionService.test.ts` all pass unchanged in
       observable behavior.
 
@@ -234,9 +227,10 @@ real operational evidence demonstrates the need — listed here only so it is no
 - Any strategy timeframe/interval/grid concept inside ABI, or bar-normalization logic inside ABI — v9,
   explicit and final; not a deferred item so much as a permanently rejected one, restated here for
   visibility.
-- Widening the 7-day retention/recovery window (design.md Decision 4c) — e.g. an earlier capture attempt
-  during entry-package's own confirmation flow, as a second, earlier capture point — not introduced
-  speculatively; the current design accepts this as a narrow, explicitly-scoped operational risk.
+- A historical-recovery subsystem designed around `/v5/execution/list`'s own query-scoping/history
+  constraints (design.md Decision 4's closing note) — not introduced speculatively; this change's normal
+  lifecycle captures `first_fill_at_ms` once, promptly, and holds it durable and immutable, so no code path
+  needs to reconstruct an old, never-captured fill.
 - `abi-entry-cycle-recovery-attribution-v1` (Change 4) — independent sibling of this change, not touched
   here.
 - Same-side production activation (`abi-same-side-virtual-exposure-ownership-v1`, Change 5).
@@ -253,22 +247,21 @@ Reviewed and decided against for this change (not open, listed for traceability 
   would make that wrong value permanently, stably wrong. Replaced with `/v5/execution/list`-based
   `min(execTime)` sourcing (design.md Decision 4).
 - Capturing `first_fill_at_ms` inside `entryPackageApplicationService.ts`'s existing observation-writing
-  points instead of `OpenPositionResolutionService`. Resolved (and less critical than originally argued,
-  now that sourcing is execution-list-based): unlike the rejected `updatedTime` design, execution-list
-  sourcing returns the correct value regardless of how late the first capture attempt happens, within the
-  retention window — timing affects availability (Decision 4c), not correctness, so an earlier capture
-  point is a possible future mitigation for the retention risk, not a correctness requirement.
+  points instead of `OpenPositionResolutionService`. Resolved: unlike the rejected `updatedTime` design,
+  execution-list sourcing returns the correct value regardless of how late the first capture attempt
+  happens — `OpenPositionResolutionService`'s own targeted refresh is a sufficient, correct capture point
+  on its own.
 - Reconstructing `first_fill_at_ms` fresh on every `GET`, never durably storing it. Resolved: even though
-  execution-list sourcing (unlike `updatedTime`) would return the same correct value on every call within
-  the retention window, this still costs one paginated exchange query per `GET` forever, and remains
-  dependent on the retention window for every single call rather than only the first — durable, one-time
-  capture is strictly better.
+  execution-list sourcing (unlike `updatedTime`) would return the same correct value on every call, this
+  still costs one paginated exchange query per `GET` forever, for a value that never changes once genuinely
+  first observed — durable, one-time capture is strictly better.
 - A quantity/drift comparison between own evidence and the aggregate. Resolved: same reasoning as Change
   2's Decision 5 — a shared aggregate cannot prove whose activity produced it.
 - Double-checked locking (exchange query outside the mutex, re-check inside). Resolved: added complexity
   not justified given `PUT .../protection` already accepts the full in-lock query cost for the same
   underlying call.
-- Validating a per-item `orderLinkId` echo on execution-list responses, mirroring
-  `decodeOrderQueryResponse`'s strict re-check. Resolved: Bybit's own documented behavior makes this field
-  unreliable (empty for maker-side trades) on this specific endpoint — attribution rests on the server-side
-  query filter alone here, an explicitly narrower guarantee than `order/realtime`/`order/history`'s.
+- Designing a historical-recovery subsystem around `/v5/execution/list`'s own query/history constraints
+  (e.g. explicit time-window construction, multi-window traversal, dedicated recovery scenarios). Resolved:
+  out of scope for this change — its normal lifecycle captures `first_fill_at_ms` once, promptly, and holds
+  it durable and immutable, so it never needs to reconstruct an old fill; see design.md Decision 4's
+  closing note.

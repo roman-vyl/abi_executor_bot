@@ -69,8 +69,7 @@ directly and correctly regardless of how many fills occurred or how late ABI hap
 different class of primitive from an order-level "current state" field, not merely a more precise version
 of the same idea. This requires one new, narrow adapter primitive (no existing ABI code queries this
 endpoint today) — see "What Changes" and `design.md`'s Decision 4 for the full design, including how
-pagination is handled without assuming record order, and how the endpoint's own 7-day query-window limit
-is handled for restart/recovery.
+pagination is handled without assuming record order.
 
 ## What Changes
 
@@ -125,12 +124,13 @@ is handled for restart/recovery.
   query in that case — even though the stored `early_execution_observation` itself needs no refresh —
   specifically to backfill `first_fill_at_ms`, so the wire invariant (`position_open: true` implies
   non-null `first_fill_at_ms`) never breaks for old data.
-- **New, explicitly accepted operational risk: the execution-list endpoint's own 7-day query window.**
-  Bybit's own documentation states this endpoint defaults to, and caps, a 7-day query window. A capture
-  attempted more than ~7 days after the actual fill — realistically only reachable for a pre-existing
-  record that goes unpolled that long after this change ships — can permanently fail to recover the raw
-  timestamp, and `GET .../open-position` will return `internal_error` for that pair until it closes. See
-  `design.md`'s Decision 4c for the full reasoning and why this is accepted rather than engineered around.
+- **Bybit's own execution-history query constraints are not designed around here.** Like any third-party
+  API, `/v5/execution/list` has its own query-scoping and history constraints. This change does not
+  enumerate or build a historical-recovery subsystem around them: the normal lifecycle it implements
+  authoritatively captures `first_fill_at_ms` once, promptly, and holds it durable and immutable afterward
+  (see "What Changes" above) — no code path needs to reconstruct a fill that was never captured at the
+  time. A deeper historical-recovery mechanism is a separate future concern, taken up only if real
+  operational evidence proves it necessary — see `design.md`'s Decision 4 closing note.
 - **`GET .../open-position`'s wire contract is unchanged in shape.** `position_open` / `first_fill_at_ms`
   / `average_entry_price` keep their names, types, and nullability rules; no quantity/size field is added,
   now or later in this program (`open-position-resolution` spec's own existing requirement, restated,
@@ -163,13 +163,14 @@ is handled for restart/recovery.
   `signedGet` helper (same pattern as every other read on this adapter) and in `StubBybitAdapter` via the
   existing `stub(...)` placeholder.
 - `src/exchange/bybitOrderMapper.ts` (or `bybitAdapter.ts` directly): new `BybitGetExecutionListPayload`
-  type — `{ category, symbol, orderLinkId, startTime, endTime, limit, cursor? }`.
+  type — `{ category, symbol, orderLinkId, limit, cursor? }`, mirroring the existing
+  `BybitGetOrderByLinkIdPayload`/`BybitGetOrderHistoryPayload` shape.
 - New file, `src/services/entryPackage/executionListResponseDecoder.ts`: `decodeExecutionListResponsePage`,
   mirroring `orderQueryResponseDecoder.ts`'s per-field validation style — validates one page's envelope and
-  items (`symbol`/`category` match, `execType === "Trade"`, `execTime` a valid non-negative integer),
-  deliberately does **not** re-check a per-item `orderLinkId` echo (Bybit's own documented behavior: this
-  endpoint reports an empty `orderLinkId` for maker-side trades, unlike `order/realtime`/`order/history`),
-  and returns the page's decoded executions plus `nextPageCursor`.
+  items (`symbol`/`category` match, `execType === "Trade"`, `execTime` a valid non-negative integer) and
+  returns the page's decoded executions plus `nextPageCursor`. Attribution rests on the server-side
+  `orderLinkId` query filter (this cycle's own deterministic, durable identity), the same policy every
+  other own-order query in this codebase already uses.
 - `src/services/entryPackage/packageConfirmation.ts`: new orchestration function,
   `resolveFirstAttributableFillAtMs`, pages through `getExecutionList` to completion (bounded), decodes
   each page, and returns `min(execTime)` across every valid execution found — or a typed failure

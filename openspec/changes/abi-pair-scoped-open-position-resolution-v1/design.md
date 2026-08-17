@@ -73,6 +73,10 @@ ABI's own contract either.
   reads `execTime` from trade-fill executions attributable to one order and nothing else.
 - Cross-owner aggregate reconciliation as an observability check independent of a single request's own
   gate (same non-goal Change 2 already stated for the equivalent concern on the write side).
+- A historical-recovery subsystem designed around `/v5/execution/list`'s own query-scoping/history
+  constraints (see Decision 4's closing note). This change's normal lifecycle captures `first_fill_at_ms`
+  once, promptly, and holds it durable and immutable — it does not need, and does not build, machinery for
+  reconstructing an old fill that was never captured at the time.
 
 ## Decisions
 
@@ -158,15 +162,15 @@ compared against this cycle's own resolved quantity, with or without a tolerance
 
 **The open question, answered — and answered differently than this document's first draft.** Master-plan
 v9 left open whether ABI needs to durably store the raw first-fill timestamp, or can reconstruct it on
-demand each time. Durable storage is still required (the reasoning below is unchanged from the first
-draft: Runtime needs a value that is **stable across repeated `GET .../open-position` calls**, and nothing
-about "current order state" is stable once an order moves past its first fill). What changed is the
-*source*: no field on the order-level `order/realtime`/`order/history` response describes "when did this
-order's first fill happen" as a standing historical fact — those endpoints describe the order's *current*
-state, including a last-update timestamp that moves every time anything about the order changes. The only
-Bybit primitive that records each individual fill with its own timestamp is `/v5/execution/list` ("Get
-Trade History"), which ABI does not currently query anywhere. This change adds the minimum adapter
-primitive and decoder needed to query it, scoped to exactly one order's own executions.
+demand each time. Durable storage is still required: Runtime needs a value that is **stable across
+repeated `GET .../open-position` calls**, and nothing about "current order state" is stable once an order
+moves past its first fill. What changed is the *source*: no field on the order-level
+`order/realtime`/`order/history` response describes "when did this order's first fill happen" as a
+standing historical fact — those endpoints describe the order's *current* state, including a last-update
+timestamp that moves every time anything about the order changes. The only Bybit primitive that records
+each individual fill with its own timestamp is `/v5/execution/list` ("Get Trade History"), which ABI does
+not currently query anywhere. This change adds the minimum adapter primitive and decoder needed to query
+it, scoped to exactly one order's own executions.
 
 **Why this, and not `order/history`'s `updatedTime`.** The order-level field's fundamental problem: for an
 order that has already accumulated more than one fill by the time ABI's own confirmation pipeline first
@@ -175,28 +179,18 @@ observes it (own-order re-query only happens on `GET`/repeat-`PUT`, not on every
 sidesteps this entirely: it does not describe "current state as of when I asked" at all — it enumerates
 every individual execution that has occurred against a given order, each carrying its own `execTime`, so
 `min(execTime)` across this order's own executions is the first-fill time regardless of how many fills
-happened, in what order ABI later observes them, or how long ABI waited before looking (subject to
-Decision 4c's retention window).
+happened, or in what order ABI later observes them.
 
-**Filtering by this cycle's own order — an existing identity, no new one.** ABI already knows this cycle's
-own entry order's deterministic `orderLinkId` (`record.order_link_id`, unchanged from every existing
-own-order query in this codebase) and passes it as the query's `orderLinkId` filter — never `orderId`,
-deliberately: Bybit's own documented parameter-priority rule for this endpoint is `orderId > orderLinkId >
-symbol > baseCoin`, meaning passing both would let `orderId` silently override the intended filter, and
-`order_id` is this codebase's established "audit only, never used for lookup" field everywhere else
-(`order_id`, `close_order_id`) — this endpoint gets the same treatment, for the same reason.
-
-**A documented Bybit-side quirk this decoder must not fight.** Bybit's own API reference for this endpoint
-states that the response's own `orderLinkId` field is reported as an empty string for a maker-side trade,
-regardless of the order's real `orderLinkId` — i.e., the response does not reliably echo the identity ABI
-filtered by, unlike `order/realtime`/`order/history`'s `orderLinkId`, which `decodeOrderQueryResponse`
-already strictly re-checks per item. This decoder therefore does **not** apply that same per-item identity
-re-check; it trusts the server-side `orderLinkId` query filter as the attribution mechanism (the same
-trust level this codebase's `symbol`/`category` envelope checks already extend to the rest of the
-response), and instead validates only structural correctness per item (`symbol`/`category` match the
-query, `execTime` is a valid non-negative integer, `execType` is a recognized fill-producing type — see
-below). This is a narrower attribution guarantee than `order/history`'s, and is called out explicitly here
-rather than silently assumed to be as strong.
+**Attribution: the same deterministic, durable `orderLinkId` identity policy this codebase already uses
+everywhere else.** ABI already knows this cycle's own entry order's deterministic `orderLinkId`
+(`record.order_link_id`, unchanged from every existing own-order query in this codebase) and passes it as
+the query's `orderLinkId` filter — never `orderId`, deliberately: Bybit's own documented parameter-priority
+rule for this endpoint is `orderId > orderLinkId > symbol > baseCoin`, meaning passing both would let
+`orderId` silently override the intended filter, and `order_id` is this codebase's established "audit
+only, never used for lookup" field everywhere else (`order_id`, `close_order_id`) — this endpoint gets the
+same treatment, for the same reason. This server-side filter, on this cycle's own already-attributable
+identity, is the attribution mechanism — the same trust level this codebase's other own-order queries
+already place in their own `orderLinkId` filters.
 
 **`execType` filtering.** ABI's entry orders are plain triggered market orders — no ADL, delivery, or
 block-trade mechanism ever legitimately produces an execution against one. Each decoded item's `execType`
@@ -204,20 +198,27 @@ is checked against `"Trade"`; a value other than `"Trade"` is treated as `protoc
 not silently skipped), since an unexpected execution type on an order this pipeline created is a signal
 worth surfacing, not filtering past quietly.
 
-**Ties in `execTime` do not matter here.** Bybit's own documentation notes `execTime` alone can be
-ambiguous for *sorting* two executions with identical timestamps (recommending a compound sort key). This
-proposal never sorts or orders executions — it only computes `min(execTime)` across the full set (Decision
-4b), for which an exact tie is simply two candidates for the minimum, both correct; no ordering decision is
-made or needed.
+**Ties in `execTime` do not matter here.** Two executions with identical timestamps are simply two
+candidates for the minimum, both correct; this design never sorts or orders executions, only reduces the
+full set to `min(execTime)` (Decision 4b), so no ordering decision is made or needed.
+
+**Bybit's own execution-history query/history constraints are deliberately not designed around here.**
+Like every third-party API, `/v5/execution/list` has its own query-scoping and history constraints. Change
+3 does not enumerate or design a historical-recovery subsystem around them: the normal lifecycle this
+change implements authoritatively captures `first_fill_at_ms` once, promptly, during this pipeline's own
+processing, and then holds it durable and immutable (Decision 4c) — no code path in this change ever needs
+to reconstruct a fill that happened long ago and was never captured at the time. Handling a deep historical
+recovery scenario against this endpoint's own constraints is a separate future concern, taken up only if
+real operational evidence proves it necessary — it is not a requirement, test, or fail-closed mechanism of
+this change.
 
 #### 4a. New primitive: one adapter method, one decoder — no ledger
 
 - `BybitAdapter` gains `getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>`,
   implemented in `RestBybitAdapter` as a `signedGet("/v5/execution/list", ...)` call — the same pattern
   every other read on this adapter already uses — and in `StubBybitAdapter` as the existing `stub(...)`
-  placeholder. `BybitGetExecutionListPayload` is `{ category, symbol, orderLinkId, startTime, endTime,
-  limit, cursor? }` (`startTime`/`endTime` as millisecond-epoch numeric strings, `limit` as a numeric
-  string, mirroring this codebase's existing `URLSearchParams`-based convention).
+  placeholder. `BybitGetExecutionListPayload` is `{ category, symbol, orderLinkId, limit, cursor? }`,
+  mirroring this codebase's existing `BybitGetOrderByLinkIdPayload`/`BybitGetOrderHistoryPayload` shape.
 - A new decoder, `decodeExecutionListResponsePage` (new file, `src/services/entryPackage/executionListResponseDecoder.ts`,
   mirroring `orderQueryResponseDecoder.ts`'s style and per-field validation discipline), validates one
   page's envelope (`result.list` as an array, `result.category` matches, each item's `symbol`/`execType`/
@@ -231,62 +232,25 @@ made or needed.
 
 #### 4b. Pagination: every page is fetched, order is never assumed, a bound protects against runaway paging
 
-Per this change's own requirement (never rely on record order) and Bybit's cursor-pagination convention:
 `resolveFirstAttributableFillAtMs` fetches pages in a loop, passing each response's `nextPageCursor` as the
 next request's `cursor`, accumulating every decoded execution from every page into one set, and only
 computes `min(execTime)` after the loop ends (`nextPageCursor === ""`). It never inspects only the first
 page, never assumes ascending or descending time order, and never returns a candidate minimum from a
-partial page set. A hard bound (a small constant, e.g. 10 pages at the existing `limit` this codebase
-already uses elsewhere) caps the loop; a genuine entry order in this system is expected to produce a
-handful of executions at most, so this bound is headroom, not a realistic ceiling — if it is ever reached
+partial page set. A hard, defensive bound (a small constant, e.g. 10 pages at the existing `limit` this
+codebase already uses elsewhere) caps the loop; a genuine entry order in this system is expected to produce
+a handful of executions at most, so this bound is headroom, not a realistic ceiling — if it is ever reached
 without the cursor going empty, the result is `ambiguous` (fail closed), never a `min()` computed over a
 known-incomplete set.
 
-#### 4c. Retention/recovery: the endpoint's own 7-day query window is a real, accepted operational limit
-
-Bybit's own documentation for this endpoint states that omitting `startTime`/`endTime` defaults the query
-to the most recent 7 days, and that when both are supplied, `endTime - startTime` must not exceed 7 days.
-This is a genuine constraint this design must respect, not an implementation detail to abstract away:
-
-- `resolveFirstAttributableFillAtMs` always passes explicit `startTime`/`endTime`: `endTime = now`,
-  `startTime = max(record.current_binding_started_at, now - 7 days + a small safety margin)` — the
-  binding's own known dispatch time, clamped to the endpoint's own maximum window.
-- This function is only ever called once this cycle's own order/history evidence already proves
-  `cumulative_filled_qty > 0` (Decision 2/5) — so an empty execution result is never legitimately "no fill
-  happened." It can only mean the fill genuinely occurred, but outside the queryable window this request's
-  clamped `startTime` could reach. ABI SHALL treat this as a distinct, fail-closed outcome
-  (`no_executions_found`, mapped to `internal_error`) — never fabricated as `"0"`, never silently retried
-  with a wider window this endpoint does not support, and never treated as though it disproves the fill
-  order/history already confirmed.
-- **Accepted operational risk, stated plainly**: a trade cycle whose own first-fill capture is attempted
-  more than ~7 days after the fill actually happened — realistically, only a pre-existing record from
-  before this change ships (Decision 4d's backfill case) that has gone more than a week without any `GET`
-  — will permanently fail to produce `first_fill_at_ms` through this pipeline once that window has passed,
-  and `GET .../open-position` will return `internal_error` for that pair for as long as it remains open.
-  This is a real availability regression for that narrow case, not a false alarm; it is accepted here
-  because (a) the realistic exposure window is the interval between this change shipping and a Runtime
-  poll for each already-open pair, expected to be far shorter than 7 days in normal operation, and (b) no
-  primitive this codebase has, or this change adds, can recover an execution Bybit itself no longer returns
-  for the queried window. A future change may widen this (e.g., attempting the query promptly at entry
-  confirmation time as a second, earlier capture point, rather than relying solely on `GET`) if operational
-  evidence shows the risk is not narrow enough in practice — not built speculatively here.
-
-#### 4d. Where the capture is attempted, and why execution-list sourcing makes timing far less critical than `updatedTime` sourcing would have
+#### 4c. Where the capture is attempted
 
 Exactly once per pair, from `OpenPositionResolutionService.resolve()` (not `determine()` — see Decision 5),
 the first time this cycle's own fill facts show `cumulative_filled_qty > 0` while `record.first_fill_at_ms`
-is still `null`. Unlike the rejected `updatedTime`-based design, **when** this first capture attempt
-happens no longer determines correctness, only availability: because `/v5/execution/list` enumerates the
-order's *entire* execution history up to the moment it is queried (not a snapshot of "current state"), a
-capture attempted late (say, `GET` first called two minutes after two fills that happened a minute apart)
-still correctly computes `min(execTime)` across both fills — the 12:01-then-12:03 example from this
-revision's opening note resolves correctly no matter which of the two fills ABI's confirmation pipeline
-happened to see first. The only way lateness matters is Decision 4c's 7-day retention boundary, not
-first-fill accuracy. This removes the need this document's first draft had to argue capture should happen
-inside `entryPackageApplicationService.ts`'s own confirmation flow for correctness; that remains
-unnecessary and out of scope here (this change still does not touch
-`entryPackageApplicationService.ts`) — only Decision 4c's retention window is a reason a future change
-might reconsider adding an earlier capture point, and it is not reconsidered here.
+is still `null`. Because `/v5/execution/list` enumerates the order's *entire* execution history up to the
+moment it is queried (not a snapshot of "current state"), this capture correctly computes `min(execTime)`
+across every fill regardless of how many occurred or in what order ABI later observes them — the
+12:01-then-12:03 example from this revision's opening note resolves correctly no matter which of the two
+fills ABI's confirmation pipeline happened to see first.
 
 **Backward-compatible backfill.** A durable record from before this change ships can have an
 already-`isFillFactFinal` stored observation (`cumulative_filled_qty > 0`) with no `first_fill_at_ms` at
@@ -296,15 +260,13 @@ therefore refined: the entry-order refresh is skipped when the record is already
 (Decision 2 is unchanged); but `resolve()` still separately checks `first_fill_at_ms` and, if it is still
 `null`, calls `resolveFirstAttributableFillAtMs` regardless of whether the entry-order observation itself
 needed refreshing, so the wire invariant (`position_open: true` implies non-null `first_fill_at_ms`) never
-breaks for pre-existing data. Decision 4c's retention window applies to this case with the least slack —
-see its accepted-risk note.
+breaks for pre-existing data.
 
 **Rejected: keep it purely transient (never durably written), returning a freshly re-derived value on every
-`GET`.** Even with execution-list sourcing (which, unlike `updatedTime`, *would* actually return the same
-correct value on every call, within the retention window), this still costs one exchange query per `GET`
-forever, for a value that — once genuinely first observed — never changes. Durable, one-time capture is
-strictly better: same correctness, and it eliminates that recurring cost and the retention-window
-dependency for every `GET` after the first successful capture.
+`GET`.** Even though execution-list sourcing (unlike `updatedTime`) would return the same correct value on
+every call, this would still cost one exchange query per `GET` forever, for a value that — once genuinely
+first observed — never changes. Durable, one-time capture is strictly better: same correctness, and it
+eliminates that recurring cost for every `GET` after the first successful capture.
 
 ### 5. Durable write: a new `KeyedMutex` dependency for `resolve()`; `determine()` itself stays lock-free and never touches `/v5/execution/list`
 
@@ -382,7 +344,7 @@ query, since `first_fill_at_ms` was never durably set. This narrow window of ins
 `replay()` — gains a sibling check: if the previous record for a pair has a non-null `first_fill_at_ms`
 and the incoming record's `first_fill_at_ms` differs (including differing to `null`), this is corruption,
 rejected the same way a `cumulative_filled_qty` regression already is. This is a strict immutability check
-(not a monotonic-non-decrease check like quantity's), matching Decision 4d's "captured once, never
+(not a monotonic-non-decrease check like quantity's), matching Decision 4c's "captured once, never
 overwritten" contract, and catching any future write path that might attempt to touch the field
 incorrectly, not only this change's own single writer.
 
@@ -423,7 +385,7 @@ one-key normalization.
   `GET .../open-position` exactly when the stored observation is not yet final; a separate, additional
   bounded-pagination query (`resolveFirstAttributableFillAtMs`, Decision 4) is added exactly once per pair,
   the first time `first_fill_at_ms` is captured (including a pre-existing record's one-time backfill,
-  Decision 4d) — zero added calls of either kind once a cycle's entry order is final and its
+  Decision 4c) — zero added calls of either kind once a cycle's entry order is final and its
   `first_fill_at_ms` is already captured. The aggregate query, previously unconditional, is now skipped
   entirely when this cycle's own evidence already shows zero fill. `GET` additionally now serializes
   against the pair's mutex for live-query-admissible records, which it did not before (Decision 5) —
@@ -437,18 +399,12 @@ one-key normalization.
   stable (Decision 4's requirement), and the serialization cost is bounded to a small, fixed number of
   bounded-retry/bounded-pagination exchange queries, the same class of cost `PUT .../protection` already
   accepts calling the same shared `determine()` method.
-- [`/v5/execution/list`'s response does not reliably echo `orderLinkId` per item for a maker-side trade
-  (a documented Bybit behavior, not an ABI bug), so this decoder cannot apply the same per-item identity
-  re-check `decodeOrderQueryResponse` applies to `order/realtime`/`order/history`] → Accepted, explicitly:
-  attribution rests on the server-side `orderLinkId` query filter alone for this one endpoint, a narrower
-  guarantee than this codebase's other own-order queries, documented in Decision 4 rather than silently
-  assumed equivalent.
-- [The endpoint's own 7-day default/maximum query window means a first-fill capture attempted more than a
-  week after the actual fill can permanently fail to recover it, leaving `GET .../open-position`
-  returning `internal_error` for that pair] → Accepted as a narrow, explicitly-scoped operational risk
-  (Decision 4c) — realistic exposure is bounded to pre-existing records that go unpolled for over a week
-  after this change ships, not normal ongoing operation; no primitive can recover data Bybit itself no
-  longer serves for the requested window.
+- [`/v5/execution/list` is a third-party API with its own query-scoping and history constraints this
+  change does not enumerate or design around (Decision 4's closing note)] → Accepted: the normal lifecycle
+  this change implements captures `first_fill_at_ms` once, promptly, and holds it durable and immutable
+  afterward, so no code path in this change depends on reconstructing an old, never-captured fill. A deep
+  historical-recovery subsystem against this endpoint's own constraints is explicitly out of scope,
+  reserved for a future change only if real operational evidence proves it necessary.
 - [Pagination must accumulate every page before computing a minimum, rather than short-circuiting on the
   first page, and is bounded by a fixed page cap that fails closed rather than silently using a partial
   result] → Accepted: the added latency is bounded and, for this system's realistic per-order execution
@@ -473,5 +429,4 @@ and are covered only by regression tests. The public HTTP contract (`GET .../ope
 not change. Rollback is a plain revert; old durable rows (lacking `first_fill_at_ms`) replay correctly
 against the corrected validator either way, and a rolled-back `OpenPositionResolutionService` simply stops
 reading/writing the field it no longer knows about (the field itself, once present in the store, is
-harmless dead data to a reverted binary, since nothing else reads it). Bybit's own execution-list retention
-window (Decision 4c) is an external constraint, not something rollback needs to account for.
+harmless dead data to a reverted binary, since nothing else reads it).
