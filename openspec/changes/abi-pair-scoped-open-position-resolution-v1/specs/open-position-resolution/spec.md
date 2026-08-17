@@ -64,33 +64,42 @@ aggregate physical position query to independently confirm this before reporting
 - **THEN** ABI returns `position_open: false` with both facts `null`
 - **AND** ABI does not query the aggregate physical position for this determination
 
-### Requirement: first_fill_at_ms is this cycle's own durable, immutable raw first-fill timestamp, never a canonical strategy-bar value
-When reporting an open position, `first_fill_at_ms` SHALL be a trustworthy raw timestamp of this cycle's
-own first attributable entry-order fill — never a value ABI has normalized, rounded, or otherwise mapped
-to any strategy timeframe, interval, candle grid, or bar boundary. ABI SHALL NOT introduce, read, derive,
-or depend on any strategy timeframe/interval/grid concept to produce this value. ABI SHALL capture this
-value durably exactly once per trade cycle, the first time any observation of this cycle's own entry
-order proves a fill occurred, from that same observation's own exchange-reported update time. Once
-captured, `first_fill_at_ms` SHALL be immutable: no later observation, however different, SHALL overwrite
-an already-captured value.
+### Requirement: first_fill_at_ms is the earliest of this cycle's own entry order's own executions, never a canonical strategy-bar value
+When reporting an open position, `first_fill_at_ms` SHALL be the earliest execution timestamp among this
+cycle's own entry order's own individually-timestamped executions — never a value ABI has normalized,
+rounded, or otherwise mapped to any strategy timeframe, interval, candle grid, or bar boundary, and never
+derived from any field describing an order's current or most-recently-observed state (such value cannot be
+trusted to represent the *first* fill once more than one execution has occurred). ABI SHALL NOT introduce,
+read, derive, or depend on any strategy timeframe/interval/grid concept to produce this value. ABI SHALL
+capture this value durably exactly once per trade cycle, the first time this cycle's own evidence proves a
+fill occurred and no value is captured yet, by querying every one of this order's own executions and
+taking the minimum of their own timestamps — never by inspecting only the first-returned or
+most-recently-observed execution. Once captured, `first_fill_at_ms` SHALL be immutable: no later
+observation, however different, SHALL overwrite an already-captured value.
 
-#### Scenario: The value is captured once, from this cycle's own order evidence
+#### Scenario: The value is captured once, as the true minimum across this order's own executions
 - **WHEN** ABI observes, for the first time, that this cycle's own entry order has a nonzero cumulative
-  fill
-- **THEN** ABI durably captures `first_fill_at_ms` from that same observation's own exchange-reported
-  update time
+  fill and no `first_fill_at_ms` is captured yet
+- **THEN** ABI durably captures `first_fill_at_ms` as the minimum execution timestamp among every one of
+  this order's own executions it can find
 - **AND** this value is never derived from, or normalized against, any strategy timeframe or bar boundary
+
+#### Scenario: An order with more than one execution before its first observation still resolves to the true first fill
+- **WHEN** this cycle's own entry order has already accumulated more than one execution by the time ABI
+  first observes it, and those executions have different timestamps
+- **THEN** ABI captures `first_fill_at_ms` as the earliest of those timestamps, not the timestamp of
+  whichever execution ABI's own observation happened to see most recently
 
 #### Scenario: The captured value is stable across repeated requests
 - **WHEN** `GET .../open-position` is called again for a pair whose `first_fill_at_ms` is already captured,
-  and this cycle's own entry order has since been observed again (with a different current update time)
-- **THEN** ABI returns the originally captured value unchanged, not the more recent observation's update
-  time
+  and this cycle's own entry order has since accumulated further executions
+- **THEN** ABI returns the originally captured value unchanged, not a value reflecting the more recent
+  executions
 
 #### Scenario: A pre-existing durable record without a captured value is backfilled once
 - **WHEN** a durable record already shows a final, nonzero own-cycle fill but has never captured
   `first_fill_at_ms`
-- **THEN** ABI performs one fresh query of this cycle's own entry order to capture the value, even though
+- **THEN** ABI performs one fresh query of this order's own executions to capture the value, even though
   the stored fill facts themselves need no refresh
 
 ## ADDED Requirements
@@ -144,3 +153,32 @@ this capture.
   unserialized read and its serialized capture attempt
 - **THEN** ABI re-reads the record's current status once serialization is held and reports the now-closed
   outcome instead of attempting a stale capture
+
+### Requirement: first_fill_at_ms's capture accumulates every page of this order's own executions before computing a value, never assuming their returned order
+When capturing `first_fill_at_ms`, ABI SHALL retrieve every available page of this cycle's own entry
+order's own executions before computing the minimum timestamp, following the exchange's own pagination
+cursor to completion, and SHALL NOT assume executions are returned in any particular chronological order.
+ABI SHALL NOT compute or accept a candidate value derived from an incomplete set of pages.
+
+#### Scenario: A later page containing the true earliest execution is still found
+- **WHEN** this order's own executions span more than one page, and the earliest execution by timestamp is
+  not on the first page returned
+- **THEN** ABI's captured `first_fill_at_ms` reflects that earliest execution regardless of which page it
+  was returned on
+
+#### Scenario: An unbounded or excessive page count fails closed rather than using a partial result
+- **WHEN** this order's own executions span more pages than ABI's bounded pagination allows
+- **THEN** ABI does not compute `first_fill_at_ms` from the pages it did retrieve
+- **AND** ABI returns `internal_error` without a durable write
+
+### Requirement: A first-fill capture that finds no executions for an order already proven filled fails closed
+Since `first_fill_at_ms` capture is only ever attempted after this cycle's own evidence already proves a
+nonzero fill, ABI SHALL treat a capture query that finds no executions for this order as a contradiction —
+never as proof the order has no fill, and never as grounds to silently omit or fabricate
+`first_fill_at_ms`. ABI SHALL fail closed in this case without a durable write.
+
+#### Scenario: An empty execution result for an order with proven fill facts fails closed
+- **WHEN** this cycle's own fill facts already show a nonzero cumulative fill, but a capture query finds no
+  executions at all for this order's own identity
+- **THEN** ABI does not report `position_open: true` with a fabricated or omitted `first_fill_at_ms`
+- **AND** ABI returns `internal_error` without durably writing `first_fill_at_ms`
