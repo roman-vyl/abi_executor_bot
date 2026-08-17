@@ -1,12 +1,13 @@
 ## Purpose
 
-Define the durable, per-trade-cycle fill-fact record ABI derives from its own entry order's
+Define the durable, per-trade-cycle fill-fact contract ABI derives from its own entry order's
 confirmed observations — sourced only from that cycle's own order, never from Bybit's aggregate
-position — how it is updated, its immutability and monotonicity invariants, how a consumer decides
-whether it is final, and what later capabilities (pair-scoped close, pair-scoped open-position
-resolution, recovery attribution, and same-side ownership) may and may not yet build on it. This
-capability changes no observable production behavior on its own; it is a prerequisite the program
-tracked in `docs/virtual-exposure-ownership-delivery-plan.md` builds on.
+position — its monotonicity invariant, how a consumer decides whether it is final, the
+quantity-ownership architectural boundary the program tracked in
+`docs/virtual-exposure-ownership-delivery-plan.md` is built on, and what later capabilities (pair-
+scoped close, pair-scoped open-position resolution, recovery attribution, and same-side ownership)
+may and may not yet build on it. This capability changes no observable production behavior on its
+own; it is a prerequisite the program builds on.
 
 ## ADDED Requirements
 
@@ -34,34 +35,11 @@ or reconciliation process to keep them fresh.
 - **AND** recovery remains read-only with respect to durable correlation state, unchanged from its
   existing behavior
 
-### Requirement: First-observed time is immutable once recorded and is never fabricated
-ABI SHALL record the timestamp of a trade cycle's first confirmed fill observation exactly once per
-binding, SHALL NOT change it on any later observation of the same binding, and SHALL NOT derive it
-from a pre-existing record's most-recent-observation timestamp for data written before this
-capability existed.
-
-#### Scenario: First-observed time is set once
-- **WHEN** a trade cycle's entry order is confirmed to have a nonzero cumulative fill for the first
-  time
-- **THEN** ABI records the first-observed timestamp for that binding
-
-#### Scenario: First-observed time survives later observations unchanged
-- **WHEN** the same binding's cumulative fill is observed again at a later point (e.g. via
-  repeat-PUT revalidation) and the cumulative filled quantity has increased
-- **THEN** the previously recorded first-observed timestamp is carried forward unchanged
-- **AND** the cumulative filled quantity and average execution price reflect the new observation
-
-#### Scenario: Pre-existing data never gets a fabricated first-observed time
-- **WHEN** ABI replays a durable record whose fill observation was written before this capability
-  existed and therefore has no recorded first-observed timestamp
-- **THEN** ABI treats that binding's first-observed timestamp as unknown
-- **AND** ABI SHALL NOT substitute that observation's most-recent-observation timestamp, or any
-  other derived value, as the first-observed timestamp
-
 ### Requirement: Cumulative filled quantity never regresses
 ABI SHALL reject, both when durably writing a live update and when replaying its durable log, any
 record whose cumulative filled quantity for a trade cycle's binding is less than that same binding's
-previously durably recorded cumulative filled quantity.
+previously durably recorded cumulative filled quantity. ABI SHALL NOT require the average execution
+price recorded alongside it to move in any particular direction.
 
 #### Scenario: A live write with a smaller cumulative quantity is rejected
 - **WHEN** ABI attempts to durably record a new fill observation for a binding whose cumulative
@@ -73,6 +51,12 @@ previously durably recorded cumulative filled quantity.
   binding, a later record whose cumulative filled quantity is less than an earlier record's
 - **THEN** ABI fails startup readiness closed with a descriptive reason
 - **AND** ABI does not silently accept the smaller value
+
+#### Scenario: A changed average execution price alongside a valid quantity update is not rejected
+- **WHEN** ABI durably records a new fill observation whose cumulative filled quantity is greater
+  than or equal to the previously recorded value, and whose average execution price differs from the
+  previous observation in either direction
+- **THEN** ABI accepts the write
 
 ### Requirement: A trade cycle's fill-fact finality is derived from its durably recorded order status
 ABI SHALL determine whether a trade cycle's recorded fill facts are final (its own entry order can no
@@ -94,22 +78,31 @@ separate durable finality flag that duplicates the same fact.
 - **AND** a consumer requiring an authoritative current value must re-verify the binding's order
   status before treating the recorded quantity as settled
 
-### Requirement: A trade cycle's side and currently-owned exposure are specified, not independently stored
+### Requirement: A trade cycle's side is specified from its own desired entry, not independently stored
 ABI SHALL specify which side a trade cycle's exposure belongs to as the side of that cycle's own
-desired entry, and SHALL specify a trade cycle's currently-owned exposure quantity, while its fill
-facts are not yet final, as its recorded cumulative filled quantity — without introducing a second
-stored field for either fact while no consumer can yet cause it to diverge from the field it is
-derived from.
+desired entry, without introducing a second stored field for this fact.
 
 #### Scenario: Side is read from the cycle's own desired entry
 - **WHEN** ABI or a future consumer needs the side a trade cycle's exposure belongs to
 - **THEN** ABI reads it from that trade cycle's own stored desired entry side
 - **AND** ABI does not maintain a separate stored field for this fact
 
+### Requirement: Per-cycle absolute exposure quantity is ABI-private state; management intent is relative
+ABI SHALL treat a trade cycle's absolute exposure quantity as state private to ABI's own per-cycle
+fill facts, and SHALL NOT require Runtime to determine, hold, or supply an absolute exchange
+quantity when expressing a future position-management intent for a trade cycle.
+
+#### Scenario: A cycle's currently-owned exposure is resolved by ABI, not supplied by Runtime
+- **WHEN** ABI needs to determine how much of a trade cycle's exposure it currently owns
+- **THEN** ABI resolves that quantity from its own recorded cumulative filled quantity for that
+  cycle's own entry order, once that binding's fill facts are final
+- **AND** ABI does not require this value to have been supplied by Runtime
+
 ### Requirement: This capability introduces no new durable store and no public HTTP contract change
 ABI SHALL represent every fact this capability defines using only the existing entry-package
 correlation record and its existing durable log, and SHALL NOT change any public HTTP route, request
-schema, response schema, or error code as a result of this capability.
+schema, response schema, or error code as a result of this capability. ABI SHALL NOT push fill data to
+Runtime, and SHALL NOT change Runtime or MDS, as a result of this capability.
 
 #### Scenario: No new durable store
 - **WHEN** ABI needs to reconstruct a trade cycle's fill facts after a restart

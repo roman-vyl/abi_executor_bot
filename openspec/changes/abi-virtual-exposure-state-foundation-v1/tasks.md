@@ -1,125 +1,105 @@
-## 1. Domain type and predicates
+## 1. Predicates (no type changes)
 
-- [ ] 1.1 Add `first_observed_at: string | null` to `EarlyExecutionObservation`
-      (`src/correlation/entryPackageExecutionRecord.ts`). Update `isValidEarlyExecutionObservation`
-      to accept it as optional/nullable on read (design.md Decision 2).
-- [ ] 1.2 Add `mergeExposureObservation(priorObservation, freshObservation)` to
-      `src/services/entryPackage/packageConfirmation.ts`, next to `toObservation` (design.md
-      Decision 2).
-- [ ] 1.3 Export `isFillFactFinal(observation)` from `packageConfirmation.ts`, reusing the existing
-      private `isTerminalOrderStatus` (design.md Decision 5). Export `isTerminalOrderStatus` itself
-      only if needed by 1.2/1.3's own tests — do not export it speculatively otherwise.
+- [ ] 1.1 Export `isFillFactFinal(observation: EarlyExecutionObservation | null): boolean` from
+      `src/services/entryPackage/packageConfirmation.ts`, reusing the existing private
+      `isTerminalOrderStatus` (design.md Decision 2). Do not add or modify any field on
+      `EarlyExecutionObservation` or `EntryPackageExecutionRecord`.
 
-## 2. Wire the merge into the two existing observation write sites
+## 2. Repository: monotonicity validation
 
-- [ ] 2.1 In `EntryPackageApplicationService.persistConfirmationOutcome`'s `full_fill`/`partial_fill`
-      branch (`entryPackageApplicationService.ts:605-614`), replace
-      `early_execution_observation: confirmation.observation` with
-      `early_execution_observation: mergeExposureObservation(record.early_execution_observation,
-      confirmation.observation)`.
-- [ ] 2.2 In `EntryPackageApplicationService.confirmCancelOutcomeAndPersist`'s `filled_before_cancel`
-      branch (`entryPackageApplicationService.ts:550-561`), apply the same change.
-- [ ] 2.3 Confirm (read, do not modify) that no other write site sets
-      `early_execution_observation` to a non-null value — `persistAbsentNoHistory` and
-      `persistTransitionToAbsent` continue to set it to `null` unchanged, and every "unresolved
-      outcome" branch (`unknown`, ambiguous, cancelled-with-no-fill) continues to leave it untouched
-      via the existing `...record` spread. Add one comment at 2.1 and 2.2 stating why no third call
-      site needs the merge (design.md Context, "three observation points" trace).
-
-## 3. Repository: monotonicity/immutability validation
-
-- [ ] 3.1 In `EntryPackageCorrelationRepository.save()`, before the durable append, compare the
-      incoming record's `early_execution_observation` against the currently-indexed record for the
-      same pair (if any) and reject (throw) on either violation from design.md Decision 8:
-      `cumulative_filled_qty` decreasing (exact-decimal comparison via `compareDecimal`), or
-      `first_observed_at` changing after being set non-null.
-- [ ] 3.2 In `EntryPackageCorrelationRepository.replay()`'s existing per-line Phase 1 loop, add the
-      same two checks immediately before each line's `indexRecord()` call, comparing against the
+- [ ] 2.1 In `EntryPackageCorrelationRepository.save()`, before the durable append, compare the
+      incoming record's `early_execution_observation.cumulative_filled_qty` against the
+      currently-indexed record for the same pair (if any) and reject (throw) if it is smaller
+      (exact-decimal comparison via `compareDecimal` from `src/domain/exactDecimal.ts`) — design.md
+      Decision 7. Do not add any check on `avg_execution_price` or `observed_at` (design.md
+      Decision 7's closing note: no monotonicity requirement on price).
+- [ ] 2.2 In `EntryPackageCorrelationRepository.replay()`'s existing per-line Phase 1 loop, add the
+      same check immediately before each line's `indexRecord()` call, comparing against the
       previously-indexed record for that same pair; on violation, return `{ok: false, reason: ...}`
-      the same way existing structural/schema corruption already does (design.md Decision 8). Do not
-      touch Phase 2 (`rebuildScopeIndexFromReplay`) — scope-ownership reconstruction is unaffected by
-      this change (design.md Decision 6).
+      the same way existing structural/schema corruption already does. Do not touch Phase 2
+      (`rebuildScopeIndexFromReplay`) — scope-ownership reconstruction is unaffected by this change
+      (design.md Decision 5).
 
-## 4. Repository: additive multi-owner-capable query
+## 3. Repository: additive multi-owner-capable query
 
-- [ ] 4.1 Add `findActiveRecordsForScope(category, symbol): EntryPackageExecutionRecord[]` to
+- [ ] 3.1 Add `findActiveRecordsForScope(category, symbol): EntryPackageExecutionRecord[]` to
       `EntryPackageCorrelationRepository` as a linear scan over `byCompositeKey.values()`, reusing
-      `positionScopeKey` and `isDurablyClosedEntryPackageStatus` (design.md Decision 7). Do not add
+      `positionScopeKey` and `isDurablyClosedEntryPackageStatus` (design.md Decision 6). Do not add
       a new maintained index and do not modify `byScope`, `findOwnerByScope`,
       `applyScopeClaimOnWrite`, or `rebuildScopeIndexFromReplay`.
 
-## 5. Test suite
+## 4. Test suite
 
-- [ ] 5.1 `first_observed_at` lifecycle: first observation of a binding sets it (equal to that
-      observation's own `observed_at`); a second, later observation of the same binding (via
-      repeat-PUT revalidation) leaves it unchanged while `cumulative_filled_qty`/
-      `avg_execution_price` may change.
-- [ ] 5.2 Partial-then-full-fill sequence for one binding: `cumulative_filled_qty` increases across
-      the two observations; `first_observed_at` is identical across both; `isFillFactFinal` is false
-      after the partial observation and true after the full-fill observation.
-- [ ] 5.3 `filled_before_cancel` also runs the merge (a fill discovered mid-cancel gets the same
-      `first_observed_at` treatment as a fill discovered via revalidation).
-- [ ] 5.4 `save()` rejects a write whose `cumulative_filled_qty` is less than the previously-indexed
-      value for the same pair; rejects a write whose `first_observed_at` differs from an
-      already-set previous value; accepts a write that only increases `cumulative_filled_qty` or
-      that leaves `first_observed_at` unchanged.
-- [ ] 5.5 Replay: a valid, monotonically-consistent sequence of lines for one pair replays
-      successfully and reconstructs the final `early_execution_observation` (including
-      `first_observed_at`) correctly. A sequence containing a regression (decreasing
-      `cumulative_filled_qty`, or a changed `first_observed_at`) fails replay closed with a
-      descriptive reason.
-- [ ] 5.6 Backward-compatibility replay: a line whose `early_execution_observation` predates this
-      change (no `first_observed_at` key at all) replays successfully with `first_observed_at`
-      read as `null`; a line with no `early_execution_observation` at all (pre-fill or never-bound
-      record) is unaffected.
-- [ ] 5.7 `isFillFactFinal`: `null` observation → false; observation with a live `order_status`
+- [ ] 4.1 Partial-then-full-fill sequence for one binding (repeat-PUT revalidation observing the
+      same order twice): `cumulative_filled_qty` increases across the two observations;
+      `avg_execution_price` may change either direction; `isFillFactFinal` is false after the
+      partial observation and true after the full-fill observation.
+- [ ] 4.2 `save()` rejects a write whose `cumulative_filled_qty` is less than the previously-indexed
+      value for the same pair; accepts a write that only increases or holds it steady, regardless of
+      how `avg_execution_price` moves.
+- [ ] 4.3 Replay: a valid, monotonically-consistent sequence of lines for one pair replays
+      successfully. A sequence containing a `cumulative_filled_qty` regression fails replay closed
+      with a descriptive reason.
+- [ ] 4.4 `isFillFactFinal`: `null` observation → false; observation with a live `order_status`
       (e.g. `PartiallyFilled`, `New`) → false; observation with a terminal `order_status` (`Filled`,
       `Cancelled`, `Rejected`, `Deactivated`) → true.
-- [ ] 5.8 `findActiveRecordsForScope`: seeded directly at the repository level (bypassing
+- [ ] 4.5 `findActiveRecordsForScope`: seeded directly at the repository level (bypassing
       `EntryPackageApplicationService`), two same-side, non-durably-closed records for the same
       scope under two different pairs are both returned; a durably-closed record for that scope is
       excluded; an empty/no-match scope returns an empty array. This proves the repository layer's
       capability without exercising or relying on any production claim-policy change.
-- [ ] 5.9 Full regression: existing `entryPackageCorrelationRepository.test.ts`,
+- [ ] 4.6 Full regression: existing `entryPackageCorrelationRepository.test.ts`,
       `entryPackageApplicationService.test.ts`, `closeApplicationService.test.ts`,
       `protectionApplicationService.test.ts`, `openPositionResolutionService.test.ts`, and
       `entryCycleRecoveryResolutionService.test.ts` all pass unchanged — none of them read the new
-      field, the new predicates, or the new query method.
+      predicate or the new query method, and no write path's output changes shape.
 
-## 6. Verification
+## 5. Verification
 
-- [ ] 6.1 Run `npm test`, `npm run typecheck`, `npm run build`.
-- [ ] 6.2 Review the diff to confirm: no public HTTP DTO, route, or error-code change; no new
-      top-level field on `EntryPackageExecutionRecord`; `byScope`/`findOwnerByScope`/
-      `applyScopeClaimOnWrite`/`rebuildScopeIndexFromReplay`/`EntryPackageApplicationService`'s claim
-      logic are byte-for-byte unmodified; `CloseApplicationService`, `OpenPositionResolutionService`,
-      `ProtectionApplicationService`, and `EntryCycleRecoveryResolutionService` are untouched.
+- [ ] 5.1 Run `npm test`, `npm run typecheck`, `npm run build`.
+- [ ] 5.2 Review the diff to confirm: zero fields added to `EntryPackageExecutionRecord` or
+      `EarlyExecutionObservation`; no public HTTP DTO, route, or error-code change;
+      `byScope`/`findOwnerByScope`/`applyScopeClaimOnWrite`/`rebuildScopeIndexFromReplay`/
+      `EntryPackageApplicationService`'s claim logic are byte-for-byte unmodified;
+      `CloseApplicationService`, `OpenPositionResolutionService`, `ProtectionApplicationService`, and
+      `EntryCycleRecoveryResolutionService` are untouched; no Runtime- or MDS-facing code is touched.
 
 ## Deferred follow-up (not this change's scope)
 
 Belongs to a later change in `docs/virtual-exposure-ownership-delivery-plan.md`, listed here only so
 it is not mistaken for done:
 
-- A real, independently-decrementable "owned remaining quantity" field, and the close-time logic that
-  decrements it — `abi-pair-scoped-close-execution-v1` (design.md Decision 4).
+- The quantity-ownership boundary's actual mechanism: a relative-intent close request contract,
+  ABI's resolution of it into an absolute Bybit quantity, and (recommended, for V1) restricting that
+  first version to full close only (fraction = 1) — `abi-pair-scoped-close-execution-v1`
+  (design.md Decision 3).
+- A real, independently-decrementable "owned remaining quantity" field, if and when a genuine
+  partial-close lifecycle is ever designed — not before, and not this change (design.md Decision 3).
+- Investigating what own-order/execution evidence is sufficient for correct entry-strategy-bar
+  identity for Engine — `abi-pair-scoped-open-position-resolution-v1` (design.md Decision 0). Not
+  `first_fill_at_ms`/`first_observed_at` durably recorded by this change; that field was considered
+  and removed from this change's scope.
 - Any consumer (`open-position-resolution`, `close-execution`, `entry-cycle-recovery-resolution`,
   `protection-execution`) actually reading `cumulative_filled_qty` / `avg_execution_price` /
-  `first_observed_at` / `isFillFactFinal` — the next three changes in the delivery plan, and beyond.
+  `isFillFactFinal`.
 - Evolving `byScope` toward a multi-owner-capable shape, and any relaxation of
   `EntryPackageApplicationService`'s single-owner claim policy — the delivery plan's activation
-  change (design.md Decision 6).
+  change (design.md Decision 5).
 - Any change to `position-scope-exclusivity`'s documented behavior.
 - Pair-owned protection orders, conditional stop/take orders, or any protection-execution change.
+- Any ABI → Runtime fill push/callback, or Runtime holding/echoing an absolute quantity.
 
 Reviewed and decided against for this change (not open, listed for traceability — design.md
-Decisions 1, 3, 4, 5, 6):
+Decisions 0, 1, 2, 3, 5):
 
-- Five new parallel top-level fields on `EntryPackageExecutionRecord`. Resolved: extend the existing
-  `EarlyExecutionObservation` instead.
+- A new `first_observed_at` field and a `mergeExposureObservation` helper. Resolved: removed
+  entirely — ABI's own observation timing is not a valid proxy for entry-bar identity, and no other
+  consumer needs it; recording it would have shipped a value fit for no actual purpose.
 - A new stored `physical_side` field. Resolved: derive from `desired_entry.side`, proven safe by the
   verified nulling invariant.
-- A new stored "owned remaining quantity" field now. Resolved: specify the contract; store it only
-  when Change 2 first needs a value that can diverge from `cumulative_filled_qty`.
+- A new stored "owned remaining quantity" field now. Resolved: specify the contract only; the field
+  itself waits for a genuine partial-close need, which may never arrive if V1 close stays full-close
+  only.
 - A new durable terminality/finality flag. Resolved: derive from the already-durable `order_status`
   via `isFillFactFinal`.
 - Evolving `byScope`'s shape in this change. Resolved: defer to the activation change; prove

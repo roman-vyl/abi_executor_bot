@@ -21,10 +21,7 @@
 > `src/services/entryPackage/entryPackageApplicationService.ts:605-611` заводит исходы `partial_fill` и
 > `full_fill` в один и тот же `status: "applied"`, никак их не различая. То есть к моменту `applied`
 > ABI не гарантированно видит финальное количество исполнения — это подтверждённый, а не гипотетический
-> риск. Поле разбито на `first_fill_at_ms` (immutable), `cumulative_filled_quantity`/
-> `average_entry_price` (обновляются вместе, монотонно, до терминализации entry-ордера этого cycle) и
-> `remaining_quantity` (авторитетно для close только после верификации терминальности собственного
-> entry-ордера).
+> риск.
 > (2) **Небезопасная activation-граница Change 7/8.** В v2 Change 7 уже снимал shared-scope guard,
 > оставляя okно, где protection-ордера закрытого cycle могли повиснуть на бирже до Change 8. Граница
 > сдвинута: Change 7 строит и тестирует полный lifecycle pair-owned protection-ордеров, но **не снимает**
@@ -33,6 +30,31 @@
 > Активация protection теперь целиком происходит в одном change, как и активация базового ownership в
 > Change 5 — ни один applied change в программе больше не оставляет систему в небезопасном промежуточном
 > production-состоянии.
+
+> **Ревизия v4 по итогам третьего review (после OpenSpec-proposal для Change 1).** Три
+> архитектурных уточнения, применённые пока только к Change 1/2/3 ниже (Changes 4–8 всё ещё написаны
+> по модели v3 и требуют отдельного согласующего прохода — см. примечание в конце Change 3):
+> (1) **Absolute quantity — приватное состояние ABI.** Runtime не должен знать и не должен передавать
+> ABI абсолютное exchange quantity при управлении позицией. Целевая граница: Runtime выражает
+> относительное намерение (например, close 100% cycle) → ABI резолвит его в абсолютное количество из
+> собственного per-cycle state → ABI материализует Bybit-ордер. Change 1 только формулирует эту
+> границу как архитектурное решение; сам механизм (close-контракт, резолюция quantity) — работа
+> Change 2, не Change 1.
+> (2) **Никакого mutable `remaining_quantity` раньше необходимости.** Расследование показало, что
+> большая часть foundation уже существует в `EarlyExecutionObservation`
+> (`cumulative_filled_qty`/`avg_execution_price`/`order_status`, уже sourced из own entry order).
+> Пока V1 close поддерживает только полный close (canonical fraction = 1), отдельное mutable поле
+> "сколько ещё осталось" не нужно: до close owned exposure = финальный `cumulative_filled_qty`, после
+> успешного полного close cycle terminally closed ⇒ owned exposure = 0 без отдельного поля. Change 1
+> больше не создаёт `remaining_quantity`/`owned_remaining_quantity`; Change 2 введёт такое поле, только
+> если для него появится настоящая необходимость (partial close).
+> (3) **`first_fill_at_ms` — не часть virtual-exposure accounting.** Его единственная роль — Runtime
+> передаёт его Strategy Engine для определения entry-strategy-bar. Он не нужен ни для ownership
+> quantity, ни для close, ни для protection. Change 1 больше не вводит `first_observed_at`/
+> `first_fill_at_ms`: ABI-шное время первого наблюдения фиксирует момент, когда ABI **заметило** fill,
+> а не момент самого fill, и может отстать от границы следующей strategy bar — использование его как
+> entry-bar proxy было бы тихо неверным. Вопрос "какого own-order/execution evidence достаточно для
+> корректной entry-bar identity" явно передан в Change 3.
 
 ## Контекст
 
@@ -115,44 +137,54 @@ change (`2026-08-07-abi-position-scope-exclusivity-v1`, `...-close-execution-v1`
 
 ### Архитектурное решение: где живёт virtual exposure state
 
-**Не заводим новый durable store.** Расширяем `EntryPackageExecutionRecord` набором additive-полей,
-образующих единую сущность **per-cycle virtual exposure fact** (не "ownership" — владение scope это
-производное понятие, см. ниже). С учётом находки №8 выше, поля разделены по признаку
-immutable/monotonic/gated, а не свалены в одно "заполняется один раз при confirmation":
+**Не заводим новый durable store — и не заводим новых полей вообще, пока в них нет доказанной
+необходимости.** Расследование для Change 1 (см. его OpenSpec `design.md`) показало: то, что
+изначально казалось необходимым набором из пяти новых additive-полей, почти целиком уже существует в
+`EntryPackageExecutionRecord.early_execution_observation` — `cumulative_filled_qty`,
+`avg_execution_price`, `order_status`, уже sourced исключительно из **собственного entry-ордера**
+этого cycle (`item.cumExecQty`/`item.avgPrice`/`item.orderStatus`, `packageConfirmation.ts:366-385`),
+уже обновляемые в каждой легитимной точке наблюдения (initial confirmation, repeat-PUT revalidation,
+cancel discovering a fill), уже никогда не регрессирующие на практике (только не проверено формально
+— это и закрывает Change 1). Change 1 **формализует и усиливает уже существующие own-order fill
+facts**, не копирует master-plan sketch механически:
 
-- `physical_side: "long" | "short" | null` — сторона этого cycle, из `desired_entry.side`.
-- `first_fill_at_ms: number | null` — **immutable**, устанавливается один раз в момент **первого**
-  наблюдаемого исполнения (полного или частичного) собственного ордера этого cycle. Момент первого fill
-  не меняется задним числом независимо от того, что происходит с ордером дальше.
-- `cumulative_filled_quantity: string | null`, `average_entry_price: string | null` — **монотонные,
-  обновляются вместе, до терминализации entry-ордера этого cycle**. Источник — собственный ордер cycle
-  (`item.cumExecQty`/`item.avgPrice` из того же ответа, что уже читает `packageConfirmation.ts:134,
-  380-381`), не агрегированная Bybit-позиция. `cumulative_filled_quantity` обязана быть монотонно
-  неубывающей; `average_entry_price` отражает последнее наблюдение Bybit для текущего cumulative fill.
-  Обновляются в **каждой** точке, где ABI легитимно наблюдает состояние entry-ордера этого cycle:
-  начальная confirmation, повторная revalidation при repeat-PUT, попытка cancel/neutralize, и — при
-  необходимости — целевой refresh-запрос со стороны close/open-position/protection, если entry-ордер ещё
-  не подтверждён терминальным (см. риск §6 о том, хранить ли явный terminal-флаг или каждый раз
-  переспрашивать `classifyEntryOrderTerminality`-подобной проверкой).
-- `remaining_quantity: string | null` — **mutable**, инициализируется из `cumulative_filled_quantity`, но
-  становится **авторитетным** источником для close/protection-sizing только после того, как entry-ордер
-  этого cycle подтверждён терминальным (`Filled`, либо terminal-without-fill статус — переиспользуется
-  существующая `isTerminalOrderStatus`/`classifyEntryOrderTerminality` логика, а не изобретается новая).
-  Пока entry-ордер этого cycle ещё живой (в т.ч. `PartiallyFilled`), любой потребитель обязан сначала
-  добиться терминальности (close уже сегодня cancel'ит entry-ордер перед закрытием — паттерн переносится
-  на per-cycle случай без изменений) либо явно освежить наблюдение, а не доверять устаревшему значению.
-  Уменьшается **только** через durable close этого cycle — ровно один раз, до `0` (partial-close своей
-  доли в эту программу не входит).
-
-Эти поля **и есть** virtual exposure state — не вспомогательная деталь claim-логики. `byScope`
-эволюционирует из `Map<scope, record>` в `Map<scope, {side, owners: Map<pairKey, VirtualExposure>}>`, где
-`VirtualExposure` — тип, живущий **на записи** (its identity IS the correlation record), а не отдельная
-сущность рядом с ней. "Ownership" scope (Change 5) — это производное понятие поверх множества активных
-`VirtualExposure` одной стороны, не параллельная модель данных.
+- **Own-order sourcing** (уже верно сегодня, Change 1 не меняет источник, только фиксирует
+  invariant): `cumulative_filled_qty`/`avg_execution_price`/`order_status` происходят только из
+  собственного entry-ордера `(strategy_instance_id, trade_cycle_id)`, никогда из агрегированной
+  Bybit-позиции.
+- **Finality** — не отдельное durable поле, а производный факт из уже durable `order_status`:
+  `PartiallyFilled` — live, `cumulative_filled_qty` в этот момент снимок, не финал; `Filled` (или
+  terminal-without-fill) — final, значения можно доверять без переспроса. Переиспользуется
+  существующая terminality-классификация (`isTerminalOrderStatus`), не вводится redundant boolean.
+- **Monotonicity**: для одной binding/generation `cumulative_filled_qty` может только расти или
+  оставаться тем же — регрессия fail closed и на live save, и на replay. `average_entry_price` может
+  меняться в любую сторону при новом legitimate fill observation, не обязана быть монотонной.
+- **Side**: не отдельное поле — `record.desired_entry.side`, безопасно читаемое, т.к. verified
+  invariant гарантирует, что `desired_entry` не обнуляется, пока существует хоть какой-то fill.
+- **`first_fill_at_ms`/`first_observed_at` — явно НЕ вводится в Change 1** (см. ревизию v4 выше):
+  единственный потребитель этого факта — entry-bar identity для Strategy Engine через Runtime, а
+  ABI-шное время наблюдения не является надёжным proxy для него. Этот вопрос — предмет Change 3.
+- **Quantity ownership boundary** (новое явное архитектурное решение, а не реализация): per-cycle
+  absolute fill/exposure quantity — приватное execution state ABI. Будущие Runtime-команды управления
+  позицией выражают относительное намерение для идентифицированного trade cycle; ABI резолвит это
+  намерение в абсолютное exchange quantity из собственного authoritative per-cycle state. Change 1
+  не меняет Runtime, не меняет HTTP-контракты, не реализует close_fraction — конкретный close-контракт
+  проектируется в Change 2.
+- **Никакого mutable `remaining_quantity`/`owned_remaining_quantity` в Change 1**: пока V1 close
+  поддерживает только полный close (canonical fraction = 1, см. Change 2), у cycle ровно два
+  состояния — открыт (owned exposure = финальный `cumulative_filled_qty`) или terminally closed
+  (owned exposure = 0, это уже подразумевает `status`, отдельное поле не нужно). Не путать с уже
+  существующим `EarlyExecutionObservation.remaining_qty`, который означает неисполненный остаток
+  **входного** ордера, а не остаток открытой позиции.
+- **Repository preparation**: допустим минимальный additive query, позволяющий synthetic-тестам
+  перечислить несколько active records одного physical scope — но `byScope`-семантика владения не
+  меняется, production exclusivity не снимается, `EntryPackageApplicationService` по-прежнему не
+  создаёт multi-owner state. Это подготовка потребителей Changes 2–5, не активация.
 
 Это прямое продолжение уже сформулированного в спеке принципа "scope ownership derived from existing
-durable correlation state, not a new store" (position-scope-exclusivity spec L35-46). Отдельный "ledger"
-как самостоятельный источник истины не нужен и добавил бы второй source of truth без выгоды.
+durable correlation state, not a new store" (position-scope-exclusivity spec L35-46), доведённое до
+логического предела: не только "не заводить новый store", но и "не заводить новых полей там, где
+существующие уже корректны".
 
 ### Архитектурное решение: protection
 
@@ -202,11 +234,13 @@ protection: lifecycle строится и тестируется в Change 7 pro
 - Physical scope (`account+category+symbol+positionIdx=0`) может иметь несколько активных owners
   (`strategy_instance_id, trade_cycle_id`), но только **одной стороны** одновременно: long+long и
   short+short разрешены, long+short — запрещён, пока жива хоть одна exposure противоположной стороны.
-- Virtual exposure state — шесть additive-полей на существующем `EntryPackageExecutionRecord`
-  (`physical_side`, `first_fill_at_ms`, `cumulative_filled_quantity`, `average_entry_price`,
-  `remaining_quantity`) + производный многовладельческий scope-индекс. Никакого нового durable store.
-  `cumulative_filled_quantity`/`average_entry_price` монотонны и обновляются до терминализации
-  собственного entry-ордера cycle — не одноразовый immutable факт (см. находку №8).
+- Virtual exposure state — **ноль новых полей** в Change 1: формализация уже существующего
+  `EarlyExecutionObservation` (`cumulative_filled_qty`/`avg_execution_price`/`order_status`, уже
+  sourced из own entry order) плюс monotonicity-инварианты и производная finality. `physical_side`
+  читается из `desired_entry.side`, не хранится отдельно. `first_fill_at_ms` не вводится — это не
+  часть virtual-exposure accounting, его роль (entry-bar identity для Engine) решает Change 3.
+  Mutable `remaining_quantity` не вводится, пока V1 close остаётся full-close-only (см. Change 2).
+  Никакого нового durable store.
 - `open-position` для конкретного cycle отвечает исходя из **собственных** `average_entry_price`/
   `first_fill_at_ms` этого cycle (из данных его собственного ордера), а не из агрегированной
   Bybit-позиции — агрегированный live-запрос остаётся только как sanity-проверка существования/стороны.
@@ -256,107 +290,118 @@ Changes 2, 3, 4 формально зависят только от Change 1 и 
 
 ### Change 1 — `abi-virtual-exposure-state-foundation-v1`
 
-**Цель.** Дать данным способность представлять нескольких owners одного physical scope одной стороны —
-через полноценную per-cycle virtual exposure fact, корректно учитывающую partial-fill semantics
-(находка №8), а не через одно перегруженное "immutable once" поле — не меняя ничьё наблюдаемое поведение.
+> Статус: OpenSpec-предложение (proposal/design/tasks/spec delta) уже создано в
+> `openspec/changes/abi-virtual-exposure-state-foundation-v1/` и синхронизировано с этим разделом.
+> Ещё не применено.
 
-**Что меняется.**
-- `EntryPackageExecutionRecord` (`src/correlation/entryPackageExecutionRecord.ts`): пять новых
-  additive-полей:
-  - `physical_side: "long" | "short" | null` — заполняется при первом бинде, из `desired_entry.side`.
-  - `first_fill_at_ms: number | null` — immutable, устанавливается один раз в момент **первого**
-    наблюдаемого исполнения (полного или частичного) собственного ордера этого cycle.
-  - `cumulative_filled_quantity: string | null`, `average_entry_price: string | null` — обновляются
-    вместе, монотонно (`cumulative_filled_quantity` только неубывает), из данных собственного ордера
-    этого cycle (`item.cumExecQty`/`item.avgPrice` — те же поля, которые уже читает
-    `packageConfirmation.ts:134,380-381`), в каждой точке легитимного наблюдения состояния этого ордера
-    (начальная confirmation, repeat-PUT revalidation, cancel/neutralize, целевой refresh от
-    close/open-position/protection). Обновление разрешено **только пока entry-ордер этого cycle не
-    подтверждён терминальным** — после терминализации значения фиксируются.
-  - `remaining_quantity: string | null` — mutable, инициализируется из `cumulative_filled_quantity`,
-    авторитетно для close/protection-sizing только после верификации терминальности собственного
-    entry-ордера (переиспользуется `classifyEntryOrderTerminality`-подобная логика, не изобретается
-    новая). Уменьшается только при durable close этого cycle (переход ровно в `0`, partial-close своей
-    доли не вводится).
-- `EntryPackageCorrelationRepository`: `byScope` эволюционирует из `Map<scopeKey, record>` в
-  `Map<scopeKey, { side; owners: Map<pairKey, VirtualExposure> }>`, где `VirtualExposure` — проекция
-  вышеуказанных полей записи (не отдельно хранимая сущность). `applyScopeClaimOnWrite` и
-  `rebuildScopeIndexFromReplay` (`entryPackageCorrelationRepository.ts:179-257`) переписываются под
-  новую форму, но вызывающий код (claim-check в entry-package) продолжает получать поведенчески то же
-  самое — "один активный owner на scope" (политика не меняется, меняется только представление).
-  Существующий `findOwnerByScope()` сохраняется как совместимая обёртка; добавляется новый
-  `findOwnersByScope()` для будущих потребителей.
-- Новый тип `src/domain/virtualExposure.ts` — `VirtualExposure` (side + first_fill_at_ms +
-  cumulative_filled_quantity + average_entry_price + remaining_quantity), явно документированный как
-  "identity — сама correlation-запись, не отдельная сущность", с явным комментарием про
-  live/terminal-гейтинг обновлений.
-- **Design-решение, обязательное к закрытию в рамках этого change** (см. риск §6.1): персистить явный
-  `entry_order_terminal`-флаг на записи, синхронизированный с каждым наблюдением, или всегда
-  переспрашивать терминальность on-demand через существующую `classifyEntryOrderTerminality`. Второе
-  предпочтительнее (не плодит ещё одно поле, которое надо держать консистентным, соответствует
-  существующей философии "no stale trust, revalidate against live exchange state"), но решение
-  фиксируется в design-фазе этого change, не в этом плане.
+**Цель.** Формализовать и усилить уже существующие per-cycle own-order fill facts
+(`EarlyExecutionObservation`), чтобы следующие changes могли безопасно использовать их для virtual
+exposure attribution — не меняя ничьё наблюдаемое поведение и **не копируя механически** исходный
+master-plan sketch из пяти новых parallel-полей.
 
-**Какие инварианты отменяются.** Ни один поведенческий инвариант не отменяется — только внутреннее
-представление данных (`byScope` меняет форму с "один владелец" на "структура, способная хранить многих").
+**Что меняется.** Расследование показало: `cumulative_filled_qty`/`avg_execution_price`/
+`order_status` уже существуют на `EntryPackageExecutionRecord.early_execution_observation`
+(`entryPackageExecutionRecord.ts:53-59`), уже sourced исключительно из собственного entry-ордера
+cycle (`packageConfirmation.ts:366-385`), уже обновляются на всех нужных наблюдениях. Change 1 **не
+добавляет новых полей** ни в `EntryPackageExecutionRecord`, ни в `EarlyExecutionObservation`. Вместо
+этого:
+- Новый чистый предикат `isFillFactFinal(observation)` в `packageConfirmation.ts`, производный от уже
+  durable `order_status` (переиспользует существующий `isTerminalOrderStatus`) — не отдельный
+  durable finality-флаг.
+- Новая валидация monotonicity в `EntryPackageCorrelationRepository.save()` и `replay()`:
+  `cumulative_filled_qty` не может уменьшаться для одной и той же пары — fail closed и на live-write,
+  и при replay. `avg_execution_price` не обязана быть монотонной.
+- `physical_side` и "owned exposure quantity" специфицированы как **читаемые контракты**, не новые
+  поля: side — из `record.desired_entry.side` (безопасно, т.к. verified invariant гарантирует, что
+  desired_entry не обнуляется, пока существует fill); owned exposure — `cumulative_filled_qty` после
+  `isFillFactFinal`, ровно из-за **quantity ownership boundary** решения (см. ниже) и full-close-only
+  V1 (Change 2) — mutable `remaining_quantity`/`owned_remaining_quantity` НЕ вводится в этом change.
+- `first_fill_at_ms`/`first_observed_at` НЕ вводится — не часть virtual-exposure accounting (см.
+  ревизию v4). Его единственная роль (entry-bar identity для Engine) — предмет Change 3.
+- Новый additive, непроиндексированный repository-метод `findActiveRecordsForScope(category,
+  symbol)` — линейный скан по уже существующему `byCompositeKey`, доказывает, что repository способен
+  представить несколько active records одного scope, **не трогая** `byScope`/`findOwnerByScope`/
+  `applyScopeClaimOnWrite`/`rebuildScopeIndexFromReplay` вообще. Эволюция самого `byScope` в
+  multi-owner-способную форму сознательно отложена до Change 5 (активации) — у Changes 2–4 нет
+  потребителя для неё.
+- **Quantity ownership boundary** — новое явное архитектурное решение design.md: per-cycle absolute
+  fill/exposure quantity — приватное execution state ABI; будущие Runtime-команды выражают
+  относительное намерение; ABI резолвит его в абсолютный exchange quantity. Change 1 формулирует эту
+  границу, но не реализует её: не меняет Runtime, не меняет HTTP-контракты, не проектирует
+  close-контракт (это Change 2).
+
+**Какие инварианты отменяются.** Ни один — ни поведенческий, ни на уровне представления данных.
+`byScope` не трогается вообще.
 
 **Новые инварианты.**
-- `first_fill_at_ms` immutable после установки — попытка повторной записи другим значением является
-  программной ошибкой.
-- `cumulative_filled_quantity` монотонно неубывает, `average_entry_price` обновляется синхронно с ним —
-  оба фиксируются (перестают обновляться) как только entry-ордер этого cycle верифицирован терминальным.
-- `remaining_quantity` авторитетно для потребителей только после верификации терминальности; меняется
-  ровно один раз за жизнь записи (инициализация → `0`), только через durable close.
-- Производный индекс восстанавливается из replay детерминированно для N совладельцев одной стороны
-  (расширение существующей "two-phase replay, judged on final state only").
-- Смешанная сторона в финальном replay-состоянии одного scope — по-прежнему hard-fail readiness (это
-  генуинный сигнал повреждения данных).
+- `cumulative_filled_qty` монотонно неубывает для одной binding/generation — регрессия fail closed и
+  на live save, и при replay.
+- Finality — производный факт от `order_status` (`isFillFactFinal`), не отдельное durable состояние.
+- Repository может представить и перечислить несколько active non-durably-closed records одного
+  scope (через новый query), не меняя production claim-политику.
 
-**Затрагиваемые слои.** `src/correlation/entryPackageExecutionRecord.ts`,
-`src/correlation/entryPackageCorrelationRepository.ts`, `src/domain/virtualExposure.ts` (новый),
-`src/services/entryPackage/packageConfirmation.ts` (источник обновления полей — уже содержит нужные
-данные в `cumExecQty`/`avgPrice`, но пишущая сторона в correlation record требует расширения точек
-записи). Не затрагивает `services/close`, `services/openPosition`, `services/protection` (claim-логика
-не меняется — расширяется только позже), кроме появления refresh-путей, которыми они смогут
-воспользоваться начиная с Change 2/3.
+**Затрагиваемые слои.** `src/services/entryPackage/packageConfirmation.ts` (новый предикат, без
+изменения формы `EarlyExecutionObservation`), `src/correlation/entryPackageCorrelationRepository.ts`
+(новая валидация в `save()`/`replay()`, новый additive query). Не затрагивает
+`entryPackageExecutionRecord.ts`'s type shape, `services/close`, `services/openPosition`,
+`services/protection`, `services/entryCycleRecovery`, HTTP routes/DTO, Runtime, MDS.
 
 **HTTP-контракты.** Не меняются.
 
 **Обязательные тесты.**
-- Replay восстанавливает multi-owner структуру из **синтетически подготовленных** (сидированных
-  напрямую в JSONL/через тестовый API репозитория) записей с одной стороной — до Change 5 production-код
-  никогда сам такую ситуацию не создаст, поэтому тест обязан строить её напрямую.
-- `first_fill_at_ms` действительно immutable — попытка второй записи другим значением фейлится/не
-  допускается на уровне репозитория.
-- `cumulative_filled_quantity` монотонность: попытка записать меньшее значение отклоняется; запись
-  большего значения до терминализации проходит; запись после терминализации отклоняется/игнорируется.
-- **Партиал-филл сценарий явно тестируется**: первое наблюдение — partial fill (`cumulative_filled_quantity=3`
-  из желаемых 5, entry-ордер ещё `live`); второе наблюдение (например, при repeat-PUT revalidation) —
-  тот же ордер теперь `Filled`, `cumulative_filled_quantity=5`; `remaining_quantity` не считается
-  авторитетным между этими двумя наблюдениями, становится авторитетным только после второго.
-- `remaining_quantity` инициализируется из `cumulative_filled_quantity` и переходит в `0` только через
-  явный close-путь (тестируется на уровне репозитория напрямую, до появления Change 2).
-- Backward-compat: replay старых записей без новых полей (default/derive без падения).
-- Все существующие тесты `entryPackageCorrelationRepository.test.ts` проходят без изменений
-  наблюдаемого поведения.
-- Mixed-side replay всё ещё fail-closed.
+- Partial-then-full-fill sequence для одной binding: `cumulative_filled_qty` растёт между двумя
+  наблюдениями (repeat-PUT revalidation); `avg_execution_price` может измениться в любую сторону;
+  `isFillFactFinal` — false после partial, true после full.
+- `save()` отклоняет запись с меньшим `cumulative_filled_qty`, чем уже проиндексировано для той же
+  пары; принимает запись, где количество не уменьшилось.
+- Replay: монотонно-согласованная последовательность реплеится успешно; последовательность с
+  регрессией — fail closed с описательной причиной.
+- `isFillFactFinal`: `null` → false; live `order_status` → false; terminal `order_status` → true.
+- `findActiveRecordsForScope`: синтетически сидированные (напрямую в repository, минуя
+  `EntryPackageApplicationService`) два same-side active record одного scope оба возвращаются;
+  durably-closed record исключается.
+- Полная регрессия существующих тестов (`entryPackageCorrelationRepository.test.ts`,
+  `entryPackageApplicationService.test.ts`, `closeApplicationService.test.ts`,
+  `protectionApplicationService.test.ts`, `openPositionResolutionService.test.ts`,
+  `entryCycleRecoveryResolutionService.test.ts`) — без изменений.
 
 **Зависит от.** Ничего (первый шаг).
 
-**Состояние после.** Данные готовы представлять multi-owner через полноценную per-cycle exposure fact,
-корректно учитывающую живой partial-fill; поведение системы идентично сегодняшнему;
+**Состояние после.** Own-order fill facts (`cumulative_filled_qty`/`avg_execution_price`/
+`order_status`) формально усилены monotonicity-инвариантом и производной finality; quantity ownership
+boundary зафиксирована как решение; repository доказанно способен представить multi-owner state на
+synthetic-фикстурах. Production-поведение системы идентично сегодняшнему;
 `position-scope-exclusivity` продолжает управлять фактическим поведением без изменений.
 
-**Осознанно вне scope.** Любое изменение claim-политики, close, open-position, protection.
+**Осознанно вне scope.** `first_fill_at_ms`/entry-bar resolution для Engine; mutable
+`remaining_quantity`/partial close; close-контракт и close_fraction; любое изменение claim-политики,
+close, open-position, protection, recovery; ABI → Runtime fill push; Runtime/MDS changes; эволюция
+`byScope`.
 
 ---
 
 ### Change 2 — `abi-pair-scoped-close-execution-v1`
 
-**Цель.** Реализовать архитектурную идею №3 — close конкретного cycle через pair quantity, а не через
-закрытие всей физической позиции — заранее, безопасно, под ветвлением "если owner один — старое
+**Цель.** Реализовать архитектурную идею №3 и quantity ownership boundary из Change 1 — close
+конкретного cycle через pair quantity, материализуемую ABI из собственного per-cycle state, а не
+через закрытие всей физической позиции — заранее, безопасно, под ветвлением "если owner один — старое
 поведение", и корректно относительно partial-fill semantics (собственный entry-ордер cycle должен быть
-терминализирован прежде, чем `remaining_quantity` можно доверять).
+терминализирован прежде, чем его `cumulative_filled_qty` можно доверять как финальное).
+
+**High-level contract (уточнён после Change 1's quantity ownership boundary):**
+
+```
+Runtime sends relative close intent (this trade cycle, canonical fraction = 1 for V1)
+  → ABI resolves authoritative pair quantity from its own cumulative_filled_qty
+    (once isFillFactFinal for this cycle's own entry order)
+  → ABI materializes the absolute Bybit reduceOnly close qty
+```
+
+Runtime не передаёт и не получает абсолютное BTC-количество. **Для V1 рекомендуется разрешить только
+полный close (canonical fraction = 1)**, если не появится доказанная необходимость в partial-close
+lifecycle — произвольный partial close выносится в отдельное будущее расширение, а не проектируется
+здесь. Детальный wire DTO этого change (форма relative-intent контракта) **не проектируется на уровне
+master-plan** — это работа самого Change 2 на design-этапе.
 
 **Что меняется.** `CloseApplicationService` (`src/services/close/closeApplicationService.ts:153-179`):
 - Если у scope ровно один активный owner — поведение **не меняется**: reduceOnly qty = live aggregate
@@ -365,59 +410,66 @@ Changes 2, 3, 4 формально зависят только от Change 1 и 
 - Если owners > 1: сначала, как и сегодня для единственного owner, гарантируется терминальность
   **собственного** entry-ордера closing cycle (cancel + bounded confirm, тот же паттерн, что уже
   применяется сегодня к единственному owner — просто теперь явно per-cycle, а не подразумеваемо
-  per-scope); только после этого `remaining_quantity` этой записи считается финальным. reduceOnly
-  qty = `remaining_quantity`, **clamped** сверху живым остатком агрегированной позиции — но clamp
-  допустим **только** в пределах заранее определённого малого допуска на биржевое округление (например,
-  один `qtyStep`), не как универсальная защита. Любое расхождение между `remaining_quantity` и живым
-  остатком за пределами этого допуска — **fail closed** с явным кодом "требуется reconciliation", а не
-  молчаливый clamp: clamp "вниз" по своей сути мог бы срезать чужую (соседнего cycle) долю, если ledger
-  и биржа разошлись сильнее, чем на округление.
-- Release-семантика уточняется: при durable close этого cycle `remaining_quantity` этой записи
-  переводится в `0`, и запись убирается из `owners`-множества scope; сторона (`side`) scope очищается
-  лишь когда множество owners становится пустым (сегодняшнее "release = весь scope" остаётся верным при
-  единственном owner).
+  per-scope); только после этого `cumulative_filled_qty` этой записи (из `early_execution_observation`,
+  формализованного в Change 1) считается финальным и авторитетным. reduceOnly qty = это значение,
+  **clamped** сверху живым остатком агрегированной позиции — но clamp допустим **только** в пределах
+  заранее определённого малого допуска на биржевое округление (например, один `qtyStep`), не как
+  универсальная защита. Любое расхождение за пределами этого допуска — **fail closed** с явным кодом
+  "требуется reconciliation", а не молчаливый clamp: clamp "вниз" по своей сути мог бы срезать чужую
+  (соседнего cycle) долю, если ledger и биржа разошлись сильнее, чем на округление.
+- Release-семантика: при durable close этого cycle запись убирается из `owners`-множества scope
+  (структура `byScope`, если Change 5 к этому моменту её уже ввела — см. примечание о том, что Change
+  1 сознательно не трогает `byScope`); сторона (`side`) scope очищается лишь когда множество owners
+  становится пустым.
 
 **Какие инварианты отменяются/заменяются.** close-execution spec L110-124 ("close size сурсится
 исключительно из live aggregate query, никогда из ABI-recorded/calculated quantity") — заменяется на
-"при единственном owner — как раньше; при множественном — обязательно из ABI-recorded
-`remaining_quantity`, верифицированного терминальностью собственного entry-ордера, т.к. exchange
+"при единственном owner — как раньше; при множественном — обязательно из ABI-resolved
+`cumulative_filled_qty`, верифицированного терминальностью собственного entry-ордера, т.к. exchange
 физически не знает про доли между cycles". Это единственный настоящий разворот философии в этой
 программе; квалифицируется отдельно как риск (см. §6).
 
 **Новые инварианты.** "Close уменьшает физическую позицию ровно на долю closing cycle, оставляя чужие
-доли нетронутыми"; "release из owner-множества не подразумевает release всего scope, пока есть другие
-активные owners"; "close никогда не читает и не пишет `first_fill_at_ms`/`average_entry_price` — только
-`cumulative_filled_quantity` (косвенно, через терминализацию) и `remaining_quantity`"; "clamp против live
-aggregate допустим только в пределах явно определённого малого допуска, никогда как замена
-reconciliation".
+доли нетронутыми"; "Runtime никогда не передаёт и не получает абсолютное exchange quantity — только
+относительное намерение"; "release из owner-множества не подразумевает release всего scope, пока есть
+другие активные owners"; "clamp против live aggregate допустим только в пределах явно определённого
+малого допуска, никогда как замена reconciliation".
 
 **Затрагиваемые слои.** `src/services/close/closeApplicationService.ts`,
-`src/correlation/entryPackageCorrelationRepository.ts` (partial-release helper). Domain: возможно
-`src/domain/positionScope.ts` для новых типов.
+`src/correlation/entryPackageCorrelationRepository.ts` (partial-release helper; возможно первая
+реальная эволюция `byScope`, если она ещё не введена Change 5 — порядок между Change 2 и Change 5
+уточняется на design-этапе). Domain: возможно `src/domain/positionScope.ts` для новых типов.
 
-**HTTP-контракты.** `DELETE .../open-position` — форма (пустое тело, тот же response) не меняется.
-Требуется **только текстовая** правка prose в `abi-position-management-api` spec ("full remainder"
-уточняется как "remainder принадлежащий именно этому trade cycle").
+**HTTP-контракты.** `DELETE .../open-position` — форма (пустое тело, тот же response) не меняется для
+V1 full-close-only. Если V1 остаётся full-close-only, relative-intent для close не требует нового поля
+в запросе вообще ("close 100% этого cycle" уже полностью выражено самим DELETE-запросом на конкретный
+trade cycle) — точное решение фиксируется в design-фазе Change 2. Требуется **только текстовая** правка
+prose в `abi-position-management-api` spec ("full remainder" уточняется как "remainder принадлежащий
+именно этому trade cycle").
 
 **Обязательные тесты.**
 - Single-owner: полностью регрессионные — поведение байт-в-байт как сегодня.
 - Multi-owner (синтетические фикстуры, как в Change 1): close cycle A не отправляет reduceOnly qty
-  больше `remaining_quantity`; cycle B остаётся `applied`/live и его владение scope сохраняется.
+  больше своего `cumulative_filled_qty`; cycle B остаётся `applied`/live и его владение scope
+  сохраняется.
 - Close cycle с entry-ордером, всё ещё `PartiallyFilled` на момент запроса close: close сначала
-  терминализирует entry-ордер (cancel+confirm), только потом фиксирует `remaining_quantity` и закрывает
-  ровно эту величину.
-- Clamp-логика: расхождение `remaining_quantity` vs. live остаток в пределах допуска → используется
-  живой остаток; расхождение за пределами допуска → fail closed с конкретным кодом, никакого clamp.
-- `first_fill_at_ms`/`average_entry_price` этого cycle и соседних не изменяются в результате close.
+  терминализирует entry-ордер (cancel+confirm), только потом резолвит финальный `cumulative_filled_qty`
+  и закрывает ровно эту величину.
+- Clamp-логика: расхождение resolved quantity vs. live остаток в пределах допуска → используется живой
+  остаток; расхождение за пределами допуска → fail closed с конкретным кодом, никакого clamp.
+- `avg_execution_price` этого cycle и соседних не изменяются в результате close.
 - Existing `closeApplicationService.test.ts` регрессия — без изменений в assertions single-owner кейсов.
 
 **Зависит от.** Change 1.
 
-**Состояние после.** Close готов к multi-owner, но production не может создать multi-owner scope до
+**Состояние после.** Close готов к multi-owner и материализует quantity ownership boundary из Change 1
+(Runtime relative intent → ABI absolute quantity), но production не может создать multi-owner scope до
 Change 5 — поведение в проде идентично сегодняшнему.
 
-**Осознанно вне scope.** Отмена/cancel pair-owned protection-ордеров при close (это придёт в Change 8,
-когда такие ордера появятся).
+**Осознанно вне scope.** Произвольный partial close (V1 — full close only); mutable durable owned
+remainder (не нужен, пока close full-close-only); детальный wire DTO relative-intent контракта —
+решается внутри самого Change 2, не в master-plan; отмена/cancel pair-owned protection-ордеров при
+close (это придёт в Change 8, когда такие ордера появятся).
 
 ---
 
@@ -430,28 +482,41 @@ trade cycle, а не агрегированной физической пози�
 `average_entry_price` (`src/domain/openPositionApi.ts:4-14`) — никакой quantity/size-поле не
 добавляется.
 
+**Уточнение роли `first_fill_at_ms` (после ревизии v4).** Это поле нужно ровно для одной цели:
+Runtime передаёт его Strategy Engine по open-trade ветке, чтобы Engine определил стратегическую
+свечу, в которой началась сделка. Оно не нужно для ownership quantity, close, protection или virtual
+exposure accounting — это уже решено в Change 1 (там оно намеренно не вводится как ABI-internal
+durable факт). **Change 3 — единственное место в программе, которое должно исследовать и решить**,
+какое минимально достаточное own-order/execution evidence (не обязательно ABI-шное время первого
+наблюдения fill, которое может отставать от границы следующей strategy bar) даёт корректную entry-bar
+identity для этого wire-поля при multi-owner scope. Точность timestamp ради точности как
+самостоятельная цель не требуется — требование системного уровня — корректно идентифицировать
+entry strategy bar, не более и не менее.
+
 **Что меняется.** `OpenPositionResolutionService.determine()`
 (`src/services/openPosition/openPositionResolutionService.ts:101-140`):
-- `first_fill_at_ms` для ответа этого cycle сурсится из одноимённого immutable-поля записи.
-- `average_entry_price` сурсится из записи, если собственный entry-ордер cycle уже верифицирован
-  терминальным; если ещё нет (живой/partial), сервис выполняет **целевой refresh** — переспрашивает
-  собственный ордер этого cycle (переиспользуя существующий query/decode из
-  `packageConfirmation.ts`, не изобретая новый механизм) и отвечает актуальным cumulative avgPrice,
-  обновляя запись заодно. Это новая под-ответственность сервиса по сравнению с сегодняшним "всегда
-  один live query агрегированной позиции".
+- `first_fill_at_ms` для ответа этого cycle сурсится из own-order/execution evidence, которое Change 3
+  сам определит как минимально достаточное для entry-bar identity (см. выше) — не обязательно из
+  нового durable ABI-поля; Change 1 такого поля не вводит.
+- `average_entry_price` сурсится из `cumulative_filled_qty`/`avg_execution_price`
+  (`early_execution_observation`, формализованного Change 1), если собственный entry-ордер cycle уже
+  `isFillFactFinal`; если ещё нет (живой/partial), сервис выполняет **целевой refresh** — переспрашивает
+  собственный ордер этого cycle (переиспользуя существующий query/decode из `packageConfirmation.ts`,
+  не изобретая новый механизм) и отвечает актуальным cumulative avgPrice. Это новая
+  под-ответственность сервиса по сравнению с сегодняшним "всегда один live query агрегированной
+  позиции".
 - Live-запрос агрегированной позиции (`queryPositionForInstrument`) сохраняется, но переопределяется
   как **sanity-check существования и стороны** ("aggregate exists, side matches, size ≥
-  `remaining_quantity`/`cumulative_filled_quantity` этого cycle в пределах допуска"), а не как источник
-  истины по цене/времени входа. Quantity-поля используются здесь **только** для sanity-check, наружу в
-  ответе не попадают.
+  `cumulative_filled_qty` этого cycle в пределах допуска"), а не как источник истины по цене/времени
+  входа. Quantity-факты используются здесь **только** для sanity-check, наружу в ответе не попадают.
 
 **Какие инварианты отменяются/заменяются.**
 - open-position-resolution spec L166-177 (side-match — "plausibility check, не proof of attribution")
   — сохраняется как sanity-слой, но перестаёт быть единственной проверкой.
 - L193-199 ("avgPrice/first_fill sourced напрямую из live row, never estimated") — заменяется:
   при единственном owner источник фактически тот же (совпадает), при множественном — обязателен
-  собственный источник per-cycle (записанный/освежённый по правилам Change 1), т.к. агрегированная
-  Bybit-позиция физически не может отдать раздельные avgPrice на владельца.
+  собственный источник per-cycle, т.к. агрегированная Bybit-позиция физически не может отдать
+  раздельные avgPrice/first-fill на владельца.
 
 **Новые инварианты.** "Ответ open-position для cycle отражает `average_entry_price`/`first_fill_at_ms`
 именно этого cycle, независимо от того, сколько ещё активных cycles делят тот же physical scope, и
@@ -459,9 +524,9 @@ trade cycle, а не агрегированной физической пози�
 не подразумевает per-cycle quantity — это исключительно внутреннее понятие."
 
 **Затрагиваемые слои.** `src/services/openPosition/openPositionResolutionService.ts` (новая
-зависимость на query/decode-примитивы из `packageConfirmation.ts` для refresh-пути). Не трогает
-routes/DTO слой (`src/routes/openPositionRoutes.ts`, `src/domain/openPositionApi.ts`) — форма ответа
-идентична, поле quantity туда не добавляется.
+зависимость на query/decode-примитивы из `packageConfirmation.ts` для refresh-пути; возможно новая
+логика определения entry-bar evidence). Не трогает routes/DTO слой (`src/routes/openPositionRoutes.ts`,
+`src/domain/openPositionApi.ts`) — форма ответа идентична, поле quantity туда не добавляется.
 
 **HTTP-контракты.** `GET .../open-position` — схема ответа не меняется. Текстовая правка prose в
 `abi-open-position-lookup-api` (пояснение, что `average_entry_price`/`first_fill_at_ms` относятся к доле
@@ -478,6 +543,8 @@ routes/DTO слой (`src/routes/openPositionRoutes.ts`, `src/domain/openPositio
   случайного расширения публичного контракта).
 - Sanity-check срабатывает: если aggregate meaningfully не согласуется с суммой quantity-полей —
   fail closed (internal_error либо новый код), не тихая деградация.
+- Отдельный тест-набор на корректность entry-bar evidence при multi-owner scope (конкретная форма
+  определяется в design-фазе Change 3).
 
 **Зависит от.** Change 1.
 
@@ -488,6 +555,16 @@ routes/DTO слой (`src/routes/openPositionRoutes.ts`, `src/domain/openPositio
 добавляется ни в этом change, ни позже в рамках этой программы). Изменение error-таксономии
 `abi-open-position-lookup-api` сверх уже существующей (кроме, возможно, нового кода на явный
 drift-случай — решается как часть §6 рисков).
+
+---
+
+> **Примечание к ревизии v4.** Правки выше применены только к Change 1–3 по прямому запросу. Changes
+> 4–8 ниже всё ещё написаны в терминах v3 (`remaining_quantity` как mutable поле,
+> `first_fill_at_ms`/`physical_side` как поля Change 1, `VirtualExposure`-тип, ранняя эволюция
+> `byScope` внутри Change 1) и требуют отдельного согласующего прохода, прежде чем на них можно
+> опираться буквально. Архитектурные решения v4 (quantity ownership boundary, full-close-only V1,
+> отсутствие `first_fill_at_ms`/mutable remainder в Change 1) остаются в силе и для них — реализация
+> Changes 4–8 не должна опираться на поля, которые Change 1 больше не вводит.
 
 ---
 
