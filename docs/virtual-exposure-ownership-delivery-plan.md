@@ -195,6 +195,87 @@
 > отдельная будущая Runtime-side работа наряду с другими Runtime-изменениями этой программы, не
 > проектируется в этом master-plan.
 
+> **Ревизия v10 — согласующий проход для Change 4 (`abi-entry-cycle-recovery-attribution-v1`), Change 3
+> (`abi-pair-scoped-open-position-resolution-v1`) уже applied/архивирован.** Change 4 ниже (как и весь
+> раздел Changes 4–6, см. примечание к v4/v5 выше) всё ещё был написан в терминах v3 — до появления
+> durable `first_fill_at_ms` (v8/v9) и до фактической реализации Change 3. Эта ревизия приводит Change 4
+> в соответствие с тем, что Change 3 реально поставил, и закрывает ранее открытый design-вопрос: может
+> ли recovery переиспользовать Change 3's durable-capture механизм `first_fill_at_ms`, не нарушая
+> "Recovery resolution never causes an exchange side effect" (entry-cycle-recovery-resolution spec,
+> текущий последний Requirement)?
+>
+> **Ответ — да, переиспользует буквально, без второй реализации.** "No exchange side effect" в этом
+> Requirement всегда означал только "не отправляет create/amend/cancel ордера на биржу" (сам текст
+> Requirement это и говорит: "ABI SHALL NOT cancel, amend, or create any order"). Он не говорит и никогда
+> не говорил про read-only GET-запросы или про собственную durable-запись ABI — recovery уже сегодня
+> делает GET-запросы к ордеру и к позиции как часть своей обычной работы. Вызов Bybit
+> `/v5/execution/list` (тот же `resolveFirstAttributableFillAtMs`, что Change 3 уже реализовал и
+> экспортирует из `src/services/entryPackage/packageConfirmation.ts`) — тоже read-only GET, и
+> последующая durable-запись `first_fill_at_ms` в собственный correlation-record ABI — тоже не exchange
+> side effect. Никакого конфликта с этим Requirement нет; текст Requirement уточняется явной scenario,
+> чтобы это больше не читалось как открытый вопрос.
+>
+> **Финальная семантика Change 4** (заменяет весь текст Change 4 ниже, включая "Что меняется"/
+> "Обязательные тесты"/"Зависит от"):
+> 1. **`average_entry_price` для `position_open`** сурсится из **уже полученного** ответа собственного
+>    order-запроса cycle (`getOrderByLinkId`/`getOrderHistory`, `BybitOrderView.avgPrice` —
+>    `src/services/entryPackage/orderQueryResponseDecoder.ts:3-11`) — recovery этот запрос и так делает
+>    каждую попытку для классификации `OrderRecoverySignal`; значение сегодня просто отбрасывается после
+>    классификации. Правка — donести `avgPrice` через `live_with_fill`/`terminal_with_fill` варианты
+>    `OrderRecoverySignal` вместо отдельного запроса. Ни разу больше не сурсится из aggregate
+>    `row.avgPrice`.
+> 2. **`first_fill_at_ms` для `position_open`** переиспользует **тот же самый** durable-capture-once
+>    механизм, что `OpenPositionResolutionService.resolveLiveQueryAdmissible` уже реализует
+>    (`src/services/openPosition/openPositionResolutionService.ts:226-287`): если
+>    `record.first_fill_at_ms` уже durable — переиспользуется без exchange-запроса; если ещё нет —
+>    вызывается `resolveFirstAttributableFillAtMs` и результат durable сохраняется один раз, под тем же
+>    per-pair `KeyedMutex` (та же shared instance, что уже передаётся в
+>    `OpenPositionResolutionService`/`ProtectionApplicationService`/`CloseApplicationService` из
+>    `src/app/server.ts`), чтобы не гоняться с конкурентным `GET .../open-position` за один и тот же
+>    durable-write слот одной и той же пары. `EntryCycleRecoveryResolutionServiceDeps` получает новую
+>    зависимость `mutex: KeyedMutex`. Капча выполняется **только** внутри уже существующего bounded-retry
+>    цикла recovery, только когда own-order evidence уже положительно доказал fill — не спекулятивно.
+> 3. **Aggregate position query остаётся ровно тем, чем он уже является сегодня для `entry_order_live`/
+>    `terminal_without_fill`/`terminal_after_fill`** — dual-positive-confirmation правило для этих трёх
+>    состояний **не меняется** (это НЕ было architecturally сломано shared scope: own order query уже и
+>    так cycle-scoped через `orderLinkId`, единственная поломка была именно в extraction
+>    `firstFillAtMs`/`averageEntryPrice` из aggregate row для `position_open`). Меняется только
+>    **источник фактов** внутри уже resolved `position_open`, не сама dual-query решётка состояний.
+>    Формулировка "aggregate — weak sanity" в п.1 выше относится конкретно к тому, что aggregate больше
+>    никогда не является источником этих двух полей — не к отмене её роли в определении самого
+>    recovery_state.
+> 4. **Обязательные тесты (заменяют список в Change 4 ниже):**
+>    - Регрессия существующего `entryCycleRecoveryResolutionService.test.ts` для всех состояний, кроме
+>      значений полей `first_fill_at_ms`/`average_entry_price` внутри `position_open` (эти значения
+>      теперь могут отличаться от прежних aggregate-based фикстур и должны быть обновлены на
+>      own-order-based).
+>    - `position_open` использует `avgPrice` из own-order response, никогда `row.avgPrice` — тест с
+>      расходящимися own-order/aggregate avgPrice подтверждает, что в ответе именно own-order значение.
+>    - `first_fill_at_ms` уже durable → переиспользуется без вызова `getExecutionList`.
+>    - `first_fill_at_ms` не durable → recovery вызывает `resolveFirstAttributableFillAtMs`, сохраняет
+>      результат durable, следующий `resolve()` (recovery или open-position) переиспользует то же
+>      значение без повторного вызова.
+>    - Capture fails (`no_executions_found`/`ambiguous`) → fail closed (`internal_error`), `position_open`
+>      не резолвится с фиктивным/estimated значением.
+>    - Конкурентный `GET .../recovery-state` и `GET .../open-position` на одну и ту же пару, оба
+>      триггерящие капчу одновременно — сериализуются mutex, никогда не гонятся за одним durable-write
+>      слотом, итоговое значение единственно и совпадает у обоих ответов.
+>    - Multi-owner (синтетические фикстуры, как в Change 1/2/3): recovery для cycle B не путает fill
+>      cycle A с собственным — если у B нет собственного fill-evidence, B резолвится в
+>      `entry_order_live`/`terminal_without_fill`, а не ложно в `position_open`, даже когда aggregate
+>      показывает открытую позицию (это позиция A).
+>    - Legacy `pending_action` guard (spec, "A binding left mid-amend...") продолжает работать без
+>      изменений.
+>    - Новая явная scenario в spec, подтверждающая, что read-only `getExecutionList` GET-запрос и
+>      локальная durable-запись `first_fill_at_ms` НЕ являются exchange side effect по смыслу
+>      "Recovery resolution never causes an exchange side effect".
+> 5. **Зависит от.** Change 1, и теперь явно и жёстко — **Change 3** (уже applied), поскольку Change 4
+>    напрямую переиспользует его экспортированный `resolveFirstAttributableFillAtMs` и его durable
+>    `first_fill_at_ms` контракт на correlation-записи, а не только "тот же принцип" вслед за ним.
+>
+> Everything else in Change 4's original text below (цель, HTTP-контракты не меняются, "Осознанно вне
+> scope") остаётся верным и не переписывается заново.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
