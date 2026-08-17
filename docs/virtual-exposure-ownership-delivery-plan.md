@@ -56,6 +56,58 @@
 > entry-bar proxy было бы тихо неверным. Вопрос "какого own-order/execution evidence достаточно для
 > корректной entry-bar identity" явно передан в Change 3.
 
+> **Ревизия v5 — окончательная close semantics для Change 2 (Change 1 уже implemented + archived, не
+> затронут).** Двенадцать согласованных решений:
+> (1) **Close становится fraction-based trade-cycle command.** Целевая архитектура — не "закрыть всю
+> физическую Bybit-позицию", а "закрыть `exposure_fraction` виртуальной exposure ЭТОГО trade cycle".
+> Canonical единица — `exposure_fraction`. Runtime выражает относительное намерение, ABI резолвит
+> абсолютный exchange quantity.
+> (2) **V1 поддерживает только `exposure_fraction = "1"`.** Это не временный костыль — fraction-based
+> semantics целевая долгосрочная модель; `0.5`/`0.25`/... зарезервированы под будущую partial-close
+> capability, но Change 2 её не реализует. Любое значение, отличное от canonical `"1"`, — fail closed.
+> Change 2 не вводит mutable remaining-exposure lifecycle, resize protection-ордеров или partial
+> terminal states.
+> (3) **Runtime не знает absolute quantity** — граница из v4 (Change 1) остаётся в силе: Runtime не
+> получает, не хранит и не отправляет обратно абсолютный BTC quantity cycle.
+> (4) **Публичный close-контракт меняется.** `DELETE /v1/.../open-position` заменяется на
+> `POST /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/close` с телом
+> `{"exposure_fraction": "1"}`. Старый `DELETE` canonical alias не сохраняется без доказанной
+> необходимости backward compatibility. `GET .../open-position` — read-only lookup — не меняется.
+> (5) **Требуется скоординированное изменение Runtime.** Текущий Runtime domain command
+> `ClosePositionCommand(strategy_instance_id, trade_cycle_id)` должен получить
+> `exposure_fraction="1"`; ABI OpenSpec не должен молча владеть изменениями чужого репозитория —
+> delivery оформляется как два согласованных OpenSpec changes (ABI-side и Runtime-side), точный
+> Runtime change-id не фиксируется здесь.
+> (6) **Fraction=1 максимально переиспользует текущий `CloseApplicationService`-pipeline** (resolve →
+> verify ownership → neutralize entry order → confirm terminality → query position → market reduceOnly
+> close → verify → verify no attributable remainder → `terminal_closed`) — меняется semantic subject
+> ("100% этого cycle" вместо "вся физическая позиция"), не сам lifecycle.
+> (7) **Single-owner path** (до Change 5 — вся production сегодня): requested cycle exposure ==
+> physical position, поэтому нынешний путь (live aggregate `row.size` как quantity, physical zero
+> после close) сохраняется максимально нетронутым.
+> (8) **Multi-owner synthetic path**: Change 2 обязан уже корректно работать на synthetic multi-owner
+> repository state (fixtures как в Change 1), хотя production-активация — только Change 5. Postcondition
+> формулируется через **requested cycle exposure**, а не обязательно `physical position == 0` —
+> physical zero это частный случай single-owner.
+> (9) **Quantity resolution для собственного cycle**: если entry-ордер ещё live/`PartiallyFilled`, ABI
+> сначала гарантирует, что он больше не может добавить exposure (существующий cancel + bounded
+> terminality-confirmation паттерн), и только после этого `cumulative_filled_qty` (Change 1) становится
+> authoritative final exposure. Отдельный mutable `remaining_quantity` для V1 full-close-only не
+> вводится.
+> (10) **Drift/reconciliation** остаётся high-level инвариантом ("значимое расхождение
+> ABI-attributed vs. live aggregate → fail closed"), но конкретный tolerance-алгоритм (например,
+> "ровно один `qtyStep`") — **рассматриваемый вариант**, не утверждённый implementation contract;
+> доказывается в design Change 2 на основании реальной Bybit qtyStep/normalization semantics.
+> (11) **Future partial-close seam**: `exposure_fraction = 0.5` в будущем будет означать "закрыть 50%
+> текущей virtual exposure этого cycle" — но partial-close execution, mutable owned remainder,
+> cycle-остаётся-active-после-partial, resize/cancel-recreate protection-ордеров, protection coverage
+> fraction и partial-close reconciliation policy — всё вне scope Change 2. Change 2 проектирует
+> контрактную ось, реализует только `"1"`.
+> (12) **Protection relationship**: `exposure_fraction` — общая будущая семантика position-management
+> intent; позже protection должна прийти к смыслу "protect `exposure_fraction = 1` этого cycle", а не
+> "защитить всю физическую Bybit-позицию". Changes 6–8 не переписываются сейчас; protection HTTP
+> contract этой ревизией не меняется.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -196,10 +248,14 @@ durable correlation state, not a new store" (position-scope-exclusivity spec L35
   пересчитывать/переотправлять общий stop для оставшихся; нарушает уже существующий инвариант
   "exact numeric match to accepted values" per pair (protection-execution spec L75-119).
 - **B. Pair-owned reduce-only conditional exit orders** (собственный stop-order и take-order на cycle,
-  reduceOnly, qty = `remaining_quantity`, orderLinkId по уже существующей схеме
+  reduceOnly, qty = ABI-resolved authoritative exposure этого cycle (см. quantity ownership boundary,
+  Change 1/2 — не отдельное mutable поле), orderLinkId по уже существующей схеме
   `entryPackageOrderIdentity.ts`). Выбран как архитектурно верный — единственный вариант с честной
   per-cycle изоляцией, переиспользует уже отработанные паттерны (order identity, bounded confirmation,
-  reduceOnly semantics, которые уже использует close-execution).
+  reduceOnly semantics, которые уже использует close-execution). Долгосрочно protection тоже придёт к
+  семантике `exposure_fraction` (см. ревизию v5, Change 2): "protect `exposure_fraction = 1` этого
+  cycle", а не "защитить всю физическую Bybit-позицию" — Changes 6–8 этой правкой не переписываются,
+  protection HTTP contract не меняется.
 
 Вариант B реализуется не одним, а **тремя** отдельными changes (6, 7, 8 — см. ниже): отдельно data model/
 identity/adapter-примитивы (foundation, без изменения поведения), отдельно сам execution-lifecycle
@@ -245,20 +301,32 @@ protection: lifecycle строится и тестируется в Change 7 pro
   `first_fill_at_ms` этого cycle (из данных его собственного ордера), а не из агрегированной
   Bybit-позиции — агрегированный live-запрос остаётся только как sanity-проверка существования/стороны.
   **Wire-контракт не меняется и не расширяется quantity-полем** — quantity остаётся внутренним понятием.
-- `close` для конкретного cycle уменьшает физическую позицию ровно на `remaining_quantity` этого cycle
-  (reduceOnly) — но только после того, как собственный entry-ордер cycle подтверждён терминальным; при
-  единственном владельце поведение идентично сегодняшнему (используется live aggregate size, как раньше,
-  для устранения дрейфа).
+- `close` становится **fraction-based trade-cycle command**: Runtime выражает относительное намерение
+  `exposure_fraction` для конкретного `(strategy_instance_id, trade_cycle_id)`, ABI резолвит абсолютный
+  Bybit-quantity из собственного per-cycle state (`cumulative_filled_qty`, формализованного Change 1,
+  один раз `isFillFactFinal`) и материализует reduceOnly close. V1 принимает только canonical
+  `exposure_fraction = "1"` (100% этого cycle) — любое иное значение fail closed; это не временный
+  костыль, а целевая долгосрочная модель, под которую зарезервированы будущие `0.5`/`0.25` (партиал
+  close вне scope Change 2). При единственном owner (сегодняшнее production-состояние) поведение и
+  результат идентичны сегодняшним (`row.size` живой агрегированной позиции, physical zero после close);
+  при synthetic multi-owner (до Change 5) closes только запрошенный cycle, физическая позиция может
+  остаться ненулевой — постусловие формулируется через exposure запрошенного cycle, а не через
+  `physical position == 0`.
 - `protection` до Change 8 явно блокируется (fail closed) для scope с >1 активным owner; сам redesign
   (в три этапа — foundation/execution-lifecycle/close-cleanup+активация) переводит protection на
   pair-owned reduceOnly conditional stop/take-ордера с собственными orderLinkId на cycle. Guard снимается
-  только в Change 8, не раньше.
+  только в Change 8, не раньше. Долгосрочно protection тоже придёт к семантике `exposure_fraction`
+  ("protect `exposure_fraction = 1` этого cycle"), но это не входит в scope Change 2.
 - Recovery перестаёт полагаться на side-match агрегированной позиции как на доказательство "моя
   позиция" — авторитетным становится статус **собственного** ордера cycle.
-- Публичные HTTP-контракты (`PUT entry-package`, `GET open-position`, `PUT protection`,
-  `DELETE open-position`) **не меняются по форме** — меняется только семантика ("full remainder" теперь
-  означает "весь остаток именно этого cycle", а не физической позиции). Текстовые правки нужны только
-  в prose двух OpenAPI-специй (`abi-position-management-api`, `abi-open-position-lookup-api`).
+- Публичные HTTP-контракты `PUT entry-package`, `GET open-position`, `PUT protection` **не меняются по
+  форме** во всей программе. Единственное исключение — **close**: `DELETE .../open-position`
+  заменяется в Change 2 на `POST .../close` с телом `{"exposure_fraction": "1"}`, без сохранения
+  старого `DELETE` как alias без доказанной необходимости. `GET .../open-position` (read-only lookup)
+  не затрагивается этим решением. Это требует скоординированного изменения Runtime
+  (`ClosePositionCommand` получает `exposure_fraction`) — см. Change 2 и §6 рисков. Текстовые правки
+  prose (без изменения wire-схемы) остаются нужны для `abi-open-position-lookup-api` и для протокольно
+  неизменных частей `abi-position-management-api` (protection).
 - Каждый applied change в программе (1–8) оставляет систему в безопасном, полностью определённом
   production-состоянии — активационных моментов ровно два: Change 5 (базовое ownership) и Change 8
   (protection).
@@ -270,7 +338,7 @@ protection: lifecycle строится и тестируется в Change 7 pro
 | № | change-id | Capability(ies) | Тип |
 |---|---|---|---|
 | 1 | `abi-virtual-exposure-state-foundation-v1` | новая: virtual-exposure-state (+ additive к entry-package-execution) | Data model, без изменения поведения |
-| 2 | `abi-pair-scoped-close-execution-v1` | `close-execution` | Consumer prep (owner-aware, ветвление) |
+| 2 | `abi-pair-scoped-close-execution-v1` | `close-execution` + `abi-position-management-api` (contract change) | **Public contract change** (`DELETE .../open-position` → `POST .../close`, `exposure_fraction`) + consumer prep (owner-aware); требует скоординированного Runtime change |
 | 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений) |
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
 | 5 | `abi-same-side-virtual-exposure-ownership-v1` | супersedes `position-scope-exclusivity`; малый guard в `protection-execution` | **Activation #1** — базовое ownership |
@@ -283,6 +351,12 @@ Changes 2, 3, 4 формально зависят только от Change 1 и 
 не активирует guard-снятие до того, как cleanup-логика полностью реализована и протестирована — то есть
 слияние меняет группировку работы, но не меняет правило "guard снимается последним". Ниже дан
 рекомендованный линейный порядок для одной команды.
+
+**Change 2 — единственный change во всей программе с внешней (cross-repo) зависимостью**: его
+production-развёртывание требует скоординированного изменения Runtime (`ClosePositionCommand` должен
+научиться отправлять `exposure_fraction`). Это не ABI-внутренняя зависимость и не должно решаться
+внутри ABI OpenSpec — delivery оформляется как два согласованных change в двух репозиториях (ABI-side
+и Runtime-side), с явной cross-repo atomic-rollout зависимостью между ними (см. Change 2 и §6).
 
 ---
 
@@ -385,94 +459,173 @@ close, open-position, protection, recovery; ABI → Runtime fill push; Runtime/M
 
 ### Change 2 — `abi-pair-scoped-close-execution-v1`
 
-**Цель.** Реализовать архитектурную идею №3 и quantity ownership boundary из Change 1 — close
-конкретного cycle через pair quantity, материализуемую ABI из собственного per-cycle state, а не
-через закрытие всей физической позиции — заранее, безопасно, под ветвлением "если owner один — старое
-поведение", и корректно относительно partial-fill semantics (собственный entry-ордер cycle должен быть
-терминализирован прежде, чем его `cumulative_filled_qty` можно доверять как финальное).
+**Цель.** Заменить close с "закрыть всю физическую Bybit-позицию" на **fraction-based trade-cycle
+command**: "закрыть `exposure_fraction` виртуальной exposure ЭТОГО `(strategy_instance_id,
+trade_cycle_id)`", материализуемую ABI из собственного per-cycle state (quantity ownership boundary,
+Change 1). V1 реализует единственное canonical значение `exposure_fraction = "1"`. Это меняет
+**публичный HTTP-контракт**, не только внутреннюю реализацию close — см. ревизию v5.
 
-**High-level contract (уточнён после Change 1's quantity ownership boundary):**
+**High-level flow:**
 
 ```
-Runtime sends relative close intent (this trade cycle, canonical fraction = 1 for V1)
-  → ABI resolves authoritative pair quantity from its own cumulative_filled_qty
-    (once isFillFactFinal for this cycle's own entry order)
-  → ABI materializes the absolute Bybit reduceOnly close qty
+Runtime:
+  POST close, exposure_fraction = "1"
+ABI:
+  1. resolve requested cycle
+  2. neutralize/finalize its own live entry order
+  3. resolve authoritative cycle exposure
+  4. materialize absolute exchange qty
+  5. execute reduceOnly close
+  6. verify requested cycle exposure is fully closed
+  7. verify own attributable active orders are neutralized
+  8. terminalize only requested cycle
 ```
 
-Runtime не передаёт и не получает абсолютное BTC-количество. **Для V1 рекомендуется разрешить только
-полный close (canonical fraction = 1)**, если не появится доказанная необходимость в partial-close
-lifecycle — произвольный partial close выносится в отдельное будущее расширение, а не проектируется
-здесь. Детальный wire DTO этого change (форма relative-intent контракта) **не проектируется на уровне
-master-plan** — это работа самого Change 2 на design-этапе.
+**Single owner** (сегодняшнее production-состояние, до Change 5): requested cycle exposure ==
+aggregate position → сегодняшний algorithm сохраняется максимально нетронутым → physical zero
+ожидается после close.
 
-**Что меняется.** `CloseApplicationService` (`src/services/close/closeApplicationService.ts:153-179`):
-- Если у scope ровно один активный owner — поведение **не меняется**: reduceOnly qty = live aggregate
+**Multi-owner synthetic** (fixtures как в Change 1, production — только после Change 5): requested
+cycle exposure < aggregate position → close закрывает только собственный qty; aggregate может остаться
+ненулевым; sibling cycle остаётся live. Пример:
+
+```
+cycle A = 4 BTC, cycle B = 6 BTC, Bybit aggregate = 10 BTC
+Runtime: close A, exposure_fraction=1
+ABI: neutralize/finalize entry order A → resolve authoritative exposure A = 4 → reduceOnly qty=4
+Ожидаемо: aggregate → 6; A → terminal_closed; B остаётся active
+```
+
+Главный postcondition формулируется через **exposure запрошенного cycle**, а не обязательно через
+`physical position == 0` — physical zero это частный (single-owner) случай, не общее правило.
+
+**Публичный HTTP-контракт (меняется).** Долгосрочная canonical форма:
+
+```
+DELETE /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position
+```
+
+заменяется на command-style endpoint:
+
+```
+POST /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/close
+Body: { "exposure_fraction": "1" }
+```
+
+Значение, отличное от canonical `"1"` (`"0.5"`, `"0"`, отрицательное, malformed, отсутствующее) — fail
+closed до любого exchange-вызова и до любой durable-записи. Старый `DELETE` **не сохраняется** как
+alias без доказанной необходимости backward compatibility — decommission, а не deprecation-период,
+если design Change 2 явно не докажет обратное. `GET .../open-position` — read-only lookup — этим
+решением **не затрагивается**, остаётся прежним. Точный error-код для non-canonical fraction и точная
+форма response body фиксируются в design-фазе Change 2, не здесь.
+
+**Скоординированное изменение Runtime (внешняя зависимость).** Текущий Runtime domain command
+`ClosePositionCommand(strategy_instance_id, trade_cycle_id)` и его HTTP-адаптер (пустой `DELETE`)
+должны стать `ClosePositionCommand(strategy_instance_id, trade_cycle_id, exposure_fraction="1")`.
+Точный Python/type representation — решение будущего Runtime OpenSpec, не этого документа. ABI OpenSpec
+**не должен молча владеть** изменениями в другом репозитории — delivery оформляется как **два
+согласованных OpenSpec changes**: (1) ABI close-contract/execution change (этот, Change 2 программы);
+(2) Runtime ABI-client/domain-command change (отдельный репозиторий, change-id пока не фиксируется).
+Cross-repo atomic-rollout зависимость между ними должна быть явной на этапе планирования rollout —
+конкретный механизм (одновременный deploy, временное окно совместимости, feature-flag на стороне
+Runtime) не решается в этом master-plan, это отдельный operational вопрос design/rollout-фазы.
+
+**Что меняется.** `CloseApplicationService` (`src/services/close/closeApplicationService.ts:153-179`)
+переиспользуется максимально — тот же lifecycle (resolve binding → verify ownership → neutralize own
+entry order → confirm terminality → resolve quantity → market reduceOnly close → verify → verify no
+attributable remainder → durable `terminal_closed`), меняется только **semantic subject** и источник
+resolved quantity:
+- Валидация `exposure_fraction`: только canonical `"1"` принимается для V1; любое иное значение — fail
+  closed без exchange-вызова, без durable-записи.
+- Если у scope ровно один активный owner — poведение **не меняется**: reduceOnly qty = live aggregate
   `row.size` (как сегодня, максимально доверяя exchange, не ABI-шным числам — сохраняем текущую
   философию "never trust ABI-recorded quantity" для этого случая).
 - Если owners > 1: сначала, как и сегодня для единственного owner, гарантируется терминальность
   **собственного** entry-ордера closing cycle (cancel + bounded confirm, тот же паттерн, что уже
-  применяется сегодня к единственному owner — просто теперь явно per-cycle, а не подразумеваемо
-  per-scope); только после этого `cumulative_filled_qty` этой записи (из `early_execution_observation`,
-  формализованного в Change 1) считается финальным и авторитетным. reduceOnly qty = это значение,
-  **clamped** сверху живым остатком агрегированной позиции — но clamp допустим **только** в пределах
-  заранее определённого малого допуска на биржевое округление (например, один `qtyStep`), не как
-  универсальная защита. Любое расхождение за пределами этого допуска — **fail closed** с явным кодом
-  "требуется reconciliation", а не молчаливый clamp: clamp "вниз" по своей сути мог бы срезать чужую
-  (соседнего cycle) долю, если ledger и биржа разошлись сильнее, чем на округление.
+  применяется сегодня — просто теперь явно per-cycle, а не подразумеваемо per-scope); только после
+  этого `cumulative_filled_qty` этой записи (из `early_execution_observation`, формализованного в
+  Change 1, once `isFillFactFinal`) считается финальным и авторитетным для **этого** cycle. reduceOnly
+  qty материализуется из этого значения. Значимое расхождение между ABI-resolved quantity и живым
+  агрегированным остатком — **fail closed** ("требуется reconciliation"); небольшой tolerance на
+  биржевое округление — **рассматриваемый вариант** (например, "в пределах одного `qtyStep`"), **не**
+  утверждённый implementation contract — точный алгоритм доказывается design-фазой Change 2 на основе
+  реальной Bybit qtyStep/normalization semantics, не фиксируется здесь.
 - Release-семантика: при durable close этого cycle запись убирается из `owners`-множества scope
-  (структура `byScope`, если Change 5 к этому моменту её уже ввела — см. примечание о том, что Change
-  1 сознательно не трогает `byScope`); сторона (`side`) scope очищается лишь когда множество owners
-  становится пустым.
+  (структура `byScope`, если Change 5 к этому моменту её уже ввела — Change 1 сознательно не трогает
+  `byScope`); сторона (`side`) scope очищается лишь когда множество owners становится пустым.
 
-**Какие инварианты отменяются/заменяются.** close-execution spec L110-124 ("close size сурсится
-исключительно из live aggregate query, никогда из ABI-recorded/calculated quantity") — заменяется на
-"при единственном owner — как раньше; при множественном — обязательно из ABI-resolved
-`cumulative_filled_qty`, верифицированного терминальностью собственного entry-ордера, т.к. exchange
-физически не знает про доли между cycles". Это единственный настоящий разворот философии в этой
-программе; квалифицируется отдельно как риск (см. §6).
+**Какие инварианты отменяются/заменяются.**
+- close-execution spec L110-124 ("close size сурсится исключительно из live aggregate query, никогда
+  из ABI-recorded/calculated quantity") — заменяется на "при единственном owner — как раньше; при
+  множественном — обязательно из ABI-resolved `cumulative_filled_qty`, верифицированного
+  терминальностью собственного entry-ордера". Единственный настоящий разворот философии в этой
+  программе; квалифицируется отдельно как риск (см. §6).
+- Публичный контракт `DELETE .../open-position` (close-семантика в `abi-position-management-api`) —
+  заменяется на `POST .../close` с `exposure_fraction`. Это wire-level breaking change, не только
+  prose-уточнение.
 
-**Новые инварианты.** "Close уменьшает физическую позицию ровно на долю closing cycle, оставляя чужие
-доли нетронутыми"; "Runtime никогда не передаёт и не получает абсолютное exchange quantity — только
-относительное намерение"; "release из owner-множества не подразумевает release всего scope, пока есть
-другие активные owners"; "clamp против live aggregate допустим только в пределах явно определённого
-малого допуска, никогда как замена reconciliation".
+**Новые инварианты.** "Close закрывает ровно `exposure_fraction` виртуальной exposure запрошенного
+cycle, оставляя чужие доли нетронутыми"; "Runtime никогда не передаёт и не получает абсолютное exchange
+quantity — только `exposure_fraction`"; "V1 принимает только `exposure_fraction = "1"`, любое иное
+значение fail closed до любого side-эффекта"; "postcondition — exposure запрошенного cycle закрыта,
+`physical position == 0` лишь частный случай"; "release из owner-множества не подразумевает release
+всего scope, пока есть другие активные owners"; "значимое расхождение resolved quantity vs. live
+aggregate — fail closed, tolerance-алгоритм не зафиксирован на уровне master-plan".
 
-**Затрагиваемые слои.** `src/services/close/closeApplicationService.ts`,
-`src/correlation/entryPackageCorrelationRepository.ts` (partial-release helper; возможно первая
-реальная эволюция `byScope`, если она ещё не введена Change 5 — порядок между Change 2 и Change 5
-уточняется на design-этапе). Domain: возможно `src/domain/positionScope.ts` для новых типов.
+**Затрагиваемые слои.** `src/services/close/closeApplicationService.ts` (semantic subject +
+multi-owner-aware quantity resolution), HTTP-слой: новый `POST .../close` route/handler, заменяющий
+`DELETE`-обработчик в `src/routes/positionManagementRoutes.ts`; новый/изменённый request DTO с
+`exposure_fraction` и его валидацией; `abi-position-management-api` OpenAPI-спека — реальное изменение
+метода/пути/тела запроса, не только prose. `src/correlation/entryPackageCorrelationRepository.ts`
+(partial-release helper; возможно первая реальная эволюция `byScope`, если она ещё не введена
+Change 5 — порядок между Change 2 и Change 5 уточняется на design-этапе).
 
-**HTTP-контракты.** `DELETE .../open-position` — форма (пустое тело, тот же response) не меняется для
-V1 full-close-only. Если V1 остаётся full-close-only, relative-intent для close не требует нового поля
-в запросе вообще ("close 100% этого cycle" уже полностью выражено самим DELETE-запросом на конкретный
-trade cycle) — точное решение фиксируется в design-фазе Change 2. Требуется **только текстовая** правка
-prose в `abi-position-management-api` spec ("full remainder" уточняется как "remainder принадлежащий
-именно этому trade cycle").
+**HTTP-контракты.** **Меняются.** `DELETE /v1/.../open-position` retired, заменяется на
+`POST /v1/.../close` с `{"exposure_fraction": "1"}`. `GET /v1/.../open-position` не затрагивается.
+`PUT .../entry-package`, `PUT .../protection` не затрагиваются этим change. `abi-position-management-api`
+spec для close переписывается по существу (метод, путь, request body, error-vocabulary для
+non-canonical fraction), не только текстовые уточнения.
+
+**Future partial-close seam (не реализуется здесь).** `exposure_fraction = 0.5` в будущем означает
+"закрыть 50% текущей virtual exposure этого cycle" — Change 2 закладывает контрактную ось под это
+значение, но не реализует его. Вне scope: partial close execution; mutable owned remainder; cycle
+остаётся active после частичного закрытия; resize/cancel-recreate protection-ордеров; protection
+coverage fraction; partial-close reconciliation policy.
 
 **Обязательные тесты.**
-- Single-owner: полностью регрессионные — поведение байт-в-байт как сегодня.
-- Multi-owner (синтетические фикстуры, как в Change 1): close cycle A не отправляет reduceOnly qty
-  больше своего `cumulative_filled_qty`; cycle B остаётся `applied`/live и его владение scope
-  сохраняется.
+- `exposure_fraction = "1"` принимается; `"0.5"`, `"0"`, `"2"`, malformed, отсутствующее значение — fail
+  closed до любого exchange-вызова, без durable-записи.
+- Single-owner: полная регрессия исполнения (resolved quantity, порядок вызовов, postconditions) —
+  идентична сегодняшней, даже при изменённой транспортной обёртке (новый HTTP endpoint).
+- Multi-owner (синтетические фикстуры, как в Change 1): close cycle A (`exposure_fraction="1"`) не
+  отправляет reduceOnly qty больше своего `cumulative_filled_qty`; aggregate может остаться ненулевым;
+  cycle B остаётся `applied`/live, владение scope сохраняется.
 - Close cycle с entry-ордером, всё ещё `PartiallyFilled` на момент запроса close: close сначала
   терминализирует entry-ордер (cancel+confirm), только потом резолвит финальный `cumulative_filled_qty`
   и закрывает ровно эту величину.
-- Clamp-логика: расхождение resolved quantity vs. live остаток в пределах допуска → используется живой
-  остаток; расхождение за пределами допуска → fail closed с конкретным кодом, никакого clamp.
+- Drift/reconciliation: значимое расхождение resolved quantity vs. live остаток → fail closed с
+  конкретным кодом (точное tolerance-поведение — по решению design-фазы Change 2, не зафиксировано
+  здесь).
 - `avg_execution_price` этого cycle и соседних не изменяются в результате close.
-- Existing `closeApplicationService.test.ts` регрессия — без изменений в assertions single-owner кейсов.
+- Новые route/DTO-тесты для `POST .../close` (валидация `exposure_fraction`, `unknown_trade_cycle_binding`
+  и т.п., по аналогии с существующими route-тестами).
+- `GET .../open-position` — полная регрессия, не затронут.
 
-**Зависит от.** Change 1.
+**Зависит от.** Change 1. Плюс внешняя (cross-repo) зависимость: скоординированный Runtime change —
+ABI Change 2 не может быть безопасно выкачен в production без него (см. §6 рисков).
 
-**Состояние после.** Close готов к multi-owner и материализует quantity ownership boundary из Change 1
-(Runtime relative intent → ABI absolute quantity), но production не может создать multi-owner scope до
-Change 5 — поведение в проде идентично сегодняшнему.
+**Состояние после.** Close — fraction-based command с новым публичным HTTP-контрактом. Для
+single-owner (сегодняшнее production-состояние) поведение и результат идентичны сегодняшним; для
+synthetic multi-owner (до Change 5) корректно закрывает только запрошенный cycle. Production rollout
+требует скоординированного Runtime-изменения.
 
-**Осознанно вне scope.** Произвольный partial close (V1 — full close only); mutable durable owned
-remainder (не нужен, пока close full-close-only); детальный wire DTO relative-intent контракта —
-решается внутри самого Change 2, не в master-plan; отмена/cancel pair-owned protection-ордеров при
-close (это придёт в Change 8, когда такие ордера появятся).
+**Осознанно вне scope.** `exposure_fraction < 1` (partial close execution); mutable durable owned
+remainder; resize/cancel-recreate protection-ордеров; protection coverage fraction; partial-close
+reconciliation policy; same-side production activation (Change 5); opposite-side coexistence;
+pair-owned protection-ордера (Changes 6–8); `first_fill`/entry-bar resolution (Change 3); recovery
+redesign (Change 4); Runtime, хранящий/пересылающий абсолютный quantity; ABI → Runtime push; portfolio/
+netting engine; окончательный drift-tolerance алгоритм (design Change 2, не master-plan); точный
+Runtime change-id и его wire-представление (будущий Runtime OpenSpec).
 
 ---
 
@@ -561,13 +714,14 @@ drift-случай — решается как часть §6 рисков).
 
 ---
 
-> **Примечание к ревизии v4.** Правки выше применены только к Change 1–3 по прямому запросу. Changes
-> 4–8 ниже всё ещё написаны в терминах v3 (`remaining_quantity` как mutable поле,
-> `first_fill_at_ms`/`physical_side` как поля Change 1, `VirtualExposure`-тип, ранняя эволюция
-> `byScope` внутри Change 1) и требуют отдельного согласующего прохода, прежде чем на них можно
-> опираться буквально. Архитектурные решения v4 (quantity ownership boundary, full-close-only V1,
-> отсутствие `first_fill_at_ms`/mutable remainder в Change 1) остаются в силе и для них — реализация
-> Changes 4–8 не должна опираться на поля, которые Change 1 больше не вводит.
+> **Примечание к ревизиям v4/v5.** Правки v4 применены к Change 1–3, правки v5 — к Change 2 (публичный
+> close-контракт, `exposure_fraction`, coordinated Runtime change) плюс точечные уточнения в top-level
+> секциях и в Changes 7–8 (см. правки ниже). Changes 4–6 ниже всё ещё частично написаны в терминах v3
+> (`VirtualExposure`-тип, ранняя эволюция `byScope` внутри Change 1) и требуют отдельного согласующего
+> прохода, прежде чем на них можно опираться буквально. Архитектурные решения v4/v5 (quantity ownership
+> boundary, `exposure_fraction`-based V1 full-close-only, отсутствие `first_fill_at_ms`/mutable
+> remainder в Change 1/2, новый close HTTP-контракт) остаются в силе для всей программы — реализация
+> Changes 4–8 не должна опираться на поля/контракты, которые Change 1/2 больше не вводят.
 
 ---
 
@@ -751,7 +905,9 @@ production-поведение `PUT .../protection` не меняется.
 **Что меняется.**
 - Добавляется (но не подключается к production-пути `PUT .../protection` для shared scope) полный
   create/update/cancel/confirm lifecycle pair-owned stop/take-ордеров через примитивы из Change 6, с
-  qty = `remaining_quantity` (уже терминализованный, per Change 1/2).
+  qty = ABI-resolved authoritative exposure этого cycle (per Change 1/2's quantity ownership boundary —
+  `cumulative_filled_qty` once `isFillFactFinal`, не отдельное mutable поле; долгосрочно эта же
+  величина соответствует "`exposure_fraction = 1` этого cycle", см. ревизию v5).
 - Bounded confirmation для protection-ордеров зеркалит существующую bounded confirmation для entry
   (`packageConfirmation.ts`).
 - `ProtectionApplicationService` получает эту lifecycle-реализацию как готовый, полностью протестированный
@@ -808,10 +964,11 @@ lifecycle из Change 7. Это единственный change во всей pr
 **Что меняется.**
 - `CloseApplicationService` расширяется: при durable close cycle отменяет (cancel + bounded confirm, тот
   же паттерн, что уже применяется к entry-ордеру в close-execution) его собственные `stop`/`take`
-  conditional-ордера (по данным из Change 6) до/как часть закрытия `remaining_quantity`.
-  `terminal_closed` теперь гейтится на **оба** постусловия: (а) live position уменьшена ровно на
-  `remaining_quantity` этого cycle, (б) собственные protection-ордера этого cycle неактивны (отменены
-  или уже терминальны).
+  conditional-ордера (по данным из Change 6) до/как часть закрытия его resolved exposure (Change 2:
+  `exposure_fraction = "1"` этого cycle). `terminal_closed` теперь гейтится на **оба** постусловия:
+  (а) exposure запрошенного cycle закрыта (Change 2's postcondition — physical zero лишь частный
+  single-owner случай), (б) собственные protection-ордера этого cycle неактивны (отменены или уже
+  терминальны).
 - `ProtectionApplicationService`: guard `shared_scope_protection_unsupported` из Change 5 снимается —
   production-decision path переключается на lifecycle из Change 7 для multi-owner scope.
 
@@ -828,9 +985,9 @@ multi-owner scope корректно и независимо обслужива�
 основной логики close из Change 2), `src/services/protection/protectionApplicationService.ts` (снятие
 guard — переключение production-decision path на lifecycle из Change 7).
 
-**HTTP-контракты.** `DELETE .../open-position`, `PUT .../protection` — форма не меняется.
-`shared_scope_protection_unsupported` больше не возвращается (contract narrows back to fewer error
-cases — обратно совместимо, просто меньше 4xx-путей).
+**HTTP-контракты.** `POST .../close` (контракт уже установлен Change 2) и `PUT .../protection` — форма
+не меняется этим change. `shared_scope_protection_unsupported` больше не возвращается (contract narrows
+back to fewer error cases — обратно совместимо, просто меньше 4xx-путей).
 
 **Обязательные тесты.**
 - Close одного cycle отменяет именно его protection-ордера, не трогая ордера соседнего same-side cycle.
@@ -893,9 +1050,10 @@ Change 1 (foundation: exposure state)
   становится новая (`virtual-exposure-ownership` или аналог).
 - **`open-position-resolution`** — **изменяется** Change 3 (два конкретных требования заменяются, см.
   Change 3 выше; wire-контракт остаётся прежним), остальное сохраняется.
-- **`close-execution`** — **изменяется дважды**: Change 2 (ключевой разворот в источнике qty), затем
-  Change 8 (дополнительное постусловие про protection-ордера); остальное (cancel-entry-order-first,
-  unsupported_exchange_scope, идемпотентность) сохраняется без изменений.
+- **`close-execution`** — **изменяется дважды**: Change 2 (ключевой разворот в источнике qty **и**
+  публичный HTTP-контракт — `DELETE .../open-position` заменяется на `POST .../close` с
+  `exposure_fraction`), затем Change 8 (дополнительное постусловие про protection-ордера); остальное
+  (cancel-entry-order-first, unsupported_exchange_scope, идемпотентность) сохраняется без изменений.
 - **`protection-execution`** — **изменяется четырежды**: малое дополнение в Change 5 (guard), additive
   foundation в Change 6 (без изменения поведения), новый lifecycle в Change 7 (production-инертно,
   наблюдаемое поведение не меняется), и наконец практическая замена production-decision path в Change 8
@@ -906,11 +1064,14 @@ Change 1 (foundation: exposure state)
   переиспользующее существующие `cumExecQty`/`avgPrice` точки чтения в `packageConfirmation.ts`) и
   Change 6 (новые orderLinkId-роли), основной текст (order identity, create/cancel semantics,
   confirmation) не меняется.
-- **`abi-position-management-api`, `abi-open-position-lookup-api`** — **только текстовые правки** prose
-  (без изменения wire-схемы) в Changes 2, 3, 5, 8 — пояснить, что значения относятся к доле cycle, а не к
-  физической позиции целиком; при необходимости — добавить новые коды ошибок (см. риск). Явно
-  зафиксировать, что `GET .../open-position` не приобретает quantity-поле ни на одном шаге этой
-  программы.
+- **`abi-position-management-api`** — **wire-level изменяется в Change 2** (close: `DELETE
+  .../open-position` → `POST .../close`, новое request body `exposure_fraction`, новая
+  error-таксономия для non-canonical fraction — не только prose); protection-часть спеки — только
+  текстовые правки prose в Changes 5, 8 (пояснить, что значения относятся к доле cycle).
+- **`abi-open-position-lookup-api`** — **только текстовые правки** prose (без изменения wire-схемы) в
+  Change 3 — пояснить, что значения относятся к доле cycle, а не к физической позиции целиком. Явно
+  зафиксировать, что `GET .../open-position` не приобретает quantity-поле и не меняет форму ни на одном
+  шаге этой программы, включая Change 2.
 - **`exchange-instrument-identity`, `container-runtime`** — не затрагиваются.
 - Отдельно, вне этой программы: **`abi-entry-package-exchange-canonical-confirmation-v1`** реализован,
   но не заархивирован в `openspec/changes/archive/` — рекомендуется провести housekeeping-архивацию
@@ -928,13 +1089,15 @@ Change 1 (foundation: exposure state)
    потребителю (close/open-position/protection) нужна свежая величина. Рекомендация — on-demand
    переспрос (меньше состояния для поддержания консистентным), решение фиксируется в design-фазе Change 1.
 
-2. **Политика допуска дрейфа и clamp.** `sum(remaining_quantity активных same-side owners)` может
-   разойтись с живым агрегированным размером позиции (округления qtyStep у разных входов, ручное
-   вмешательство, частичные fills). Правило теперь однозначно (см. Change 2): clamp допустим только в
-   пределах заранее определённого малого допуска на биржевое округление; любое расхождение за пределами
-   допуска — fail closed с явным "требуется reconciliation" кодом, никогда молчаливый clamp вниз (clamp
-   мог бы срезать чужую, соседнюю по scope, exposure). Конкретная величина допуска фиксируется в
-   design-фазе Change 2.
+2. **Политика допуска дрейфа и tolerance-алгоритм.** `sum(ABI-resolved authoritative exposure активных
+   same-side owners)` может разойтись с живым агрегированным размером позиции (округления qtyStep у
+   разных входов, ручное вмешательство, частичные fills). High-level правило зафиксировано (см.
+   Change 2): значимое расхождение — fail closed с явным "требуется reconciliation" кодом, никогда
+   молчаливое клампирование вниз (могло бы срезать чужую, соседнюю по scope, exposure). Но **конкретный
+   tolerance-алгоритм — не решён на уровне master-plan**: "в пределах одного `qtyStep`" — это
+   рассматриваемый вариант, а не утверждённый implementation contract. Design-фаза Change 2 обязана
+   доказать этот алгоритм на основании реальной Bybit qtyStep/normalization semantics, прежде чем он
+   станет частью реализации.
 
 3. **Таксономия ошибок.** Opposite-side rejection, protection-guard для shared scope и новый
    reconciliation-required код для close можно отдавать как существующий `internal_error` (не меняя
@@ -975,6 +1138,23 @@ Change 1 (foundation: exposure state)
 10. **Возможное слияние Change 8 в Change 7.** См. примечание в Change 8 — решение по факту scoping,
     не заранее; правило "guard снимается только после close-cleanup" сохраняется при любом слиянии.
 
+11. **Скоординированный Runtime rollout (Change 2).** Change 2 меняет публичный close-контракт
+    (`DELETE .../open-position` → `POST .../close` с `exposure_fraction`) — это единственный change во
+    всей программе с внешней cross-repo зависимостью. ABI не должен деплоиться в production раньше или
+    без синхронизированного Runtime-изменения (`ClosePositionCommand` должен уметь отправлять
+    `exposure_fraction`). Открытые вопросы, не решённые здесь: механизм атомарного/скоординированного
+    rollout (одновременный deploy, временное окно совместимости, feature-flag), кто владеет
+    Runtime-side OpenSpec change и его change-id, порядок review между двумя репозиториями. Это должно
+    быть закрыто до начала apply Change 2, отдельно от чисто-ABI-технических рисков выше.
+
+12. **HTTP contract migration / decommission без backward-compat alias (Change 2).** Решено не сохранять
+    старый `DELETE .../open-position` как alias "без доказанной необходимости" — но это осознанный
+    breaking change для любого клиента (включая сам Runtime до его coordinated update), а не
+    additive-расширение, как большинство остальных HTTP-правок этой программы. Нужно явно
+    зафиксировать (до apply Change 2): допустим ли короткий переходный период с обоими endpoint'ами
+    одновременно, или ожидается атомарный cutover; кто и как валидирует отсутствие иных потребителей
+    старого `DELETE`, кроме самого Runtime.
+
 ---
 
 ## 7. Финальный рекомендуемый порядок реализации и smoke-verification
@@ -982,15 +1162,21 @@ Change 1 (foundation: exposure state)
 0. **Housekeeping (вне программы):** заархивировать `abi-entry-package-exchange-canonical-confirmation-v1`
    в `openspec/changes/archive/`, чтобы baseline специй был чист.
 1. **Закрыть риски §6** (механизм refresh для cumulative_filled_quantity/avgPrice, точная величина
-   допуска дрейфа/clamp, таксономия ошибок, conditional-order детали, single-owner fallback в protection)
-   — до написания первого proposal.
+   допуска дрейфа/tolerance-алгоритм, таксономия ошибок, conditional-order детали, single-owner fallback
+   в protection, **координация Runtime rollout и decommission-план для `DELETE .../open-position`** —
+   риски 11–12) — до написания первого proposal.
 2. **Change 1** → apply → регрессия всего существующего test suite (ожидается 0 поведенческих изменений)
    → smoke: restart процесса на существующих данных, подтвердить, что single-owner scopes резолвятся
    идентично; отдельно smoke на реальном частичном fill на Bybit Demo — убедиться, что
    `cumulative_filled_quantity` действительно продолжает расти после первого partial-fill наблюдения.
-3. **Change 2** → apply → синтетические multi-owner и partial-fill тесты + полная регрессия close →
-   smoke: реальный close на Bybit Demo для обычного single-cycle сценария, побайтово то же поведение,
-   что до change.
+3. **Change 2** → apply (**вместе со скоординированным Runtime-side change** — см. риск 11) →
+   синтетические multi-owner и partial-fill тесты + полная регрессия close → smoke на Bybit Demo:
+   `POST .../close` с `exposure_fraction="1"` для обычного single-cycle сценария даёт тот же итоговый
+   результат (physical zero, `terminal_closed`), что даёт сегодняшний `DELETE`-путь; отдельно —
+   `exposure_fraction`, отличная от `"1"` (например `"0.5"`), отклоняется fail-closed без exchange-вызова;
+   отдельно — подтвердить, что `DELETE .../open-position` действительно снят (или, если принят
+   переходный период по риску 12, ведёт себя ровно так, как зафиксировано в его решении), и что
+   `GET .../open-position` не изменился.
 4. **Change 3** → apply → аналогично → smoke: `GET open-position` на реальной Demo-позиции, включая
    момент, когда entry-ордер ещё partial — `average_entry_price` в ответе актуален, а не устаревший;
    ответ по-прежнему не содержит quantity-поля.
