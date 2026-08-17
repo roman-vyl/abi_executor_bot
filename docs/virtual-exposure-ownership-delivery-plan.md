@@ -290,11 +290,12 @@ Changes 2, 3, 4 формально зависят только от Change 1 и 
 
 ### Change 1 — `abi-virtual-exposure-state-foundation-v1`
 
-> Статус: **применено**. Реализация — `isFillFactFinal` (`packageConfirmation.ts`), monotonicity-
-> валидация в `save()`/`replay()` и `findActiveRecordsForScope` (`entryPackageCorrelationRepository.ts`)
-> — landed, все задачи `tasks.md` отмечены `[x]`, полный тестовый набор (531/531) и `typecheck`/`build`
-> зелёные. OpenSpec change ещё не заархивирован (`openspec/changes/abi-virtual-exposure-state-foundation-v1/`
-> не перемещён в `archive/`, `openspec/specs/` не синхронизирован) — это отдельный шаг.
+> Статус: **применено и заархивировано**. Реализация — `isFillFactFinal` (`packageConfirmation.ts`),
+> monotonicity-валидация в `save()`/`replay()` и `findActiveRecordsForScope`
+> (`entryPackageCorrelationRepository.ts`) — landed, все задачи `tasks.md` отмечены `[x]`, полный
+> тестовый набор (531/531) и `typecheck`/`build` зелёные. Канонический спек синхронизирован в
+> `openspec/specs/virtual-exposure-state/spec.md`; change перемещён в
+> `openspec/changes/archive/2026-08-17-abi-virtual-exposure-state-foundation-v1/`.
 
 **Цель.** Формализовать и усилить уже существующие per-cycle own-order fill facts
 (`EarlyExecutionObservation`), чтобы следующие changes могли безопасно использовать их для virtual
