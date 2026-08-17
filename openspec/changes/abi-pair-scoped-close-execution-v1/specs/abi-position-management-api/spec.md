@@ -83,15 +83,18 @@ cycle's share and never necessarily the scope's entire aggregate position.
 A successful response SHALL be HTTP `200` with a closed JSON object containing exactly
 `strategy_instance_id`, `trade_cycle_id`, and `status: "trade_cycle_closed"`. `trade_cycle_closed`
 SHALL be returned only once ABI has verified both: the requested cycle's own resolved exposure has
-been removed from the pair's scope (the scope's aggregate live position is zero, or has decreased by
-exactly the quantity ABI resolved and closed for this cycle), and no order ABI attributes to the pair
-remains active — and only when the pair's stored correlation is complete and non-contradictory.
-Incomplete or contradictory correlation, or accepting the close request alone, SHALL NOT produce this
-status or any other `2xx`.
+actually been closed, and no order ABI attributes to the pair remains active — and only when the
+pair's stored correlation is complete and non-contradictory. ABI's proof that the requested cycle's
+own exposure was closed SHALL be attributable to that cycle's own close activity specifically, not
+inferred solely from a before/after change in the scope's aggregate live position size, since that
+aggregate can also move because of a sibling trade cycle sharing the same physical scope. Incomplete
+or contradictory correlation, or accepting the close request alone, SHALL NOT produce this status or
+any other `2xx`.
 
 #### Scenario: Verified full close is acknowledged
-- **WHEN** ABI has verified the requested cycle's resolved exposure removed from the scope and no
-  attributable active order remains, under complete pair correlation
+- **WHEN** ABI has verified, attributably to the requested cycle's own close activity, that its
+  resolved exposure is closed, and no attributable active order remains, under complete pair
+  correlation
 - **THEN** ABI returns HTTP `200` with `status: "trade_cycle_closed"`
 
 #### Scenario: Incomplete or contradictory correlation blocks success
@@ -109,7 +112,7 @@ Both endpoints SHALL use the closed error envelope `{ error: { code, message, de
 | 422 | `unknown_trade_cycle_binding` | both |
 | 422 | `unsupported_exchange_scope` | both |
 | 422 | `position_not_open` | protection only |
-| 422 | `position_exposure_drift` | close only |
+| 422 | `close_execution_incomplete` | close only |
 | 500 | `internal_error` | both |
 
 No response SHALL include internal exception, stack, or raw exchange details, and no failure SHALL be serialized as success.

@@ -108,6 +108,28 @@
 > "защитить всю физическую Bybit-позицию". Changes 6–8 не переписываются сейчас; protection HTTP
 > contract этой ревизией не меняется.
 
+> **Ревизия v6 — safety-коррекция multi-owner close confirmation (по итогам review первого
+> OpenSpec-proposal для Change 2, до apply).** v5 п.10 ("drift/reconciliation vs. live aggregate")
+> оказался небезопасной моделью, а не просто незафиксированным деталем: aggregate-delta
+> (`aggregate_before − aggregate_after`) не может доказать, что именно **этот** close-запрос произвёл
+> наблюдаемое изменение, если другой same-side cycle тоже может двигать тот же aggregate. Конкретный
+> сценарий: ABI отправляет reduceOnly close cycle A, ордер исполняется, но ABI падает до durable
+> `terminal_closed`; retry заново резолвит "исходные" 4 BTC cycle A из его entry-фактов (immutable) и
+> отправляет **второй** reduceOnly-ордер, который физически может забрать exposure cycle B. Это прямое
+> нарушение изоляции "close cycle A никогда не трогает cycle B".
+> Корректная модель (детали — `design.md` corrected-change'а): close получает **собственную
+> атрибутируемую identity** — тот же паттерн, что уже проверенно работает для entry-package
+> create/cancel (`buildEntryPackageOrderLinkId` + durable write **до** exchange-вызова + resend только
+> после чистого `not_found` на повторном запросе, см. `entryPackageApplicationService.ts`). Two flat
+> additive-поля на `EntryPackageExecutionRecord` (`close_order_link_id`, `close_order_id`) — не generic
+> ledger, не event sourcing. Единственное admissible доказательство "эта cycle's exposure закрыта" —
+> **собственный close-ордер этого cycle**, подтверждённый по своей же identity; aggregate остаётся
+> только для side/existence-санитарной проверки перед первой отправкой, никогда не участвует в success
+> gate. v5 п.10's global drift-tolerance config полностью убран (не переименован) — сравнение, ради
+> которого он существовал, само устранено редизайном. Single-owner path (production сегодня) этой
+> коррекцией не затронут — он безопасен структурно иначе (aggregate==0 доказывает "мой close" именно
+> потому, что владелец один), и остаётся byte-for-byte нетронутым. См. corrected Change 2 ниже.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -463,7 +485,8 @@ close, open-position, protection, recovery; ABI → Runtime fill push; Runtime/M
 command**: "закрыть `exposure_fraction` виртуальной exposure ЭТОГО `(strategy_instance_id,
 trade_cycle_id)`", материализуемую ABI из собственного per-cycle state (quantity ownership boundary,
 Change 1). V1 реализует единственное canonical значение `exposure_fraction = "1"`. Это меняет
-**публичный HTTP-контракт**, не только внутреннюю реализацию close — см. ревизию v5.
+**публичный HTTP-контракт**, не только внутреннюю реализацию close — см. ревизию v5. **Ревизия v6**
+скорректировала безопасность multi-owner confirmation — см. ниже и ревизию v6 выше.
 
 **High-level flow:**
 
@@ -471,33 +494,53 @@ Change 1). V1 реализует единственное canonical значен
 Runtime:
   POST close, exposure_fraction = "1"
 ABI:
-  1. resolve requested cycle
+  1. resolve requested cycle, reconfirm active membership on its scope
   2. neutralize/finalize its own live entry order
-  3. resolve authoritative cycle exposure
-  4. materialize absolute exchange qty
-  5. execute reduceOnly close
-  6. verify requested cycle exposure is fully closed
+  3. resolve authoritative cycle exposure (own entry order's fill facts)
+  4. [multi-owner only] dispatch/resolve own close order under an attributable identity
+  5. execute reduceOnly close (single-owner: unconditionally; multi-owner: only if no prior
+     attempt is already dispatched, or a fresh one is genuinely never-created)
+  6. verify requested cycle exposure is fully closed — single-owner: aggregate == 0; multi-owner:
+     the cycle's OWN close order's own confirmed execution, never an aggregate-delta inference
   7. verify own attributable active orders are neutralized
   8. terminalize only requested cycle
 ```
 
 **Single owner** (сегодняшнее production-состояние, до Change 5): requested cycle exposure ==
-aggregate position → сегодняшний algorithm сохраняется максимально нетронутым → physical zero
-ожидается после close.
+aggregate position → сегодняшний algorithm сохраняется максимально нетронутым, **byte-for-byte, без
+единого нового поля или Bybit-вызова** → physical zero ожидается после close.
 
 **Multi-owner synthetic** (fixtures как в Change 1, production — только после Change 5): requested
-cycle exposure < aggregate position → close закрывает только собственный qty; aggregate может остаться
-ненулевым; sibling cycle остаётся live. Пример:
+cycle exposure < aggregate position → close закрывает только собственный qty, под собственной
+атрибутируемой identity; aggregate может остаться ненулевым; sibling cycle остаётся live. Пример:
 
 ```
 cycle A = 4 BTC, cycle B = 6 BTC, Bybit aggregate = 10 BTC
 Runtime: close A, exposure_fraction=1
-ABI: neutralize/finalize entry order A → resolve authoritative exposure A = 4 → reduceOnly qty=4
+ABI: neutralize/finalize entry order A → resolve authoritative exposure A = 4 →
+     durably write close_order_link_id(A) BEFORE dispatch → reduceOnly qty=4 под этой identity →
+     confirm THIS order's own executed qty == 4 → terminal_closed(A)
 Ожидаемо: aggregate → 6; A → terminal_closed; B остаётся active
 ```
 
-Главный postcondition формулируется через **exposure запрошенного cycle**, а не обязательно через
-`physical position == 0` — physical zero это частный (single-owner) случай, не общее правило.
+Главный postcondition формулируется через **exposure запрошенного cycle, атрибутируемо доказанную
+собственным close-ордером этого cycle**, а не обязательно через `physical position == 0` (single-owner
+частный случай) и **никогда** через `aggregate_before − aggregate_after` (см. v6 — это доказанно
+небезопасно при >1 owner, т.к. сосед тоже может двигать aggregate).
+
+**Safety blocker и его коррекция (v6).** Исходный draft резолвил multi-owner qty из entry-фактов cycle
+и доказывал успех сравнением aggregate до/после. Ревью нашло эксплуатируемую дыру: после
+crash/timeout между "close-ордер исполнился" и "durable `terminal_closed`" retry заново резолвит те же
+исходные 4 BTC (immutable entry-факты не меняются) и отправляет **второй** reduceOnly-ордер — который
+может забрать exposure соседнего cycle B, поскольку aggregate delta не различает "мой close" от "чужая
+конкурентная активность". Корректная модель — **атрибутируемая close-order identity**, тот же паттерн,
+что уже проверенно работает для entry-package create/cancel (`buildEntryPackageOrderLinkId` + durable
+write **до** exchange-вызова + resend только после чистого `not_found` при повторном запросе). Полная
+retry/restart state machine (never-dispatched / dispatched-but-lost-response-actually-filled /
+dispatched-still-live-or-ambiguous / dispatched-zero-execution / dispatched-partial-execution) —
+`design.md` соответствующего OpenSpec change; здесь фиксируется только архитектурный вывод:
+**ABI никогда не отправляет второй close-ордер для того же full-close intent, пока судьба ранее
+отправленного не подтверждена по его собственной identity.**
 
 **Публичный HTTP-контракт (меняется).** Долгосрочная canonical форма:
 
@@ -514,10 +557,8 @@ Body: { "exposure_fraction": "1" }
 
 Значение, отличное от canonical `"1"` (`"0.5"`, `"0"`, отрицательное, malformed, отсутствующее) — fail
 closed до любого exchange-вызова и до любой durable-записи. Старый `DELETE` **не сохраняется** как
-alias без доказанной необходимости backward compatibility — decommission, а не deprecation-период,
-если design Change 2 явно не докажет обратное. `GET .../open-position` — read-only lookup — этим
-решением **не затрагивается**, остаётся прежним. Точный error-код для non-canonical fraction и точная
-форма response body фиксируются в design-фазе Change 2, не здесь.
+alias без доказанной необходимости backward compatibility — decommission, а не deprecation-период.
+`GET .../open-position` — read-only lookup — этим решением **не затрагивается**, остаётся прежним.
 
 **Скоординированное изменение Runtime (внешняя зависимость).** Текущий Runtime domain command
 `ClosePositionCommand(strategy_instance_id, trade_cycle_id)` и его HTTP-адаптер (пустой `DELETE`)
@@ -531,35 +572,37 @@ Cross-repo atomic-rollout зависимость между ними должн�
 Runtime) не решается в этом master-plan, это отдельный operational вопрос design/rollout-фазы.
 
 **Что меняется.** `CloseApplicationService` (`src/services/close/closeApplicationService.ts:153-179`)
-переиспользуется максимально — тот же lifecycle (resolve binding → verify ownership → neutralize own
-entry order → confirm terminality → resolve quantity → market reduceOnly close → verify → verify no
-attributable remainder → durable `terminal_closed`), меняется только **semantic subject** и источник
-resolved quantity:
+переиспользуется максимально для single-owner (byte-for-byte, см. выше); multi-owner получает новую
+ветку:
 - Валидация `exposure_fraction`: только canonical `"1"` принимается для V1; любое иное значение — fail
   closed без exchange-вызова, без durable-записи.
-- Если у scope ровно один активный owner — poведение **не меняется**: reduceOnly qty = live aggregate
-  `row.size` (как сегодня, максимально доверяя exchange, не ABI-шным числам — сохраняем текущую
-  философию "never trust ABI-recorded quantity" для этого случая).
-- Если owners > 1: сначала, как и сегодня для единственного owner, гарантируется терминальность
-  **собственного** entry-ордера closing cycle (cancel + bounded confirm, тот же паттерн, что уже
-  применяется сегодня — просто теперь явно per-cycle, а не подразумеваемо per-scope); только после
-  этого `cumulative_filled_qty` этой записи (из `early_execution_observation`, формализованного в
-  Change 1, once `isFillFactFinal`) считается финальным и авторитетным для **этого** cycle. reduceOnly
-  qty материализуется из этого значения. Значимое расхождение между ABI-resolved quantity и живым
-  агрегированным остатком — **fail closed** ("требуется reconciliation"); небольшой tolerance на
-  биржевое округление — **рассматриваемый вариант** (например, "в пределах одного `qtyStep`"), **не**
-  утверждённый implementation contract — точный алгоритм доказывается design-фазой Change 2 на основе
-  реальной Bybit qtyStep/normalization semantics, не фиксируется здесь.
+- Single-owner (ровно один активный owner scope) — **не меняется вообще**: ни одного нового поля, ни
+  одного нового Bybit-вызова.
+- Multi-owner (owners > 1): сначала гарантируется терминальность **собственного** entry-ордера closing
+  cycle (как и раньше); `cumulative_filled_qty` этой записи (once `isFillFactFinal`) резолвится
+  transient, in-memory (никогда не пишется в `early_execution_observation` — close остаётся вне
+  observation-writing points `virtual-exposure-state`). Close-ордер отправляется под **детерминированной
+  own identity** (`buildEntryPackageOrderLinkId(sid, tcid, "close", generation)` — расширение уже
+  существующей entry-package identity-схемы новой ролью, не новая схема), **durably записанной до**
+  exchange-вызова. Retry/restart сначала резолвит судьбу уже записанной identity (через
+  `confirmEntryPackage`/`classifyEntryOrderTerminality` — уже существующие generic-примитивы, не новые)
+  и только при чистом `not_found` безопасно повторяет отправку под той же identity — новую identity
+  (generation bump) V1 не вводит; экзекуция с нулевым/частичным исполнением фейлится закрыто
+  (`close_execution_incomplete`), без auto-retry под новой identity.
+- Success gate — **исключительно собственный close-ордер cycle**, подтверждённый по своей identity;
+  aggregate используется только один раз до отправки (side + existence-санити), никогда не как proof
+  after-the-fact. Никакого global drift-tolerance config — сравнение, которое он бы толерировал,
+  устранено самим редизайном (обе стороны сравнения происходят из одного и того же запроса).
 - Release-семантика: при durable close этого cycle запись убирается из `owners`-множества scope
-  (структура `byScope`, если Change 5 к этому моменту её уже ввела — Change 1 сознательно не трогает
+  (структура `byScope`, если Change 5 к этому моменту её уже ввела — Change 1/2 сознательно не трогают
   `byScope`); сторона (`side`) scope очищается лишь когда множество owners становится пустым.
 
 **Какие инварианты отменяются/заменяются.**
 - close-execution spec L110-124 ("close size сурсится исключительно из live aggregate query, никогда
   из ABI-recorded/calculated quantity") — заменяется на "при единственном owner — как раньше; при
-  множественном — обязательно из ABI-resolved `cumulative_filled_qty`, верифицированного
-  терминальностью собственного entry-ордера". Единственный настоящий разворот философии в этой
-  программе; квалифицируется отдельно как риск (см. §6).
+  множественном — обязательно из собственного close-ордера cycle, подтверждённого по своей own
+  identity". Единственный настоящий разворот философии в этой программе; квалифицируется отдельно как
+  риск (см. §6).
 - Публичный контракт `DELETE .../open-position` (close-семантика в `abi-position-management-api`) —
   заменяется на `POST .../close` с `exposure_fraction`. Это wire-level breaking change, не только
   prose-уточнение.
@@ -567,65 +610,74 @@ resolved quantity:
 **Новые инварианты.** "Close закрывает ровно `exposure_fraction` виртуальной exposure запрошенного
 cycle, оставляя чужие доли нетронутыми"; "Runtime никогда не передаёт и не получает абсолютное exchange
 quantity — только `exposure_fraction`"; "V1 принимает только `exposure_fraction = "1"`, любое иное
-значение fail closed до любого side-эффекта"; "postcondition — exposure запрошенного cycle закрыта,
-`physical position == 0` лишь частный случай"; "release из owner-множества не подразумевает release
-всего scope, пока есть другие активные owners"; "значимое расхождение resolved quantity vs. live
-aggregate — fail closed, tolerance-алгоритм не зафиксирован на уровне master-plan".
+значение fail closed до любого side-эффекта"; "**ABI никогда не отправляет второй close-ордер для того
+же full-close intent, пока судьба ранее отправленного не подтверждена**"; "успех доказывается
+исключительно собственным close-ордером cycle, никогда aggregate-delta"; "release из owner-множества не
+подразумевает release всего scope, пока есть другие активные owners".
 
-**Затрагиваемые слои.** `src/services/close/closeApplicationService.ts` (semantic subject +
-multi-owner-aware quantity resolution), HTTP-слой: новый `POST .../close` route/handler, заменяющий
-`DELETE`-обработчик в `src/routes/positionManagementRoutes.ts`; новый/изменённый request DTO с
-`exposure_fraction` и его валидацией; `abi-position-management-api` OpenAPI-спека — реальное изменение
-метода/пути/тела запроса, не только prose. `src/correlation/entryPackageCorrelationRepository.ts`
-(partial-release helper; возможно первая реальная эволюция `byScope`, если она ещё не введена
-Change 5 — порядок между Change 2 и Change 5 уточняется на design-этапе).
+**Затрагиваемые слои.** `src/services/close/closeApplicationService.ts` (multi-owner-ветка с
+attributable close-identity), `src/domain/entryPackageOrderIdentity.ts` (`EntryPackageOrderRole` →
+добавляется `"close"`), `src/correlation/entryPackageExecutionRecord.ts` (два новых additive-поля,
+`close_order_link_id`/`close_order_id`, только на этой записи — не на `virtual-exposure-state`'s
+observation), `src/exchange/bybitOrderMapper.ts` (`orderLinkId?` на close-payload), HTTP-слой: новый
+`POST .../close` route/handler в `src/routes/positionManagementRoutes.ts`; `abi-position-management-api`
+OpenAPI-спека. `EntryPackageCorrelationRepository`'s indexing/replay/`byScope` **не затрагиваются** —
+минимум durable state оказался двумя плоскими полями на уже существующей записи, не новым store/index.
 
 **HTTP-контракты.** **Меняются.** `DELETE /v1/.../open-position` retired, заменяется на
 `POST /v1/.../close` с `{"exposure_fraction": "1"}`. `GET /v1/.../open-position` не затрагивается.
 `PUT .../entry-package`, `PUT .../protection` не затрагиваются этим change. `abi-position-management-api`
-spec для close переписывается по существу (метод, путь, request body, error-vocabulary для
-non-canonical fraction), не только текстовые уточнения.
+spec для close переписывается по существу (метод, путь, request body, error-vocabulary — новый код
+`close_execution_incomplete` вместо ранее черновой `position_exposure_drift`).
 
 **Future partial-close seam (не реализуется здесь).** `exposure_fraction = 0.5` в будущем означает
 "закрыть 50% текущей virtual exposure этого cycle" — Change 2 закладывает контрактную ось под это
 значение, но не реализует его. Вне scope: partial close execution; mutable owned remainder; cycle
 остаётся active после частичного закрытия; resize/cancel-recreate protection-ордеров; protection
-coverage fraction; partial-close reconciliation policy.
+coverage fraction; partial-close reconciliation policy; generation-scoped close-identity bump для
+auto-retry после нулевого/частичного исполнения (fail closed в V1 — намеренно).
 
 **Обязательные тесты.**
 - `exposure_fraction = "1"` принимается; `"0.5"`, `"0"`, `"2"`, malformed, отсутствующее значение — fail
   closed до любого exchange-вызова, без durable-записи.
-- Single-owner: полная регрессия исполнения (resolved quantity, порядок вызовов, postconditions) —
-  идентична сегодняшней, даже при изменённой транспортной обёртке (новый HTTP endpoint).
-- Multi-owner (синтетические фикстуры, как в Change 1): close cycle A (`exposure_fraction="1"`) не
-  отправляет reduceOnly qty больше своего `cumulative_filled_qty`; aggregate может остаться ненулевым;
-  cycle B остаётся `applied`/live, владение scope сохраняется.
-- Close cycle с entry-ордером, всё ещё `PartiallyFilled` на момент запроса close: close сначала
-  терминализирует entry-ордер (cancel+confirm), только потом резолвит финальный `cumulative_filled_qty`
-  и закрывает ровно эту величину.
-- Drift/reconciliation: значимое расхождение resolved quantity vs. live остаток → fail closed с
-  конкретным кодом (точное tolerance-поведение — по решению design-фазы Change 2, не зафиксировано
-  здесь).
-- `avg_execution_price` этого cycle и соседних не изменяются в результате close.
-- Новые route/DTO-тесты для `POST .../close` (валидация `exposure_fraction`, `unknown_trade_cycle_binding`
-  и т.п., по аналогии с существующими route-тестами).
-- `GET .../open-position` — полная регрессия, не затронут.
+- Single-owner: полная регрессия исполнения — идентична сегодняшней, даже при изменённой транспортной
+  обёртке (новый HTTP endpoint); diff доказуемо не редактирует существующий код, только добавляет ветку.
+- Multi-owner (синтетические фикстуры, как в Change 1) — retry/restart state machine покрыта явно:
+  (A) close ни разу не отправлялся → отправляется один раз под детерминированной identity;
+  (B) отправлялся, ответ потерян, ордер реально исполнился → retry не шлёт второй ордер, завершает
+  terminal-write из восстановленных данных;
+  (C) отправлялся, судьба ещё live/ambiguous → retry не шлёт замену, fail closed;
+  (D) отправлялся, судьба — нулевое исполнение → `close_execution_incomplete`, без auto-retry под
+  новой identity;
+  (E) отправлялся, судьба — частичное исполнение → `close_execution_incomplete`, partial fill не
+  засчитывается как success;
+  (not-found resend) отправлялся, но биржа не имеет записи вообще → безопасный resend под той же
+  identity.
+- Sibling cycle B (status, close-identity, fill facts, active-membership) не меняется при close cycle A.
+- `avg_execution_price`/`early_execution_observation` этого cycle и соседних не изменяются в результате
+  close (close остаётся вне observation-writing points).
+- Replay backward-compat: durable-запись без `close_order_link_id`/`close_order_id` вообще (pre-change
+  данные) реплеится успешно.
+- Новые route/DTO-тесты для `POST .../close`; `GET .../open-position` — полная регрессия, не затронут.
 
 **Зависит от.** Change 1. Плюс внешняя (cross-repo) зависимость: скоординированный Runtime change —
 ABI Change 2 не может быть безопасно выкачен в production без него (см. §6 рисков).
 
-**Состояние после.** Close — fraction-based command с новым публичным HTTP-контрактом. Для
-single-owner (сегодняшнее production-состояние) поведение и результат идентичны сегодняшним; для
-synthetic multi-owner (до Change 5) корректно закрывает только запрошенный cycle. Production rollout
-требует скоординированного Runtime-изменения.
+**Состояние после.** Close — fraction-based command с новым публичным HTTP-контрактом и retry/restart-
+safe multi-owner confirmation через атрибутируемую own-order identity. Для single-owner (сегодняшнее
+production-состояние) поведение и результат идентичны сегодняшним, byte-for-byte; для synthetic
+multi-owner (до Change 5) корректно и безопасно закрывает только запрошенный cycle, даже при
+crash/retry. Production rollout требует скоординированного Runtime-изменения.
 
 **Осознанно вне scope.** `exposure_fraction < 1` (partial close execution); mutable durable owned
 remainder; resize/cancel-recreate protection-ордеров; protection coverage fraction; partial-close
-reconciliation policy; same-side production activation (Change 5); opposite-side coexistence;
-pair-owned protection-ордера (Changes 6–8); `first_fill`/entry-bar resolution (Change 3); recovery
-redesign (Change 4); Runtime, хранящий/пересылающий абсолютный quantity; ABI → Runtime push; portfolio/
-netting engine; окончательный drift-tolerance алгоритм (design Change 2, не master-plan); точный
-Runtime change-id и его wire-представление (будущий Runtime OpenSpec).
+reconciliation policy; generation-scoped close-identity bump для auto-retry после нулевого/частичного
+исполнения; global drift-tolerance config (убран полностью — сравнение, которое он бы толерировал,
+устранено редизайном); cross-owner aggregate reconciliation как отдельная observability-проверка;
+same-side production activation (Change 5); opposite-side coexistence; pair-owned protection-ордера
+(Changes 6–8); `first_fill`/entry-bar resolution (Change 3); recovery redesign (Change 4); Runtime,
+хранящий/пересылающий абсолютный quantity; ABI → Runtime push; portfolio/netting engine; точный Runtime
+change-id и его wire-представление (будущий Runtime OpenSpec).
 
 ---
 
@@ -1089,15 +1141,16 @@ Change 1 (foundation: exposure state)
    потребителю (close/open-position/protection) нужна свежая величина. Рекомендация — on-demand
    переспрос (меньше состояния для поддержания консистентным), решение фиксируется в design-фазе Change 1.
 
-2. **Политика допуска дрейфа и tolerance-алгоритм.** `sum(ABI-resolved authoritative exposure активных
-   same-side owners)` может разойтись с живым агрегированным размером позиции (округления qtyStep у
-   разных входов, ручное вмешательство, частичные fills). High-level правило зафиксировано (см.
-   Change 2): значимое расхождение — fail closed с явным "требуется reconciliation" кодом, никогда
-   молчаливое клампирование вниз (могло бы срезать чужую, соседнюю по scope, exposure). Но **конкретный
-   tolerance-алгоритм — не решён на уровне master-plan**: "в пределах одного `qtyStep`" — это
-   рассматриваемый вариант, а не утверждённый implementation contract. Design-фаза Change 2 обязана
-   доказать этот алгоритм на основании реальной Bybit qtyStep/normalization semantics, прежде чем он
-   станет частью реализации.
+2. **[Закрыто ревизией v6] Политика допуска дрейфа и tolerance-алгоритм.** Исходная формулировка этого
+   риска предполагала сравнение `sum(ABI-resolved exposure)` vs. живой aggregate с неким tolerance —
+   design-фаза Change 2 (см. ревизию v6 и corrected `design.md`) показала, что это сравнение само по
+   себе небезопасно как success-proof (aggregate delta не различает "мой close" от активности соседа), а
+   не только неточно откалибровано. Корректная модель устраняет сравнение целиком: success доказывается
+   исключительно собственным close-ордером cycle, подтверждённым по своей own identity; aggregate
+   используется только один раз до отправки для side/existence-санити, никогда как success-gate.
+   Global drift-tolerance config полностью убран из Change 2. Cross-owner aggregate reconciliation как
+   отдельная observability-проверка (не success-gate) остаётся возможным будущим доп.-change, если
+   реальная эксплуатация докажет необходимость — не введена speculatively.
 
 3. **Таксономия ошибок.** Opposite-side rejection, protection-guard для shared scope и новый
    reconciliation-required код для close можно отдавать как существующий `internal_error` (не меняя
@@ -1118,7 +1171,10 @@ Change 1 (foundation: exposure state)
    close принципиально не доверял ABI-recorded количествам именно чтобы избежать дрейфа; теперь для
    multi-owner случая это единственный физически возможный источник, и только после верификации
    терминальности собственного entry-ордера cycle. Это решение нужно явно одобрить, а не оставлять
-   неявным побочным эффектом.
+   неявным побочным эффектом. **[Уточнено v6]** сам факт resolved quantity не единственное новое —
+   не менее важно, что close получает **собственную атрибутируемую order identity** (тот же паттерн, что
+   уже используется entry-package create/cancel), чтобы retry/restart после потери ответа не мог
+   отправить второй close-ордер и случайно затронуть чужую exposure соседнего cycle на том же scope.
 
 7. **Совместимость protection в single-owner случае (Change 7/8).** Нужно решить: сохраняется ли
    `/v5/position/trading-stop` как fallback-путь для scope с ровно одним owner (проще, меньше нового
@@ -1176,7 +1232,10 @@ Change 1 (foundation: exposure state)
    `exposure_fraction`, отличная от `"1"` (например `"0.5"`), отклоняется fail-closed без exchange-вызова;
    отдельно — подтвердить, что `DELETE .../open-position` действительно снят (или, если принят
    переходный период по риску 12, ведёт себя ровно так, как зафиксировано в его решении), и что
-   `GET .../open-position` не изменился.
+   `GET .../open-position` не изменился; отдельно (synthetic multi-owner fixture, не Demo) — убедиться,
+   что повторный `POST .../close` для cycle, чей предыдущий close-ордер уже durably записан
+   (`close_order_link_id`), никогда не отправляет второй Bybit-ордер, пока судьба первого не
+   подтверждена по его own identity.
 4. **Change 3** → apply → аналогично → smoke: `GET open-position` на реальной Demo-позиции, включая
    момент, когда entry-ордер ещё partial — `average_entry_price` в ответе актуален, а не устаревший;
    ответ по-прежнему не содержит quantity-поля.
