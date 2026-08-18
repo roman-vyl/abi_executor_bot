@@ -1272,7 +1272,11 @@ error-таксономии `abi-open-position-lookup-api` сверх уже су
 ### Change 5 — `abi-same-side-virtual-exposure-ownership-v1` (Foundation — production exclusivity сохраняется; см. ревизию v14)
 
 **Цель.** Архитектурная идея №1 — заменить physical-scope exclusivity на virtual same-side exposure
-ownership. Это единственный change из первой пятёрки, реально включающий multi-owner в production.
+ownership. **Уточнено ревизией v14: Change 5 — foundation-only, не production activation.** Механика
+(full-set lookup, exclude-self, side-aware classification/replay preparation, protection guard) строится
+и полностью тестируется на synthetic fixtures здесь, но temporary admission guard сохраняет сегодняшнюю
+exclusivity (максимум один active owner на scope, любой стороны) в production. Единственный change,
+реально включающий multi-owner в production — Change 8, снятием этого guard.
 
 **Что меняется.**
 - `EntryPackageApplicationService.createOrder()` (`entryPackageApplicationService.ts:268-294`): claim-
