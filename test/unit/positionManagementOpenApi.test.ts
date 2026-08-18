@@ -85,6 +85,7 @@ test("protection operation owns transport shape and the documented error codes",
     "#/components/schemas/UnknownTradeCycleBindingError",
     "#/components/schemas/UnsupportedExchangeScopeError",
     "#/components/schemas/PositionNotOpenError",
+    "#/components/schemas/SharedScopeProtectionUnsupportedError",
   ]);
 });
 

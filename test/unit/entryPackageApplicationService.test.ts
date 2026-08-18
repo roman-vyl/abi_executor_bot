@@ -16,7 +16,10 @@ import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInst
 import type { ExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
 import { BybitInstrumentTradingRulesProvider } from "../../src/exchange/instrumentTradingRulesProvider.js";
-import { EntryPackageApplicationService } from "../../src/services/entryPackage/entryPackageApplicationService.js";
+import {
+  classifyScopeAdmission,
+  EntryPackageApplicationService,
+} from "../../src/services/entryPackage/entryPackageApplicationService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
 import { makeTestConfig } from "../fixtures/config.js";
@@ -814,6 +817,69 @@ test("a failing first request releases the mutex so a subsequent request for the
   });
 });
 
+// -- abi-same-side-virtual-exposure-ownership-v1: classifyScopeAdmission --
+//
+// Pure, synthetic tests of the real, permanent admission classification
+// createOrder()'s temporary production guard currently wraps (design.md
+// Decision 1) — proven correct here independent of that guard, which
+// currently collapses every non-"empty" outcome into a conflict. Active
+// records are hand-built, never produced via two real service.apply()
+// calls, since the guard makes that impossible to observe from outside
+// today (see design.md's own regression analysis).
+
+test("classifyScopeAdmission: no other active records classifies as empty", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const classification = classifyScopeAdmission([self], makeCommand(), "long");
+  assert.equal(classification, "empty");
+});
+
+// The specific bug the architecture review found: without excluding the
+// requesting pair's own record first, a pair retrying while it is the
+// scope's only active owner would be classified as conflicting with
+// itself — turning a legitimate self-retry into a false conflict once the
+// temporary guard (which conflicts on anything but "empty") is applied.
+test("classifyScopeAdmission: the requesting pair's own record is excluded — sole self-ownership classifies as empty, not same_side", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const classification = classifyScopeAdmission(
+    [self],
+    makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
+    "long",
+  );
+  assert.equal(classification, "empty");
+});
+
+test("classifyScopeAdmission: the requesting pair's own record is excluded even alongside a genuinely different same-side sibling", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const sibling = makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" });
+  const classification = classifyScopeAdmission(
+    [self, sibling],
+    makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
+    "long",
+  );
+  assert.equal(classification, "same_side");
+});
+
+test("classifyScopeAdmission: another active record on the opposite side classifies as opposite_side", () => {
+  const other = makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "short" });
+  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  assert.equal(classification, "opposite_side");
+});
+
+test("classifyScopeAdmission: another active record with no usable desired_entry classifies as corrupt", () => {
+  const other = { ...makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }), desired_entry: null };
+  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  assert.equal(classification, "corrupt");
+});
+
+test("classifyScopeAdmission: multiple other active records all sharing the requested side classify as same_side", () => {
+  const others = [
+    makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }),
+    makeActiveRecord({ strategyInstanceId: "instance-3", tradeCycleId: "cycle-3", side: "long" }),
+  ];
+  const classification = classifyScopeAdmission(others, makeCommand(), "long");
+  assert.equal(classification, "same_side");
+});
+
 // Cross-pair scope tests deliberately vary both strategy_instance_id and
 // trade_cycle_id, not trade_cycle_id alone: the target V1 model is
 // "instance-A/cycle-A1 vs. instance-B/cycle-B1 both wanting BTCUSDT" —
@@ -1127,6 +1193,36 @@ function makeDesiredEntry(overrides: Partial<DesiredEntryDto> = {}): DesiredEntr
     initial_take_price: "103000",
     locked_exit_profile: "runner",
     ...overrides,
+  };
+}
+
+function makeActiveRecord(overrides: {
+  strategyInstanceId: string;
+  tradeCycleId: string;
+  side: "long" | "short";
+}): EntryPackageExecutionRecord {
+  return {
+    strategy_instance_id: overrides.strategyInstanceId,
+    trade_cycle_id: overrides.tradeCycleId,
+    ticker: "BTCUSDT.P",
+    exchange_symbol: "BTCUSDT",
+    exchange_category: "linear",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    desired_entry: makeDesiredEntry({ side: overrides.side }),
+    risk_multiplier: "1",
+    calculated_quantity: "0.001",
+    order_link_id: "link-1",
+    order_id: "order-1",
+    close_order_link_id: null,
+    close_order_id: null,
+    generation: 1,
+    status: "applied",
+    early_execution_observation: null,
+    binding_history: [],
+    pending_action: null,
+    current_binding_started_at: "2026-01-01T00:00:00.000Z",
+    first_fill_at_ms: null,
   };
 }
 

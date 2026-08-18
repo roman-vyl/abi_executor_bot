@@ -80,7 +80,7 @@
             }
           },
           "422": {
-            "description": "Transport validation failed, no correlation record exists for the pair, the resolved scope's exchange category is out of scope, or the pair has no live position to protect",
+            "description": "Transport validation failed, no correlation record exists for the pair, the resolved scope's exchange category is out of scope, the pair has no live position to protect, or the pair's scope currently has more than one active owner",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ProtectionBusinessError" },
@@ -115,6 +115,14 @@
                       "error": {
                         "code": "position_not_open",
                         "message": "no live position exists for the requested pair"
+                      }
+                    }
+                  },
+                  "shared_scope_protection_unsupported": {
+                    "value": {
+                      "error": {
+                        "code": "shared_scope_protection_unsupported",
+                        "message": "this scope currently has more than one active owner; protection is not yet supported for it"
                       }
                     }
                   }
@@ -435,12 +443,29 @@
           }
         }
       },
+      "SharedScopeProtectionUnsupportedError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "const": "shared_scope_protection_unsupported" },
+              "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
       "ProtectionBusinessError": {
         "oneOf": [
           { "$ref": "#/components/schemas/ValidationFailedError" },
           { "$ref": "#/components/schemas/UnknownTradeCycleBindingError" },
           { "$ref": "#/components/schemas/UnsupportedExchangeScopeError" },
-          { "$ref": "#/components/schemas/PositionNotOpenError" }
+          { "$ref": "#/components/schemas/PositionNotOpenError" },
+          { "$ref": "#/components/schemas/SharedScopeProtectionUnsupportedError" }
         ]
       },
       "CloseBusinessError": {

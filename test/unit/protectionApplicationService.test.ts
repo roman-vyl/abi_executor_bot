@@ -57,24 +57,45 @@ for (const status of ["absent", "terminal_unfilled"] as const) {
   });
 }
 
-test("a scope-ownership mismatch fails closed with internal_error", async () => {
+// abi-same-side-virtual-exposure-ownership-v1: the requesting pair's own
+// record present, plus a genuinely different pair's record also active on
+// the same scope — a synthetic multi-owner fixture (this scope's admission
+// guard never lets this arise from real PUT .../entry-package traffic, see
+// design.md Decision 1) proving the new shared-scope guard fires with its
+// own distinct, actionable code, before any exchange call.
+test("a scope shared with another active owner fails closed with shared_scope_protection_unsupported, no exchange call", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
-    // A different pair's record now claims the same scope — simulates the
-    // invariant being violated (should be unreachable under
-    // position-scope-exclusivity, but must still fail closed).
-    await repo.save(
-      makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }),
-    );
+    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }));
 
     const result = await service.apply(makeCommand());
 
-    assert.equal(result.statusCode, 500);
-    assert.deepEqual(result.body, { error: { code: "internal_error", message: "internal error" } });
+    assert.equal(result.statusCode, 422);
+    assert.deepEqual(result.body, {
+      error: {
+        code: "shared_scope_protection_unsupported",
+        message: "this scope currently has more than one active owner; protection is not yet supported for it",
+      },
+    });
     assert.equal(bybit.getOpenPositionsCalls.length, 0);
     assert.equal(bybit.setTradingStopCalls.length, 0);
   });
 });
+
+// Note on the "requesting pair is not among the scope's active owners"
+// branch (ProtectionApplicationService's own !selfIsActive check): under
+// the prior findOwnerByScope()-based check this was reachable in principle
+// if that separate single-pointer index ever disagreed with the record's
+// own fields (defensive, "should be unreachable" per the removed comment).
+// Under findActiveRecordsForScope(), there is no longer a separate index to
+// disagree with — the scan is keyed directly off the same record's own
+// exchange_category/exchange_symbol, so the record trivially finds itself
+// whenever it is non-durably-closed with a valid category. This branch is
+// therefore stricter than before (unreachable by construction through any
+// state save()/get() can produce, not merely "should be unreachable"), and
+// is kept only as defensive code — no test can honestly exercise it without
+// fabricating an inconsistent state no write path in this codebase
+// produces, so none is added for it.
 
 test("an unsupported category returns unsupported_exchange_scope", async () => {
   await withService(async ({ service, bybit, repo }) => {
