@@ -348,6 +348,70 @@
 > primitive — не duplicate Change 2's логики, не generic OMS, не новый adapter/decoder/cancel/dispatch
 > путь. Остальные пункты v11 (1, 2, 4, 6) остаются в силе без изменений.
 
+> **Ревизия v13 — согласующий проход для Change 5 (`abi-same-side-virtual-exposure-ownership-v1`) по
+> итогам короткого architecture-review против фактически применённых Changes 1-4, до proposal Change 5.**
+> Текст Change 5 ниже (строки, описывающие "Что меняется"/"Затрагиваемые слои") недооценивал реальный объём
+> claim-стороны работы и не называл два конкретных найденных findings. Сам review — единственный
+> authoritative источник коррекции; сам master-plan текст Change 5 не переписывается заново построчно
+> здесь, только фиксируются найденные поправки, которые proposal Change 5 обязан отразить.
+>
+> 1. **`EntryPackageCorrelationRepository.findOwnerByScope()`/`byScope` — single-pointer, непригоден для
+>    admission/ownership-решений после активации multi-owner.** `byScope.set(scope, record)` на каждый
+>    non-durably-closed write означает, что этот индекс помнит только **последнего** писавшего в scope, не
+>    множество активных владельцев. Change 2 (`closeApplicationService.ts:124-129`) уже обнаружил эту
+>    проблему для close и уже переключился на `findActiveRecordsForScope()` — Change 5 обязан применить
+>    ровно то же самое решение (не новое) к двум оставшимся продакшн call sites: claim-check в
+>    `EntryPackageApplicationService.createOrder()` и ownership re-verification в
+>    `ProtectionApplicationService` (`protectionApplicationService.ts:93-102`). После Change 5
+>    `findOwnerByScope()`/`byScope` — legacy/convenience primitive (не удаляется, реализация не меняется),
+>    но больше не валиден ни для одного ownership-решения.
+> 2. **Найден конкретный self-conflict баг, а не гипотетический риск.** Если пара B присоединяется к scope
+>    той же стороны после пары A (так что `byScope` теперь указывает на B, поскольку он всегда отражает
+>    последнюю запись), последующий retry/new-generation `createOrder()` для самой пары A
+>    (`repeatPutRevalidate` → `createOrder()` при `order_link_id === null`) прочитает `owner = B`,
+>    `isOwnedBySamePair(B, A) === false` и ошибочно вернёт conflict для законного retry пары A, хотя A
+>    остаётся активным владельцем scope. Это прямое следствие уже существующей семантики
+>    `findOwnerByScope`, а не новая проблема multi-owner эпохи — proposal Change 5 обязан явно
+>    exclude-self из "остальных активных записей" ПЕРЕД сравнением стороны (это же исправляет баг).
+>
+> **Итоговая семантика claim (заменяет содержательно, но не переписывает построчно, "Что меняется" Change
+> 5 ниже):** внутри уже существующего `scopeMutex.withKeyLock(...)` — `findActiveRecordsForScope(category,
+> symbol)`, отфильтровать записи запрашивающей пары; если остальных нет → claim; если у всех остальных та
+> же `desired_entry.side` → join; если хотя бы у одной противоположная — conflict; активная запись с
+> `desired_entry === null` среди остальных → fail closed как contradiction (тот же безопасный ответ, что
+> conflict — новый public error code для этого случая не нужен, см. ниже). Mutex/store/index — без
+> изменений, никакой новой инфраструктуры.
+>
+> **Replay:** `rebuildScopeIndexFromReplay()` — правило меняется с "любая вторая активная запись → fail" на
+> "смешанная сторона среди активных записей одного scope → fail"; сравнение — через локальную,
+> непер­систентную `Map<scope, side>` внутри одного прохода replay (не новый постоянный индекс). Активная
+> запись без usable `desired_entry.side` — readiness fail closed, тот же принцип, что уже применяется к
+> записи без usable exchange binding.
+>
+> **Release:** отдельной работы не требует — уже полностью работает через существующую фильтрацию
+> `isDurablyClosedEntryPackageStatus` внутри `findActiveRecordsForScope` и уже shipped
+> `finalizeMultiOwnerClose` (Change 2). Формулировка Change 5 ниже ("Release generalized... реализовано в
+> Change 2/1") читается как todo этого change — это неточность: это уже готовый prerequisite, не работа
+> Change 5.
+>
+> **Protection guard:** новый явный error code `shared_scope_protection_unsupported` (422,
+> `abi-position-management-api`, protection-only) — решение по риску §6 п.3 принято: admission-конфликт
+> (opposite-side claim) остаётся на существующем `internal_error` (переиспользует уже существующий,
+> явно задокументированный в `position-scope-exclusivity` принцип "no new public error code для
+> admission conflicts"), а protection shared-scope guard получает **новый** код, поскольку это
+> действительно новый, caller-actionable outcome (та же логика, что уже оправдала `close_execution_incomplete`
+> в Change 2) — не симметрия ради симметрии.
+>
+> **Судьба capability id.** Мастер-план ниже предлагает завести новую capability
+> (`virtual-exposure-ownership`) и перевести `position-scope-exclusivity` в статус superseded. Proposal
+> Change 5 сознательно этого не делает: capability id остаётся `position-scope-exclusivity`, меняются
+> только requirement-тексты внутри неё (тот же паттерн, что Change 3 уже применил к
+> `open-position-resolution`, полностью переписав её центральную семантику без переименования). Ренейминг
+> capability — отдельное, не заблокированное этим change, документационное решение.
+>
+> Полная truth table, design decisions и обоснование — в design-фазе Change 5 (OpenSpec
+> `abi-same-side-virtual-exposure-ownership-v1`), не здесь.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
