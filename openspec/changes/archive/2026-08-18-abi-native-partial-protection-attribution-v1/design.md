@@ -172,7 +172,21 @@ export type AttachedProtectionResolution =
   | { kind: "attributed"; stop: AttachedProtectionLeg; take: AttachedProtectionLeg }
   | {
       kind: "ambiguous";
-      reason: "extra_candidates" | "duplicate_role" | "unclassified_role" | "partial_pair" | "inconsistent_duplicate";
+      reason:
+        | "extra_candidates"
+        | "duplicate_role"
+        | "unclassified_role"
+        | "partial_pair"
+        | "inconsistent_duplicate"
+        // Found during implementation, not in the original draft: a query
+        // this primitive could not complete (a thrown transport error, or a
+        // decodeChildOrderListResponse protocol_failure) needs an outcome
+        // too. Folded into the same "ambiguous" kind the rest of this
+        // codebase already uses for query failures (e.g.
+        // classifyEntryOrderTerminality's own "ambiguous" on a query_failed
+        // realtime/history result, packageConfirmation.ts) rather than a
+        // parallel error channel this type didn't originally have.
+        | "query_failed";
     };
 
 export async function resolveOwnAttachedProtection(input: {
@@ -248,12 +262,15 @@ responses with `decodeChildOrderListResponse`, concatenates the candidate lists,
 `parentOrderLinkId === entryOrderLinkId`, then **deduplicates by `orderId`** (fact 7) before role
 classification — a candidate appearing in both the realtime and history result is one child, not two.
 
-**Deduplication contradiction check.** If the same `orderId` appears in both sources with **inconsistent**
-evidence (different `stopOrderType`, different `qty`, or an orderStatus combination that cannot represent
-one order's real state — e.g. one source reporting it live, the other reporting a status incompatible
-with that) → `{ kind: "ambiguous", reason: "inconsistent_duplicate" }`. This is deliberately distinct
-from `duplicate_role` (two genuinely different orders sharing a role): a same-`orderId` disagreement means
-the evidence itself is contradictory, not that there are too many candidates.
+**Deduplication contradiction check.** If the same `orderId` appears in both sources with a **different**
+`stopOrderType` or a **different** `qty` → `{ kind: "ambiguous", reason: "inconsistent_duplicate" }`.
+`orderStatus` (and `leavesQty`) are deliberately **not** part of this check — they are exactly the fields
+expected to legitimately differ between the two sources during the realtime→history transition (a leg
+still live in one snapshot, already terminal in the other is the normal case fact 7/8 describe, not a
+contradiction); when `orderId` matches and `stopOrderType`/`qty` agree, the history-side record is kept
+as the more authoritative statement of current status. This is deliberately distinct from `duplicate_role`
+(two genuinely different orders sharing a role): a same-`orderId` disagreement means the evidence itself
+is contradictory, not that there are too many candidates.
 
 After dedup, classify the remaining candidates:
 
@@ -275,21 +292,34 @@ After dedup, classify the remaining candidates:
   without the other is not an expected transitional state; fail closed rather than guess whether the
   missing leg was never created, already fully consumed, or simply not yet visible due to history lag
   (fact 8) — the caller, not this primitive, decides whether to re-query.
-- **More than one distinct-`orderId` candidate for the same role** → `{ kind: "ambiguous", reason:
-  "duplicate_role" }`. (Fact-checked against "What remains explicitly unproven": if a real multi-fill
-  parent legitimately produces a second pair, this is exactly the outcome that surfaces — fail closed,
-  not silently accepted as a new legitimate shape.)
-- **A candidate whose `stopOrderType` does not map to either known role value** → `{ kind: "ambiguous",
-  reason: "unclassified_role" }` — never silently dropped from consideration, since silently dropping it
-  could turn a real duplicate/three-candidate situation into a false "clean pair". `createType` (fact 4)
-  is read and compared only as corroboration when `stopOrderType` already classified the role — it never
-  substitutes for a missing or unrecognized `stopOrderType`.
-- **Any remaining shape combining into more than the two expected roles after dedup** → `{ kind:
-  "ambiguous", reason: "extra_candidates" }`.
+Precise, total ordering after dedup (implementation, not just illustrative prose — every reachable
+`(stopCount, takeCount)` shape is covered exactly once):
+
+1. **Any candidate whose `stopOrderType` does not map to either known role value** → `{ kind:
+   "ambiguous", reason: "unclassified_role" }`, checked before role counts are even considered — never
+   silently dropped from consideration, since silently dropping it could turn a real duplicate/three-
+   candidate situation into a false "clean pair". `createType` (fact 4) is read and compared only as
+   corroboration when `stopOrderType` already classified the role — it never substitutes for a missing
+   or unrecognized `stopOrderType`.
+2. **Both roles have more than one distinct-`orderId` candidate** (`stopCount > 1 AND takeCount > 1`) →
+   `{ kind: "ambiguous", reason: "extra_candidates" }`.
+3. **Exactly one role has more than one distinct-`orderId` candidate** (`stopCount > 1 XOR takeCount >
+   1`) → `{ kind: "ambiguous", reason: "duplicate_role" }`. (Checked against "What remains explicitly
+   unproven": if a real multi-fill parent legitimately produces a second pair, this is exactly the
+   outcome that surfaces — fail closed, not silently accepted as a new legitimate shape.)
+4. **Both roles have zero candidates** (`stopCount === 0 AND takeCount === 0`) → `{ kind: "none" }`.
+5. **Both roles have exactly one candidate** (`stopCount === 1 AND takeCount === 1`) → `{ kind:
+   "attributed", stop, take }`.
+6. **Anything else** (necessarily: exactly one role has exactly one candidate, the other has zero) →
+   `{ kind: "ambiguous", reason: "partial_pair" }`.
 
 No outcome here is ever resolved by "pick the most recent" or "pick the first found" — every ambiguous
 shape fails closed, mirroring `classifyScopeAdmission`'s (`abi-same-side-virtual-exposure-ownership-v1`)
-"corrupt" outcome and this codebase's general fail-closed-on-contradiction discipline.
+"corrupt" outcome and this codebase's general fail-closed-on-contradiction discipline. A query this
+primitive could not complete at all (a thrown transport error from either Bybit call, or a
+`decodeChildOrderListResponse` `protocol_failure` on either response) short-circuits before any of the
+above and returns `{ kind: "ambiguous", reason: "query_failed" }` — the same "query failure folds into
+ambiguous" discipline `classifyEntryOrderTerminality` already applies (`packageConfirmation.ts`).
 
 ### 4. New adapter primitive: symbol-scoped order history
 

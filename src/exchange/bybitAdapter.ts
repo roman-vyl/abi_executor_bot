@@ -9,6 +9,7 @@ import type {
   BybitGetExecutionListPayload,
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
+  BybitGetOrderHistoryForSymbolPayload,
   BybitMarketCloseOrderPayload,
 } from "./bybitOrderMapper.js";
 
@@ -96,6 +97,11 @@ export interface BybitAdapter {
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
+  // Symbol-scoped, not orderLinkId-scoped — surfaces terminal candidates
+  // for native attached-protection attribution
+  // (abi-native-partial-protection-attribution-v1), subject to a confirmed
+  // history propagation lag the caller must account for.
+  getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown>;
   getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>;
   getInstrumentInfo(category: string, symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
@@ -217,6 +223,23 @@ export class RestBybitAdapter implements BybitAdapter {
         category: payload.category,
         symbol: payload.symbol,
         orderLinkId: payload.orderLinkId,
+        limit: payload.limit,
+      }),
+    );
+  }
+
+  // Symbol-scoped order history — no orderLinkId, mirroring getActiveOrders's
+  // existing symbol-scoped shape applied to the history endpoint instead of
+  // realtime. Confirmed reachable against Bybit Demo
+  // (abi-native-partial-protection-attribution-v1 design.md Decision 0/4),
+  // subject to a confirmed propagation lag: an empty/incomplete result
+  // shortly after a transition is not proof a terminal order does not exist.
+  async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
+    return this.signedGet(
+      "/v5/order/history",
+      new URLSearchParams({
+        category: payload.category,
+        symbol: payload.symbol,
         limit: payload.limit,
       }),
     );
@@ -402,6 +425,10 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     return stub("getOrderHistory", payload);
+  }
+
+  async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
+    return stub("getOrderHistoryForSymbol", payload);
   }
 
   async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {

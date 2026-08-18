@@ -8,7 +8,7 @@ introduces no new durable state and changes no production-observable behavior on
 read-only foundation `abi-native-partial-protection-lifecycle-v1` (replacement/update lifecycle) and
 `abi-native-partial-protection-cutover-v1` (production activation) build on.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Attribution is exclusively through Bybit's own parent-order linkage
 ABI SHALL attribute a candidate protection child to a trade cycle's own entry order only by matching a
@@ -99,6 +99,17 @@ after a child transitions to a terminal state.
 - **THEN** ABI's report reflects only what the queries actually returned
 - **AND** ABI does not itself assert that a candidate is permanently absent solely because one query
   attempt did not find it
+
+### Requirement: A query ABI could not complete is reported as ambiguous, not fabricated as absence or success
+ABI SHALL report a transport failure or a structurally invalid response encountered while resolving
+attached protection as its own distinct ambiguous outcome, and SHALL NOT treat it as proof that no
+attached protection exists, nor silently proceed as if only the queries that did succeed were the whole
+picture.
+
+#### Scenario: A failed query is not reported as "no attached protection"
+- **WHEN** ABI cannot complete one of the queries it needs to resolve a trade cycle's attached protection
+- **THEN** ABI reports this as ambiguous
+- **AND** ABI does not report that no attached protection exists solely because the query attempt failed
 
 ### Requirement: No matching candidates is reported plainly, without ABI inferring whether that is expected
 ABI SHALL report the absence of any attributed candidate as its own distinct outcome, and SHALL NOT

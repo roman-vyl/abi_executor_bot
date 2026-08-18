@@ -18,7 +18,12 @@ export type BybitCreateOrderPayload = {
   stopLoss?: string;
   tpTriggerBy?: string;
   slTriggerBy?: string;
-  tpslMode?: "Full";
+  // "Partial" widened in for abi-native-partial-protection-attribution-v1 —
+  // BybitCreateOrderPayload construction under "Partial" exists
+  // (buildPartialProtectionEntryOrderPayload below) but is not called by
+  // mapEntryPackageToBybit(); production entry create keeps sending "Full"
+  // until abi-native-partial-protection-cutover-v1.
+  tpslMode?: "Full" | "Partial";
   tpOrderType?: "Market";
   slOrderType?: "Market";
 };
@@ -63,6 +68,17 @@ export type BybitGetOrderHistoryPayload = {
   symbol: string;
   orderLinkId: string;
   limit: "1";
+};
+
+// Deliberately no orderLinkId field — a distinct, narrower type from
+// BybitGetOrderHistoryPayload rather than making that one's orderLinkId
+// optional, so a symbol-wide scan (this) and a single-order lookup (that)
+// can never be confused at the type level
+// (abi-native-partial-protection-attribution-v1 design.md Decision 4).
+export type BybitGetOrderHistoryForSymbolPayload = {
+  category: string;
+  symbol: string;
+  limit: string;
 };
 
 // Deliberately no orderId field: Bybit's own documented parameter-priority
@@ -149,6 +165,43 @@ export function mapEntryPackageToBybit(
       orderLinkId: input.orderLinkId,
       limit: "1",
     },
+  };
+}
+
+// Builds the tpslMode: "Partial" variant of the entry create payload —
+// otherwise identical to mapEntryPackageToBybit()'s own createEntryOrder
+// construction, reusing the same semantics/trigger-direction mapping. A
+// deliberately separate function, not a flag inside mapEntryPackageToBybit()
+// itself, so a reviewer can see without running anything that production's
+// call to mapEntryPackageToBybit() is untouched: nothing in
+// EntryPackageApplicationService calls this function yet — wiring it into
+// createOrder()'s production path is abi-native-partial-protection-cutover-v1's
+// job, not this one's (abi-native-partial-protection-attribution-v1
+// design.md Decision 6).
+export function buildPartialProtectionEntryOrderPayload(
+  config: AbiConfig,
+  input: EntryPackageOrderInput,
+): BybitCreateOrderPayload {
+  const semantics = mapEntryOrderSemantics(input.side);
+  const triggerDirection = mapTriggerDirection(semantics.triggerDirection);
+
+  return {
+    category: input.category,
+    symbol: input.symbol,
+    side: semantics.exchangeSide,
+    orderType: "Market",
+    qty: input.qty,
+    triggerPrice: input.plannedEntryPrice,
+    triggerDirection,
+    triggerBy: config.bybitTriggerBy,
+    orderLinkId: input.orderLinkId,
+    tpslMode: "Partial",
+    stopLoss: input.initialStopPrice,
+    slTriggerBy: config.bybitTriggerBy,
+    slOrderType: "Market",
+    takeProfit: input.initialTakePrice,
+    tpTriggerBy: config.bybitTriggerBy,
+    tpOrderType: "Market",
   };
 }
 

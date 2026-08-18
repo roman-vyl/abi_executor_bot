@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeOrderQueryResponse } from "../../src/services/entryPackage/orderQueryResponseDecoder.js";
-import type { OrderQueryProtocolFailureReason } from "../../src/services/entryPackage/orderQueryResponseDecoder.js";
+import { decodeChildOrderListResponse, decodeOrderQueryResponse } from "../../src/services/entryPackage/orderQueryResponseDecoder.js";
+import type {
+  ChildOrderListProtocolFailureReason,
+  OrderQueryProtocolFailureReason,
+} from "../../src/services/entryPackage/orderQueryResponseDecoder.js";
 
 const expected = { category: "linear", symbol: "BTCUSDT", orderLinkId: "link-1" };
 
@@ -282,4 +285,163 @@ test("cumExecQty present as null rather than a string is invalid_cumulative_fill
     { retCode: 0, result: { category: "linear", list: [row({ cumExecQty: null })] } },
     "invalid_cumulative_filled_qty",
   );
+});
+
+// -- decodeChildOrderListResponse --
+// abi-native-partial-protection-attribution-v1: a symbol-scoped list decoder,
+// distinct from decodeOrderQueryResponse above — accepts zero or many rows,
+// never rejects on orderLinkId (native children observe it empty).
+
+const childListExpected = { category: "linear", symbol: "BTCUSDT" };
+
+function childRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    symbol: "BTCUSDT",
+    orderLinkId: "",
+    orderId: "order-1",
+    parentOrderLinkId: "abi-ep-entry-1",
+    stopOrderType: "PartialStopLoss",
+    createType: "CreateByPartialStopLoss",
+    orderStatus: "Untriggered",
+    triggerPrice: "99000",
+    qty: "0.001",
+    leavesQty: "0.001",
+    ...overrides,
+  };
+}
+
+function assertChildListProtocolFailure(response: unknown, reason: ChildOrderListProtocolFailureReason): void {
+  const decoded = decodeChildOrderListResponse({ response, expected: childListExpected });
+  assert.deepEqual(decoded, { kind: "protocol_failure", reason });
+}
+
+test("an empty list decodes as ok with zero items", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [] } },
+    expected: childListExpected,
+  });
+  assert.deepEqual(decoded, { kind: "ok", items: [] });
+});
+
+test("several well-formed rows all decode", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: {
+      retCode: 0,
+      result: {
+        category: "linear",
+        list: [
+          childRow({ orderId: "order-1", stopOrderType: "PartialStopLoss" }),
+          childRow({ orderId: "order-2", stopOrderType: "PartialTakeProfit", createType: "CreateByPartialTakeProfit" }),
+        ],
+      },
+    },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok") {
+    assert.equal(decoded.items.length, 2);
+    assert.equal(decoded.items[0].orderId, "order-1");
+    assert.equal(decoded.items[1].orderId, "order-2");
+  }
+});
+
+test("an empty orderLinkId on a row is legitimate, not rejected", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [childRow({ orderLinkId: "" })] } },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok") {
+    assert.equal(decoded.items[0].orderLinkId, "");
+  }
+});
+
+test("more than one row does not fail closed by row count alone", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [childRow(), childRow({ orderId: "order-2" })] } },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
+});
+
+test("a category mismatch on the child list is category_mismatch", () => {
+  assertChildListProtocolFailure({ retCode: 0, result: { category: "spot", list: [] } }, "category_mismatch");
+});
+
+test("a symbol mismatch on any row is symbol_mismatch", () => {
+  assertChildListProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [childRow({ symbol: "ETHUSDT" })] } },
+    "symbol_mismatch",
+  );
+});
+
+test("a missing envelope is malformed_envelope", () => {
+  assertChildListProtocolFailure({ retCode: 0 }, "malformed_envelope");
+});
+
+test("a non-array list is list_not_array", () => {
+  assertChildListProtocolFailure({ retCode: 0, result: { category: "linear", list: "oops" } }, "list_not_array");
+});
+
+test("a null row is malformed_item", () => {
+  assertChildListProtocolFailure({ retCode: 0, result: { category: "linear", list: [null] } }, "malformed_item");
+});
+
+test("orderId present as a number rather than a string is invalid_order_id", () => {
+  assertChildListProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [childRow({ orderId: 1 })] } },
+    "invalid_order_id",
+  );
+});
+
+test("an empty orderId is invalid_order_id — never a legitimate omission", () => {
+  assertChildListProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [childRow({ orderId: "" })] } },
+    "invalid_order_id",
+  );
+});
+
+test("a genuinely absent parentOrderLinkId decodes as empty, not rejected", () => {
+  const { parentOrderLinkId: _parentOrderLinkId, ...rowWithoutParent } = childRow();
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [rowWithoutParent] } },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok") {
+    assert.equal(decoded.items[0].parentOrderLinkId, "");
+  }
+});
+
+test("leavesQty of exactly zero is allowed — the expected terminal value, not merely tolerated", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [childRow({ leavesQty: "0" })] } },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok") {
+    assert.equal(decoded.items[0].leavesQty, "0");
+  }
+});
+
+test("a negative leavesQty is invalid_leaves_qty", () => {
+  assertChildListProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [childRow({ leavesQty: "-1" })] } },
+    "invalid_leaves_qty",
+  );
+});
+
+test("an empty orderStatus is invalid_order_status", () => {
+  assertChildListProtocolFailure(
+    { retCode: 0, result: { category: "linear", list: [childRow({ orderStatus: "" })] } },
+    "invalid_order_status",
+  );
+});
+
+test("Deactivated is a valid orderStatus and decodes as ok", () => {
+  const decoded = decodeChildOrderListResponse({
+    response: { retCode: 0, result: { category: "linear", list: [childRow({ orderStatus: "Deactivated" })] } },
+    expected: childListExpected,
+  });
+  assert.equal(decoded.kind, "ok");
 });
