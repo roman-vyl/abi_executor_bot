@@ -276,6 +276,57 @@
 > Everything else in Change 4's original text below (цель, HTTP-контракты не меняются, "Осознанно вне
 > scope") остаётся верным и не переписывается заново.
 
+> **Ревизия v11 — исправление ошибочной premise ревизии v10 (blocker, найден review до apply Change 4).**
+> v10 выше содержит ошибочный вывод (пункт 3): "aggregate query остаётся ровно тем, чем он уже является
+> сегодня для `entry_order_live`/`terminal_without_fill`/`terminal_after_fill` — dual-positive-confirmation
+> правило... не меняется, это НЕ было architecturally сломано shared scope". **Это неверно и отменяется.**
+> Прямая проверка кода (`entryCycleRecoveryResolutionService.ts:220-235`, `resolveRecoveryState`)
+> показывает: `entry_order_live` требует `positionFlat` (aggregate обязан положительно вернуть
+> `no_position`); `terminal_without_fill` требует того же. При shared same-side scope aggregate для scope
+> с уже открытой позицией sibling-cycle **никогда** не вернёт `no_position`, пока эта sibling-позиция
+> открыта — значит cycle B с собственным genuinely `live_unfilled` entry-ордером (fill=0) никогда не
+> сможет резолвить `entry_order_live`, пока sibling A держит scope, хотя own evidence B однозначно это
+> доказывает. Идентичная поломка — для `terminal_without_fill`. Это настоящий, ранее не обнаруженный
+> пробел, а не переформулировка уже исправленного sourcing-бага `first_fill_at_ms`/`average_entry_price`.
+>
+> **Исправленная семантика Change 4** (заменяет п.3 v10 полностью; пп. 1-2 v10 остаются в силе без
+> изменений — sourcing `average_entry_price`/`first_fill_at_ms` не меняется этой ревизией):
+> 1. Каждое из четырёх recovery states резолвится **прежде всего** из own durable/order/execution evidence
+>    конкретного cycle (собственный entry-ордер; и, когда он доказывает fill, собственный close-ордер).
+>    Aggregate position query — **никогда** обязательный co-equal сигнал; только узкий, per-state sanity
+>    check, который может лишь заблокировать resolution, которую own evidence иначе бы дало, но никогда не
+>    может сфабриковать resolution, которую own evidence не поддерживает.
+> 2. `entry_order_live`/`terminal_without_fill` резолвятся из own order signal одного; fail closed —
+>    только если aggregate положительно подтверждает открытую позицию на **противоположной** стороне
+>    (genuine invariant violation, не нормальное shared-scope условие). Sibling той же стороны, aggregate
+>    без позиции, или неудавшийся/inconclusive aggregate query — все совместимы с resolution.
+> 3. `position_open` vs `terminal_after_fill` (once own entry order доказал fill) резолвятся через
+>    собственный close-order identity этого cycle (`close_order_link_id`, уже durable, Change 2), **не**
+>    через aggregate: если close никогда не был durable attempted для этого cycle — `position_open` (own
+>    evidence, aggregate sanity — только existence на matching стороне, как Decision 1 Change 3); если
+>    close был durable attempted — запрашивается собственная судьба **этого** close-ордера через тот же
+>    read-only order-classification primitive, что recovery уже использует для entry-ордера, второй раз, с
+>    другой identity (переиспользование Change 2's `close_order_link_id`, никакой новой close-machinery):
+>    close-ордер подтверждён filled → `terminal_after_fill`, **aggregate вообще не консультируется** для
+>    этого determination — это прямое исправление сценария из п.8 review-запроса: sibling A's aggregate
+>    presence никогда не может заставить B, чей own close уже confirмed, ошибочно вернуться в
+>    `position_open`; close-ордер подтверждён terminal-с-нулевым-fill (rejected) → `position_open` (own
+>    evidence, та же aggregate sanity, что в предыдущем случае); любой другой close-ордер signal (live/
+>    not_found/inconclusive) → fail closed.
+> 4. Legacy `pending_action` guard и durably-closed fast path (`process()`'s код выше dual-query секции) —
+>    не затронуты этой ревизией, сохраняются буквально.
+> 5. Никакой новой close-side machinery: переиспользуется существующий `classifyOrderForRecovery`
+>    (identity-agnostic уже сегодня) второй раз, и существующее durable поле `close_order_link_id` (Change
+>    2) — ни одного нового adapter primitive, decoder, cancel/retry/dispatch пути.
+> 6. Production-поведение (single-owner, `close_order_link_id` всегда `null` для non-durably-closed записи
+>    single-owner close-пути) — идентично сегодняшнему для всех четырёх states, кроме уже известного из v10
+>    `first_fill_at_ms`/`average_entry_price` fix внутри `position_open`.
+>
+> Полная truth table, decision-дерево и обоснование (включая почему `terminal_after_fill` НИКОГДА не
+> консультирует aggregate — design.md Decision 3c) — в design-фазе Change 4 (OpenSpec
+> `abi-entry-cycle-recovery-attribution-v1`), не здесь; этот пункт master-plan фиксирует только исправление
+> ошибочной premise и итоговую архитектуру, не полный design.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope

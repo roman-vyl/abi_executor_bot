@@ -1,51 +1,68 @@
 ## Context
 
-See `proposal.md` for Why/What. This design implements master-plan Change 4 as corrected by revision v10
-(after Change 3's actual implementation, not the original v3-era Change 4 text). It applies the pattern
-Change 2 (close) and Change 3 (open-position) already proved — own-cycle evidence primary, aggregate weak
-sanity — to the one place in recovery where that pattern was not yet followed: how `position_open`'s two
-fill facts are sourced.
+See `proposal.md` for Why/What. This design implements master-plan Change 4, revised twice now:
 
-**What this design explicitly does NOT do.** It does not rewrite `resolveRecoveryState`'s state-resolution
-grid, does not change the dual-query bounded-retry shape, does not touch the durably-closed-status fast
-path, and does not touch the legacy `pending_action` guard. Investigation found the master plan's original
-framing of this change ("aggregate side-match no longer proves attribution") was not, on inspection, a real
-gap: the order-query signal recovery already uses to decide which of the four states applies is filtered
-by this record's own `order_link_id` (`getEntryOrderPayload`/`getEntryOrderHistoryPayload`,
-`entryCycleRecoveryResolutionService.ts:126-127`) — it was already own-cycle-scoped before this change, for
-the same reason Change 3's order-query classification always was. The actual, narrower bug — confirmed by
-direct comparison against Change 3's already-shipped fix for the identical pattern — is that
-`resolveRecoveryState`'s `position_open` branch, once both signals agree, extracts its two fill facts from
-the aggregate row (`row.openTime`, `row.avgPrice`) instead of this cycle's own evidence. This design fixes
-exactly that, and nothing else.
+- **Revision (superseded by this document).** The first draft of this design concluded the existing
+  dual-query grid (`resolveRecoveryState`, `entryCycleRecoveryResolutionService.ts:212-238`) was already
+  multi-owner-safe, and that this change's only real scope was fixing where `position_open`'s two fill
+  facts are sourced from (the same bug Change 3 already fixed for `GET .../open-position`). **This premise
+  was wrong and is retracted.** Direct inspection of the code (not just the spec prose) shows three of the
+  four states — `entry_order_live`, `terminal_without_fill`, and the position-query half of
+  `position_open` — require the aggregate position query to positively confirm a specific state
+  (`positionFlat` for the first two, `positionOpen` matching side for the third) as a co-equal,
+  *required* signal, not sanity. Under same-side shared scope, a sibling cycle's own open position makes
+  `positionFlat` false for every cycle sharing that scope — `entry_order_live` and `terminal_without_fill`
+  become permanently unresolvable (fail closed) for any cycle sharing a scope with an already-open
+  sibling, even though that cycle's own evidence positively and unambiguously proves its own state. This
+  is a real, previously undetected gap, not a restatement of the already-fixed sourcing bug. This document
+  replaces the grid entirely with an own-evidence-primary design; the sourcing fix (Decision 1) is
+  unchanged and is now one part of a larger redesign, not the whole of it.
+
+This design implements the corrected scope: own-cycle durable/order/execution evidence is the primary and
+sufficient source for all four recovery states; the aggregate position query is demoted to per-state
+weak sanity (existence/side-compatibility only, never a required positive-agreement gate) — the same
+attributable-evidence-primary, aggregate-weak-sanity pattern Change 2 and Change 3 already established,
+now actually applied to every state this capability resolves, not only to `position_open`'s two fill
+facts.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Make `position_open`'s `average_entry_price` this cycle's own value, sourced from the same own-order
-  query recovery already performs — never the aggregate `avgPrice`, which cannot distinguish owners once a
-  scope is shared.
-- Make `position_open`'s `first_fill_at_ms` reuse Change 3's exact durable-capture-once value and
-  mechanism — never a second implementation, never the aggregate `openTime`.
-- Preserve every existing passing/failing combination of `resolveRecoveryState`'s dual-query grid exactly
-  as it is today — this design changes only what happens *after* `position_open` is resolved, not whether
-  it is resolved.
-- Preserve the "never causes an exchange side effect" invariant, with its scope (order-mutating actions
-  only) made explicit rather than implicit.
+- Every one of the four recovery states resolves from this specific cycle's own durable/order/execution
+  evidence, and is never blocked or mis-resolved solely because a same-side sibling cycle's own activity
+  is visible in the shared aggregate position.
+- `position_open` vs `terminal_after_fill`, once this cycle's own entry order proves a fill, is
+  disambiguated using this cycle's own close-order identity and its own confirmed fate — reusing Change
+  2's already-durable `close_order_link_id` field and the same read-only order-classification primitive
+  this capability already uses for the entry order — never the aggregate.
+- The aggregate position query is retained only where it can still say something both true and useful
+  under shared scope: a genuine opposite-side contradiction (a real, structural invariant violation, not
+  a normal shared-scope condition) for the two zero-fill states, and same-side existence sanity
+  (mirroring Change 3's Decision 1 exactly) for `position_open`.
+- `average_entry_price`/`first_fill_at_ms` sourcing (the original scope of this change) is preserved
+  exactly as previously designed and reused, not duplicated.
+- No new close-side machinery: this design reuses Change 2's existing durable `close_order_link_id` field
+  and this capability's own existing order-classification primitive a second time, pointed at a different
+  identity. It adds no cancel/retry/dispatch logic and no second close-execution state machine.
 
 **Non-Goals:**
-- Rewriting the dual-query agreement rule, the absence-of-evidence rule, or any of
-  `entry_order_live`/`terminal_without_fill`/`terminal_after_fill`'s existing resolution logic.
-- Any new adapter primitive, decoder, or Bybit endpoint. `resolveFirstAttributableFillAtMs`
-  (`packageConfirmation.ts`) is reused verbatim; this design adds a second call site, not a second
-  implementation.
-- Any change to the four-state HTTP contract, `entryCycleRecoveryApi.ts`'s validation, or the OpenAPI
-  document for recovery (none exists to change — recovery's OpenAPI surface, if any, is unaffected).
-- Bybit's own execution-history query/history constraints are not designed around here, for the same
-  reason Change 3 already gave and does not repeat: the durable, immutable, capture-once design this
-  change reuses means no code path ever needs to reconstruct a fill that was never captured at the time.
+- Partial-close-of-own-share accounting. This capability's `terminal_after_fill` resolution accepts *any*
+  positively confirmed fill on this cycle's own close order as sufficient (see Decision 3's own note on
+  this simplification) rather than exactly qty-matching the close order's fill against this cycle's own
+  resolved exposure the way `CloseApplicationService.resolveCloseOrderOutcome` does for its own,
+  different purpose (verifying its own dispatch fully succeeded before durably writing
+  `terminal_closed`). Recovery's job is coarse four-state read-only classification, not fine-grained
+  partial-close verification — V1 does not support partial-close-of-own-share as a target end state at
+  all (master plan, "V1 full-close-only"), and an incomplete close remains `CloseApplicationService`'s own
+  concern to finish via a caller's retried `POST /close`, not something recovery re-verifies.
+- Any change to the legacy `pending_action` guard or the durably-closed-status fast path — this design
+  does not touch `process()`'s structure above the dual-query section at all.
+- Any new adapter primitive, decoder, or Bybit endpoint.
+- Bybit's own execution-history query/history constraints — not designed around here, for the same reason
+  Change 3 already gave (durable, immutable, capture-once design; no code path ever needs to reconstruct a
+  fill that was never captured at the time).
 
-## Decision 1 — `average_entry_price` is sourced from the already-fetched own-order response, not a new query
+## Decision 1 — `average_entry_price` is sourced from the already-fetched own-order response (unchanged from the prior draft)
 
 `classifyOrderForRecovery` already queries `getOrderByLinkId` and, when needed, `getOrderHistory` — both
 filtered to this record's own `order_link_id` — once per attempt, decoding the response into a
@@ -66,162 +83,244 @@ type OrderRecoverySignal =
 ```
 
 `classifyOrderForRecovery` populates `averageEntryPrice` from whichever query (realtime or history)
-positively found the order in a fill-carrying state, using that response's own `avgPrice` field — the
-same field `orderQueryResponseDecoder.ts` already validates as a positive-or-empty exact-decimal string
-(`invalid_average_price` otherwise). This is zero new exchange calls: the data is already in hand every
-attempt this classification already runs.
+positively found the order in a fill-carrying state, using that response's own `avgPrice` field. Zero new
+exchange calls: the data is already in hand every attempt this classification already runs. An empty
+`avgPrice` (a valid, Bybit-documented transient omission — `orderQueryResponseDecoder.ts`'s
+`isPositiveOrEmptyExactDecimal` already tolerates it) on a fill-carrying result cannot construct a valid
+`average_entry_price`; whichever branch of Decision 3 would otherwise resolve `position_open` fails closed
+instead, mirroring Change 3's "a fill with no usable average price fails closed" requirement exactly.
 
-**Why not reuse `confirmEntryPackage`/`resolveOwnFillFacts`-style refresh, the way Change 3's
-`OpenPositionResolutionService` does?** Change 3 needed that refresh path because `determine()` answers
-from a stored `early_execution_observation` that may not yet be final, requiring a fresh query only when
-it isn't. Recovery has no equivalent stored observation to consult first — it always queries the order
-fresh, every attempt, as part of `classifyOrderForRecovery`'s own classification work. Reusing that
-already-in-flight response is strictly less code and strictly fewer exchange calls than adding a second,
-independent fill-facts query alongside it; it is not a shortcut that trades away correctness, since it is
-the exact same response Change 3's equivalent path would have had to fetch anyway.
+This value is this cycle's own entry cost basis and is reported only for `position_open` — it plays no
+role in resolving `terminal_after_fill` (which reports no fill facts at all, unchanged).
 
-**Empty `avgPrice` from a fill-carrying result.** `orderQueryResponseDecoder.ts` treats a present-but-empty
-`avgPrice` field as valid (`isPositiveOrEmptyExactDecimal` allows `""`), matching how Bybit's API can omit
-this field in some transient states. If a `live_with_fill`/`terminal_with_fill` result carries an empty
-`avgPrice`, `resolveRecoveryState`'s `position_open` branch cannot construct a valid
-`average_entry_price` and fails closed (`internal_error`) — mirroring Change 3's own "a fill with no
-usable average price fails closed" requirement exactly, not a new failure philosophy.
+## Decision 2 — `first_fill_at_ms` reuses Change 3's exact durable-capture mechanism (unchanged from the prior draft)
 
-## Decision 2 — `first_fill_at_ms` reuses Change 3's exact mechanism, called from a second site under the same mutex
+Unchanged from the prior draft of this design. When Decision 3's grid resolves a `position_open` outcome:
+if the record's own `first_fill_at_ms` is already durable, it is reused with no exchange call, identical
+to `OpenPositionResolutionService.resolveLiveQueryAdmissible`'s existing fast path; otherwise
+`EntryCycleRecoveryResolutionService` calls the same exported `resolveFirstAttributableFillAtMs`
+(`packageConfirmation.ts`, unchanged) and durably saves the result exactly as Change 3 already does,
+under the same shared per-pair `KeyedMutex` instance already passed into
+`OpenPositionResolutionService`/`ProtectionApplicationService`/`CloseApplicationService`.
+`EntryCycleRecoveryResolutionServiceDeps` gains a new `mutex: KeyedMutex` dependency. See the prior
+draft's full rationale for why the same shared instance (not a second, recovery-scoped lock) is required,
+and for the narrow locked-section shape (acquire only around the capture-or-reuse step, re-read the
+record fresh under the lock, resolve the correct terminal result if a concurrent close raced ahead) — all
+of that is unchanged by this revision; only *which* pure-function outcome triggers it changes (Decision 3
+below), not the mechanism itself.
 
-Change 3 already established the complete, tested mechanism for this value: reuse
-`record.first_fill_at_ms` if already durable; otherwise call `resolveFirstAttributableFillAtMs` (pages
-`/v5/execution/list` to completion, `min(execTime)` across every attributable Trade execution, bounded page
-cap, fails closed on any protocol/transport failure or unresolved pagination) and durably save the result
-exactly once, under the pair's `KeyedMutex` lock.
+A capture failure (`no_executions_found` or `ambiguous`) fails closed (`internal_error`) — `position_open`
+is never resolved with a fabricated or omitted `first_fill_at_ms`.
 
-This design adds a second call site for that exact mechanism, inside
-`EntryCycleRecoveryResolutionService`, structured identically to
-`OpenPositionResolutionService.resolveLiveQueryAdmissible`'s existing block:
+## Decision 3 (replaces the retracted "grid is unchanged" premise) — every state resolves from own evidence; the aggregate becomes per-state weak sanity
+
+### 3a. What was actually wrong
+
+`resolveRecoveryState`'s current code:
 
 ```ts
-// Inside resolveRecoveryState's position_open path, under this pair's mutex lock:
-if (record.first_fill_at_ms !== null) {
-  firstFillAtMs = record.first_fill_at_ms; // reuse, no exchange call
-} else {
-  const captured = await resolveFirstAttributableFillAtMs({ bybit, category, symbol, orderLinkId });
-  if (captured.kind !== "found") {
-    return internalErrorResult(); // no_executions_found or ambiguous — never fabricated
-  }
-  await correlationRepository.save({ ...record, first_fill_at_ms: captured.firstFillAtMs, updated_at: ... });
-  firstFillAtMs = captured.firstFillAtMs;
+const positionOpen = positionQuery.kind === "position" && positionSideMatches(positionQuery.row.side, desiredEntry);
+const positionFlat = positionQuery.kind === "no_position";
+
+if (orderSignal.kind === "live_unfilled" && positionFlat) return { state: "entry_order_live" };
+if ((orderSignal.kind === "live_with_fill" || orderSignal.kind === "terminal_with_fill") && positionOpen) return { state: "position_open", ... };
+if (orderSignal.kind === "terminal_with_fill" && positionFlat) return { state: "terminal_after_fill" };
+if (orderSignal.kind === "terminal_without_fill" && positionFlat) return { state: "terminal_without_fill" };
+return undefined;
+```
+
+`entry_order_live` and `terminal_without_fill` both require `positionFlat` — the aggregate reporting *no
+position at all* on the scope. Under same-side shared scope this is not a rare edge case, it is the
+**normal** condition whenever a sibling cycle already holds an open position on the same scope: `B` has a
+genuinely live, unfilled entry order and zero fill of its own, `A` (a same-side sibling) already has an
+open position, `B`'s aggregate query returns `A`'s position (`positionQuery.kind === "position"`), so
+`positionFlat` is `false`, `B`'s own genuinely-live-and-unfilled state can never resolve `entry_order_live`
+— it falls through to `undefined` (fail safe) on every attempt, forever, for as long as `A`'s position
+remains open. The identical failure applies to `terminal_without_fill`. This is a genuine regression this
+capability would otherwise ship once same-side ownership activation (a later change in the program)
+allows more than one owner per scope.
+
+### 3b. Corrected design: own evidence resolves the state; the aggregate is consulted only for a bounded, per-state sanity question
+
+Every state is now resolved primarily from evidence this specific cycle's own identity produces — its own
+entry order (already the case for the order-query signal) and, when its entry order proves a fill, its
+own close order (a **new** read, reusing Change 2's existing durable `close_order_link_id` field and this
+capability's own existing `classifyOrderForRecovery` primitive a second time, pointed at a different
+identity — not a new mechanism). The aggregate position query is retained, but every use of it is
+downgraded from "required positive agreement" to a narrow, state-appropriate sanity question that can
+only ever *block* a resolution it would otherwise reach, never manufacture one own evidence does not
+already support.
+
+**`entry_order_live`** (own order signal `live_unfilled`):
+- Own evidence alone (a positively live, unfilled entry order under this cycle's own `order_link_id`) is
+  sufficient.
+- Sanity: fails closed only if the aggregate positively confirms an open position on the **opposite**
+  side of this record's own `desired_entry.side`. A same-side aggregate position (a sibling's own
+  exposure) or no position at all are both compatible with this cycle's own order genuinely still being
+  live and unfilled, and no longer block the resolution.
+- Defensive check, expected unreachable in practice: fails closed if `record.close_order_link_id` is
+  non-null — `CloseApplicationService` always neutralizes (cancels and confirms terminal) the entry order
+  before ever dispatching a close order (`closeApplicationService.ts:166-192`, entered before
+  `processMultiOwnerClose`/`dispatchMultiOwnerCloseOrder`), so a durably-recorded close attempt
+  co-occurring with a still-live entry order is a structural contradiction, not a state this capability
+  should try to interpret.
+
+**`terminal_without_fill`** (own order signal `terminal_without_fill`, i.e. positively terminal with zero
+cumulative fill):
+- Own evidence alone is sufficient — identical reasoning and the identical two checks (opposite-side
+  sanity, defensive `close_order_link_id` non-null check) as `entry_order_live` above.
+
+**`position_open` / `terminal_after_fill`** (own order signal `live_with_fill` or `terminal_with_fill` — a
+positively observed fill on this cycle's own entry order):
+
+1. If `record.close_order_link_id` is `null` — ABI has never durably recorded a close attempt for this
+   cycle. This cycle's own exposure is open by definition of ABI's own durable state, independent of
+   what any sibling is doing. Sanity: the aggregate must positively confirm an existing position on the
+   matching side (the same existence-only check Change 3's `determine()` already performs before
+   returning "open" — mirrors, does not duplicate, that pattern) — if the aggregate shows no position at
+   all, or a wrong-side position, that is a genuine contradiction between this cycle's own fill evidence
+   and physical reality, and resolution fails closed rather than trusting own evidence blindly. If the
+   aggregate confirms an existing same-side position (whether or not a sibling also contributes to it),
+   resolve `position_open`.
+2. If `record.close_order_link_id` is non-null and the own order signal is `live_with_fill` — fails
+   closed (the same structural-contradiction reasoning as the defensive checks above: a close cannot have
+   been durably dispatched while the entry order that funds it is still live).
+3. If `record.close_order_link_id` is non-null and the own order signal is `terminal_with_fill` — query
+   this cycle's own close order's current state via the same `classifyOrderForRecovery` primitive already
+   used for the entry order, scoped to `close_order_link_id`/`close_order_id` instead
+   (`{ category, symbol, orderLinkId: record.close_order_link_id, limit: "1" }` for both the realtime and
+   history payloads — the function itself is already identity-agnostic; only the identity passed in
+   differs):
+   - Close order signal `terminal_with_fill` (positively confirmed to have executed with a fill) →
+     resolve `terminal_after_fill`. No aggregate check at all: this cycle's own two-order evidence chain
+     (entry filled, its own close order also confirmed filled) is fully self-contained and requires no
+     external corroboration — critically, it must never be blocked or reinterpreted by a same-side
+     sibling's own still-open aggregate contribution (see 3c below, the case this fixes).
+   - Close order signal `terminal_without_fill` (positively confirmed terminal with zero fill — the
+     close attempt was rejected or otherwise never executed) → this cycle's own exposure was never
+     actually reduced; resolve `position_open` using the same sanity rule as case 1 above (aggregate must
+     confirm an existing same-side position).
+   - Any other close order signal (`live_unfilled`, `live_with_fill`, `not_found`, `inconclusive`) — the
+     close order's own fate is not yet positively established; fails closed, exactly like any other
+     inconclusive evidence this capability already treats this way. A caller retries later: either this
+     capability resolves cleanly on a subsequent attempt once the close order's fate is positively
+     established, or a caller's retried `POST /close` durably closes the cycle first, after which the
+     existing durably-closed-status fast path (unchanged) answers directly with zero exchange calls.
+
+### 3c. Why `terminal_after_fill` must never consult the aggregate
+
+This is the scenario the review that produced this correction specifically asked to be checked: could a
+same-side sibling's own still-open aggregate contribution cause recovery to mis-resolve `position_open`
+for a cycle whose own exposure is already correctly terminal? Under the retracted first draft, this
+capability would never have reached that question, because `terminal_after_fill` never queried the
+aggregate at all in the original code either — the risk was theoretical only in the sense that the whole
+first draft's premise (grid already safe) needed re-examination, not because this specific branch was
+independently found to be at risk. Having redesigned every branch from scratch, this design deliberately
+preserves that same property for the new `terminal_after_fill` path: once this cycle's own two-order
+evidence chain (entry filled; its own close order also confirmed filled) is established, no aggregate
+read is performed for that outcome at all — there is no code path by which a sibling `A`'s own open
+position could influence it, because the aggregate is never consulted once evidence-chain step 3's
+`terminal_with_fill` branch is reached. This is a structural guarantee (the code path physically does not
+call `queryPositionForInstrument`'s result for this branch), not a behavioral coincidence to be verified
+only by test — though Required Test 4 below verifies it anyway, per this change's own instruction not to
+rely on inspection alone for a claim this consequential (the same discipline Change 3's proposal already
+applied to its own `ProtectionApplicationService` regression claim).
+
+### 3d. Aggregate sanity, formalized
+
+```ts
+type AggregateSanity = "opposite_side_contradiction" | "same_side_exists" | "no_signal";
+
+function classifyAggregateSanity(positionQuery: PositionQueryResult, desiredEntry: DesiredEntryDto | null): AggregateSanity {
+  if (positionQuery.kind !== "position") return "no_signal"; // no_position, or a query failure/inconclusive result
+  return positionSideMatches(positionQuery.row.side, desiredEntry) ? "same_side_exists" : "opposite_side_contradiction";
 }
 ```
 
-**Why under the mutex, and why the same shared instance.** `EntryPackageCorrelationRepository`'s
-`fillFactRegression` check (Change 3) already rejects a second write of a *different* non-null
-`first_fill_at_ms` for the same pair as corruption — so an un-serialized race between a concurrent
-`GET .../open-position` and `GET .../recovery-state` for the same pair, both observing `null` and both
-computing (deterministically, from the same executions) the same correct value, could not corrupt the
-value itself. What the mutex actually prevents is a narrower but real hazard: `EntryPackageCorrelationRepository.save()`
-is a read-modify-write over the whole record (`{...record, first_fill_at_ms: ..., updated_at: ...}`) — two
-concurrent, un-serialized callers each holding their own stale in-memory `record` snapshot could race on
-*other* fields of the same record (e.g. one capturing `first_fill_at_ms` while the other durably closes the
-same pair concurrently), each overwriting the other's otherwise-valid write. This is exactly the hazard the
-existing pair-level `KeyedMutex` already exists to prevent for every other durable write in this codebase,
-and Change 3 already established it for this exact field. Introducing a second, independent lock scoped
-only to recovery would not close this hazard — it would only serialize recovery against itself, leaving
-the open-position/recovery race open. The design therefore requires the same shared `KeyedMutex` instance,
-keyed the same way (`correlationRecordKey(strategyInstanceId, tradeCycleId)`), as a new
-`EntryCycleRecoveryResolutionServiceDeps.mutex` dependency, wired from `server.ts` to the same instance
-already passed to `OpenPositionResolutionService`/`ProtectionApplicationService`/`CloseApplicationService`.
+`"no_signal"` covers both a genuinely flat aggregate and an inconclusive/failed query — deliberately
+collapsed into one outcome, since this capability's own "absence of evidence is never evidence of
+absence" rule already establishes that a query that merely fails to contradict is not by itself positive
+proof of anything; the two zero-fill states' own evidence does not need the aggregate's corroboration
+regardless, and `position_open`'s own sanity check already requires the stronger `"same_side_exists"`
+outcome, not merely the absence of `"opposite_side_contradiction"`.
 
-**Where the lock is acquired.** `EntryCycleRecoveryResolutionService.process()` already runs its bounded
-retry loop unlocked (each attempt performs a fresh order query and a fresh position query with no lock
-held in between). Acquiring the mutex for the *entire* bounded-retry loop would hold a pair-level lock
-across up to `RECOVERY_ATTEMPTS` (3) sleeps of `RECOVERY_RETRY_DELAY_MS` (300ms) each — up to ~900ms of
-held lock time per recovery request, unnecessarily blocking any concurrent `GET .../open-position` or
-`PUT .../protection` for the same pair for the entire duration, even on attempts that do not resolve
-`position_open` at all. Instead, the lock is acquired narrowly, only around the point where
-`position_open` has already been positively resolved by the dual-query grid and a durable capture may be
-needed — mirroring `OpenPositionResolutionService.resolve()`'s own narrow locking (it locks only
-`resolveLiveQueryAdmissible`, not its own outer unlocked classification). Concretely: `resolveRecoveryState`
-itself stays a pure, lock-free function (unchanged signature and behavior for every state except what it
-returns for `position_open`'s two fields, which become inputs already carried by the order signal, plus a
-placeholder that the caller fills in under the lock). The caller (`process()`), upon receiving a
-`position_open`-shaped resolution from `resolveRecoveryState`, acquires the mutex only for the
-short capture-or-reuse step before building the final HTTP result.
+### 3e. Orchestration: where the close-order query fits in the existing bounded-retry loop
 
-**Re-reading the record under the lock.** Exactly as `OpenPositionResolutionService.resolveLiveQueryAdmissible`
-re-reads the record fresh once the lock is held (rather than trusting the outer, unlocked read), this
-design's locked section re-reads `correlationRepository.get(...)` once more before checking
-`first_fill_at_ms`/writing it — a concurrent close could have durably closed the pair in the interval
-between the unlocked dual-query resolution and acquiring the lock. If the freshly re-read record is now
-durably closed, the locked section returns the correct terminal result for that status instead of
-proceeding with a stale `position_open` capture — reusing the same `isDurablyClosedEntryPackageStatus`
-branch `process()`'s own outer check already uses, not a new code path.
+`process()`'s existing per-attempt loop already issues the entry-order query and the aggregate query
+every attempt. The close-order query is issued **conditionally**, only within an attempt where the
+entry-order signal that same attempt just produced is `live_with_fill` or `terminal_with_fill` **and**
+`record.close_order_link_id` (read once, before the loop, from the record already loaded — this field is
+immutable-once-set per Change 2's own design, so re-reading it every attempt is unnecessary) is non-null.
+This mirrors the existing loop's own shape (multiple sequential reads per attempt, no concurrent
+in-flight requests, matching every other bounded-retry pipeline in this codebase) rather than introducing
+a nested retry loop of its own — the close-order query gets the same bounded-retry coverage as the entry
+order and aggregate queries simply by being inside the same loop.
 
-## Decision 3 — the dual-query grid, and every other requirement, is unchanged
-
-`resolveRecoveryState`'s existing state combinations (`entry_order_live`, `terminal_without_fill`,
-`terminal_after_fill`, and every fail-closed combination for contradictory or inconclusive evidence) are
-untouched. The order-query signal already carries this record's own `order_link_id`-scoped evidence for
-every state, not only `position_open`; the aggregate position query's role as existence/side sanity for
-`entry_order_live`/`terminal_without_fill`/`terminal_after_fill` is unchanged, and is not further narrowed
-or removed. This design's only change to `resolveRecoveryState`'s inputs/outputs is: (a) the
-`live_with_fill`/`terminal_with_fill` signal variants now carry `averageEntryPrice`, threaded through to
-the `position_open` outcome instead of `row.avgPrice`; (b) the `position_open` outcome's `firstFillAtMs`
-becomes a signal to the caller that a durable capture-or-reuse step is needed, resolved by `process()`
-under the mutex as described in Decision 2, instead of being computed inline as `row.openTime`.
-
-## Decision 4 — "never causes an exchange side effect" is clarified, not weakened
-
-The existing requirement's own scenario already states its actual scope precisely: "ABI SHALL NOT send any
-create, amend, or cancel request to the exchange as part of that resolution." Read-only `GET` queries
-(recovery already issues two or three per attempt) and ABI's own local durable write are outside that
-scope both by the requirement's literal text and by recovery's own existing behavior, which already relies
-on both. This design adds one new explicit scenario stating this in the spec delta, rather than leaving it
-an implicit reading a future author could mistake for a broader prohibition — the same kind of
-clarification Change 3 added for its own analogous "Bybit's own execution-history constraints" note
-(non-normative for behavior, load-bearing for future readers).
+`resolveRecoveryState` itself remains a pure, synchronous function — all evidence (`orderSignal`,
+`closeSignal: OrderRecoverySignal | undefined`, `closeOrderAttempted: boolean`, `positionQuery`,
+`desiredEntry`) is gathered by the async orchestration in `process()` before being passed in, exactly
+matching this capability's existing separation between async I/O and pure decision logic.
 
 ## Regression analysis (single-owner, today's only production-reachable state)
 
-For a scope with exactly one owner:
-- `average_entry_price`: this cycle's own order and the aggregate position necessarily reflect the same
-  single fill, so the value recovery now reports is numerically identical to what it reported before —
-  same underlying Bybit fact, different (now correct) extraction path. No observable change.
-- `first_fill_at_ms`: recovery's previous value (`row.openTime`, the aggregate's `openTime`) and the new
-  value (the durable, own-execution-derived capture) are the same underlying real-world moment for a
-  single-owner scope's only fill, but are not guaranteed byte-identical — Bybit's aggregate `openTime` and
-  the earliest own-execution `execTime` are not documented as the identical field. This is the one place
-  single-owner behavior can observably change. It is a fix, not a regression: `GET .../open-position`
-  already reports the own-execution-derived value for the same pair (Change 3), and this change makes
-  `GET .../recovery-state` agree with it instead of disagreeing — the previous behavior (two different
-  first-fill values for the same trade cycle depending which endpoint answered) was itself already a
-  latent inconsistency this change removes.
-- Every other recovery_state (`entry_order_live`, `terminal_without_fill`, `terminal_after_fill`) and
-  every fail-closed combination: byte-for-byte unchanged, since `resolveRecoveryState`'s grid is untouched.
+For a scope with exactly one owner, `record.close_order_link_id` is always `null` while the record is
+non-durably-closed (single-owner close, `CloseApplicationService`'s `processSingleOwnerClose` path, never
+sets `close_order_link_id` — that field is written only by the multi-owner close path). This means, for
+every production-reachable record today: the close-order query is never issued (its precondition,
+`close_order_link_id !== null`, is never true), `entry_order_live`/`terminal_without_fill`/
+`position_open`'s case-1 branch behave exactly as `positionFlat`/`positionOpen` did before (a single
+owner's own aggregate is definitionally either flat or this cycle's own position — no sibling exists to
+create the gap this redesign fixes), and `terminal_after_fill` is reached, as before, only via the
+now-superseded code path that no longer exists in production (single-owner close writes `terminal_closed`
+directly, never leaving a non-durably-closed record with a proven entry fill and no close attempt for the
+dual-query loop to ever resolve `terminal_after_fill` from in the first place — this was already true
+before this change and is unaffected by it). `average_entry_price`/`first_fill_at_ms` sourcing changes are
+unchanged from the prior draft's regression analysis (see below).
+
+- `average_entry_price`: numerically identical to before — same underlying single fill, different
+  (correct) extraction path.
+- `first_fill_at_ms`: may differ from the aggregate's previous `openTime` value by a small, expected
+  amount — this is the fix already analyzed in the prior draft (own-execution-derived value now agrees
+  with what `GET .../open-position` already reports for the same pair, removing a latent inconsistency).
+- Every fail-closed combination not touched by this redesign (opposite-side contradiction, inconclusive
+  order/position queries, the legacy `pending_action` guard, the durably-closed-status fast path):
+  byte-for-byte unchanged.
 
 ## Required tests
 
-1. `position_open`'s `average_entry_price` matches the own-order query's `avgPrice`, verified with a test
-   fixture where the own-order and aggregate `avgPrice` deliberately differ — the response must reflect
-   the own-order value, never the aggregate's.
-2. `position_open`'s `first_fill_at_ms`: already-durable `record.first_fill_at_ms` is reused with zero
-   calls to `getExecutionList`.
-3. `position_open`'s `first_fill_at_ms`: not yet durable — `resolveFirstAttributableFillAtMs` is called
-   once, the result is durably saved, and a second `resolve()`/recovery call for the same pair reuses the
-   saved value with no further call.
-4. Capture failure (`no_executions_found` / `ambiguous`) on the first attempt → `internal_error`,
-   `position_open` is never resolved with a fabricated or omitted `first_fill_at_ms`.
-5. A fill-carrying order signal with an empty `avgPrice` → `internal_error`, mirroring Change 3's
-   equivalent scenario.
-6. Concurrency: a `GET .../recovery-state` and a `GET .../open-position` for the same pair, both racing to
-   capture `first_fill_at_ms` for the first time, are serialized by the shared mutex; the durable value is
-   written exactly once and both responses agree on it.
-7. A concurrent close durably closing the pair between recovery's unlocked dual-query resolution and its
-   locked capture step is detected by the locked section's fresh re-read, and resolves the correct
-   terminal state instead of a stale `position_open`.
-8. Full regression of every existing `entryCycleRecoveryResolutionService.test.ts` scenario for
-   `entry_order_live`, `terminal_without_fill`, `terminal_after_fill`, every fail-closed combination, the
-   durably-closed-status fast path, and the legacy `pending_action` guard — unchanged behavior.
-9. Multi-owner synthetic fixtures (same style as Change 1/2/3's tests): recovery for cycle B, sharing a
-   scope with cycle A, never reports cycle A's fill facts as its own — B's `position_open` (when it
-   resolves) always carries B's own `average_entry_price`/`first_fill_at_ms`, never A's, even though both
-   share the same aggregate row.
+1. `average_entry_price`/`first_fill_at_ms` sourcing tests 1-8 from the prior draft (own-order `avgPrice`
+   used instead of the aggregate's; durable capture reuse/first-capture/failure/concurrency/racing-close
+   scenarios) — unchanged, still required, not superseded by this revision.
+2. **A open + B `live_unfilled` (no own fill, no close attempted) → recovery(B) = `entry_order_live`**,
+   with the aggregate query returning `A`'s own open position on the matching side. This is the exact
+   scenario the retracted premise would have failed closed on.
+3. **A open + B `terminal_without_fill` (no own fill, no close attempted) → recovery(B) =
+   `terminal_without_fill`**, aggregate returning `A`'s own open position on the matching side.
+4. **A open + B has its own fill, no close attempted → recovery(B) = `position_open` with B's own
+   `average_entry_price`/`first_fill_at_ms`**, never A's — aggregate returning a position whose `avgPrice`
+   deliberately differs from B's own order response, verifying the response reflects B's own value.
+5. **Aggregate sibling activity alone never turns a B with zero own fill into `position_open`** — for
+   every `orderSignal.kind` other than `live_with_fill`/`terminal_with_fill`, no aggregate state (open,
+   flat, opposite-side, or query failure) can produce a `position_open` outcome; verified by construction
+   (the fill-carrying branch is the only branch that can return `position_open`) and by an explicit test
+   fixture.
+6. **A open + B's own close order confirms a fill → recovery(B) = `terminal_after_fill`**, with the
+   aggregate still positively reporting `A`'s open position throughout — the specific scenario Decision
+   3c analyzes, verifying a same-side sibling's aggregate contribution never overrides B's own two-order
+   evidence chain.
+7. **B's own close order is durably recorded but still live/not found/inconclusive → recovery(B) fails
+   closed**, regardless of aggregate state — the close order's own fate is not yet positively established.
+8. **B's own close order is durably recorded and positively terminal with zero fill (a rejected close
+   attempt) → recovery(B) = `position_open`**, using B's own entry-order fill facts, sanity-checked
+   against an existing same-side aggregate position.
+9. **Opposite-side contradiction remains fail-closed for `entry_order_live`/`terminal_without_fill`**: own
+   evidence positively supports either zero-fill state, but the aggregate positively confirms an open
+   position on the opposite side — fails closed, unchanged in spirit from this capability's existing
+   opposite-side handling, now explicitly covering these two states too.
+10. **`position_open`'s existence sanity still fails closed when the aggregate cannot confirm a matching
+    position at all** (no position, or wrong side) even though B's own fill evidence is positive — the
+    same contradiction-detection Change 3's Decision 1 already establishes, now verified for recovery too.
+11. Full regression of every existing `entryCycleRecoveryResolutionService.test.ts` scenario that this
+    redesign does not intentionally change: the durably-closed-status fast path, the legacy
+    `pending_action` guard, and every single-owner (`close_order_link_id === null`) combination — these
+    must resolve identically to today.
