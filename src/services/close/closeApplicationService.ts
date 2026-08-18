@@ -6,7 +6,6 @@ import type { EntryPackageCorrelationRepository } from "../../correlation/entryP
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
-import { decimalEquals } from "../../domain/exactDecimal.js";
 import type { CloseCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
   closeExecutionIncompleteResult,
@@ -19,7 +18,12 @@ import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { BybitMarketCloseOrderPayload } from "../../exchange/bybitOrderMapper.js";
 import { mapPositionSideToCloseSide, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import { cancelEntryOrder, executeMarketCloseOrder } from "../../execution/execution.js";
-import { classifyEntryOrderTerminality, confirmEntryOrderNeutralized, confirmEntryPackage } from "../entryPackage/packageConfirmation.js";
+import {
+  classifyEntryOrderTerminality,
+  classifyOwnCloseOrderOutcome,
+  confirmEntryOrderNeutralized,
+  confirmEntryPackage,
+} from "../entryPackage/packageConfirmation.js";
 
 // Bounded final verification that the live position has settled at zero
 // after a close order — a market close, unlike a position-level protection
@@ -462,12 +466,15 @@ export class CloseApplicationService {
   }
 
   // Bounded resolution of one close order's own fate, keyed by its own
-  // identity — never by the live aggregate. "partial_fill" from
-  // confirmEntryPackage alone is ambiguous between "still live, may yet
-  // fill more" and "terminal, filled less than requested" (it can be
-  // produced by either a live PartiallyFilled realtime read or a history
-  // record of a since-terminalized order); classifyEntryOrderTerminality is
-  // consulted to disambiguate before treating a shortfall as final.
+  // identity — never by the live aggregate. Delegates each attempt's
+  // single-shot classification to classifyOwnCloseOrderOutcome
+  // (packageConfirmation.ts, shared with EntryCycleRecoveryResolutionService
+  // — abi-entry-cycle-recovery-attribution-v1 design.md Decision 3), keeping
+  // this method's own bounded-retry loop and collapsing that shared
+  // primitive's richer outcome back to this method's own existing contract:
+  // "zero_fill" and "qty_mismatch" both mean this close order did not fully
+  // close the requested quantity ("incomplete") — this method has never
+  // needed to tell those two apart, unlike recovery.
   private async resolveCloseOrderOutcome(
     category: "linear",
     symbol: string,
@@ -478,34 +485,24 @@ export class CloseApplicationService {
     const getCloseOrderHistoryPayload = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
 
     for (let attempt = 0; attempt < FINAL_VERIFY_ATTEMPTS; attempt += 1) {
-      const terminality = await classifyEntryOrderTerminality({
+      const outcome = await classifyOwnCloseOrderOutcome({
         bybit: this.deps.bybit,
-        getEntryOrderPayload: getCloseOrderPayload,
-        getEntryOrderHistoryPayload: getCloseOrderHistoryPayload,
+        getCloseOrderPayload,
+        getCloseOrderHistoryPayload,
+        expectedQty: resolvedQty,
       });
 
-      if (terminality.kind === "terminal") {
-        const confirmation = await confirmEntryPackage({
-          bybit: this.deps.bybit,
-          getEntryOrderPayload: getCloseOrderPayload,
-          getEntryOrderHistoryPayload: getCloseOrderHistoryPayload,
-          expected: { qty: resolvedQty },
-        });
-
-        if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
-          return decimalEquals(confirmation.observation.cumulative_filled_qty, resolvedQty) ? "matched" : "incomplete";
-        }
-        if (confirmation.kind === "terminal_without_fill") {
-          return "incomplete";
-        }
-        if (confirmation.kind === "not_found") {
-          return "not_found";
-        }
-        // "ambiguous" despite terminal classification (e.g. a query failure
-        // within confirmEntryPackage's own bounded window): retry the
-        // outer loop rather than giving up on the first blip.
+      if (outcome.kind === "matched") {
+        return "matched";
       }
-      // terminality "live" or "ambiguous": retry within the bounded window.
+      if (outcome.kind === "zero_fill" || outcome.kind === "qty_mismatch") {
+        return "incomplete";
+      }
+      if (outcome.kind === "not_found") {
+        return "not_found";
+      }
+      // "ambiguous" (still live, or a query/classification failure): retry
+      // the outer loop rather than giving up on the first blip.
 
       if (attempt < FINAL_VERIFY_ATTEMPTS - 1) {
         await sleep(FINAL_VERIFY_RETRY_DELAY_MS);
