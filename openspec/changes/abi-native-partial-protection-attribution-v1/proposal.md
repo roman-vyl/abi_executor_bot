@@ -102,7 +102,9 @@ is unchanged; `position-scope-exclusivity` is unaffected.
   replacement/update lifecycle for a cycle's stop/take pair) and, eventually,
   `abi-native-partial-protection-cutover-v1` (the mapping cutover and Change 5 guard removal) are built
   on. Neither of those is implemented, wired, or activated by this change.
-- Remaining precondition for `abi-native-partial-protection-lifecycle-v1`, not this change: multi-fill
-  parent semantics are explicitly `NOT PROVEN` (`design.md`, "What remains explicitly unproven") and are
-  blocking evidence that change still needs — this change's own scope (single attributed pair, fail
-  closed otherwise) does not depend on it.
+- Note for `abi-native-partial-protection-lifecycle-v1`, not this change: multi-fill parent semantics are
+  explicitly `NOT PROVEN` (`design.md`, "What remains explicitly unproven") — unproven exchange behavior
+  that change must not assume in either direction, not a precondition it needs proven first (two Demo
+  smoke attempts already showed multi-fill is impractical to reliably demonstrate there; `design.md`
+  records the more robust reconciliation-based requirement that change should adopt instead). This
+  change's own scope (single attributed pair, fail closed otherwise) does not depend on it either way.

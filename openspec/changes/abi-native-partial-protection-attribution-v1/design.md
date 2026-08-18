@@ -58,8 +58,9 @@ silently assumed either way.
 ### What remains explicitly unproven (out of this change's scope)
 
 The spike (`tasks.md` §1) proved attribution and single-pair classification (Decision 0). It did **not**
-prove, and this change does **not** claim, any of the following — each is left as `NOT PROVEN`, blocking
-evidence for `abi-native-partial-protection-lifecycle-v1`'s own design, not resolved here:
+prove, and this change does **not** claim, any of the following — each is left as `NOT PROVEN`: unproven
+exchange behavior that `abi-native-partial-protection-lifecycle-v1` must not assume in either direction,
+not resolved here:
 
 - That a parent entry order which fills across multiple executions (multi-fill) always ends up with
   exactly one attributable stop/take pair.
@@ -73,9 +74,20 @@ evidence for `abi-native-partial-protection-lifecycle-v1`'s own design, not reso
 
 This change's own classifier does not need any of these proven to be safe: if a real multi-fill parent
 ever produces more than the expected one-stop-one-take shape, Decision 3's classification fails closed
-(`duplicate_role` or `extra_candidates`) rather than silently accepting an unproven shape. The gap is
-real for design work that has to *act* on multi-fill state (`abi-native-partial-protection-lifecycle-v1`
-replacing a pair after an additional fill), not for this change's read-only attribution.
+(`duplicate_role` or `extra_candidates`) rather than silently accepting an unproven shape.
+
+**Note on what this means for `abi-native-partial-protection-lifecycle-v1` (not decided here, recorded
+for that change's own design phase):** demonstrating multi-fill behavior against Bybit Demo has already
+proven difficult across two dedicated smoke attempts for this program — a further attempt is not a
+reasonable precondition to hold that change's design hostage to. The more robust requirement for that
+change is not "prove multi-fill materialization semantics first," but: do not assume auto-resize, and do
+not assume additional-pair semantics; instead source an authoritative own `cumulative_filled_qty`
+(`abi-virtual-exposure-state-foundation-v1`), read the actually-observed attributable protection state
+through this change's own primitive, and reconcile — drive protection coverage to match own cumulative
+exposure as observed, rather than as assumed from an un-provable exchange guarantee. This change's own
+classifier already behaves correctly either way (fails closed on any shape beyond one pair), so nothing
+here needs revisiting regardless of which model `abi-native-partial-protection-lifecycle-v1` ultimately
+adopts.
 
 ## Goals / Non-Goals
 
@@ -95,8 +107,9 @@ replacing a pair after an additional fill), not for this change's read-only attr
 - Creating, cancelling, or replacing any order — `abi-native-partial-protection-lifecycle-v1`.
 - Deciding how to replace one desired stop/take pair with another without a coverage gap or double
   coverage — `abi-native-partial-protection-lifecycle-v1`.
-- Multi-fill semantics of any kind — see "What remains explicitly unproven" above; blocking evidence for
-  `abi-native-partial-protection-lifecycle-v1`, not this change's problem to solve or assume.
+- Multi-fill semantics of any kind — see "What remains explicitly unproven" above: unproven exchange
+  behavior `abi-native-partial-protection-lifecycle-v1` must not assume, not this change's problem to
+  solve.
 - Switching `mapEntryPackageToBybit()`'s production `tpslMode` — `abi-native-partial-protection-
   cutover-v1`.
 - Removing the `abi-same-side-virtual-exposure-ownership-v1` admission guard or the
