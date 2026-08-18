@@ -23,21 +23,50 @@ capability alone.
 ABI SHALL represent a trade cycle's desired protection state with a take-profit leg always present, and
 SHALL NOT attempt to represent "take disabled" as the absence of an attached take-profit child. When the
 client's desired take is disabled, ABI SHALL compute a deterministic surrogate take-profit price from
-that trade cycle's own stable average entry price, placed on the side of that price consistent with the
-trade cycle's own direction, and SHALL NOT derive it from current market price.
+that trade cycle's own immutable planned entry price — a reference fixed once for the life of the trade
+cycle's current generation and never affected by any later partial fill — placed on the side of that
+price consistent with the trade cycle's own direction and within that instrument's own valid price
+bounds, and SHALL NOT derive it from current market price.
 
 #### Scenario: A disabled take reconciles to a surrogate, not a missing leg
 - **WHEN** a trade cycle's desired protection state has its take disabled
 - **THEN** ABI reconciles the take-profit child to a deterministic surrogate price derived from that
-  trade cycle's own average entry price
+  trade cycle's own immutable planned entry price, valid within that instrument's own accepted price
+  range
 - **AND** ABI does not attempt to leave the take-profit child absent, cancelled, or otherwise removed as
   a way of representing the disabled take
 
 #### Scenario: An identical disabled-take intent does not move the surrogate
-- **WHEN** ABI reconciles a trade cycle whose desired take is disabled and whose average entry price has
-  not changed since a previous reconciliation
+- **WHEN** ABI reconciles a trade cycle whose desired take is disabled, including across a reconciliation
+  where that trade cycle's own cumulative filled quantity has changed since a previous reconciliation
 - **THEN** the computed surrogate take-profit price is identical to the previously computed one
 - **AND** ABI does not amend an already-correctly-placed surrogate leg
+
+### Requirement: Reconciliation targets a trade cycle's current own filled quantity, without waiting for its entry to finish filling
+ABI SHALL resolve the quantity a reconciliation attempt targets from the trade cycle's own currently
+known filled quantity, including a quantity known only from a still-live, partially filled entry order,
+and SHALL NOT require that entry order to have reached a terminal fill state before reconciling
+protection for the quantity already filled. ABI SHALL fail a reconciliation attempt closed, without
+targeting a zero or assumed quantity, when it cannot obtain any own fill evidence at all for that trade
+cycle.
+
+#### Scenario: A live partial fill is an immediately usable protection target
+- **WHEN** a trade cycle's own entry order is still live with only part of its quantity filled
+- **THEN** ABI reconciles protection for that trade cycle to the quantity currently filled, without
+  waiting for the entry order to reach a terminal fill state
+- **AND** ABI does not cancel or otherwise modify the entry order's own live remainder as part of this
+  reconciliation
+
+#### Scenario: A later additional fill is reflected on the next reconciliation
+- **WHEN** a trade cycle's own entry order receives an additional fill between two reconciliation
+  attempts
+- **THEN** the next reconciliation attempt targets the entry order's new, larger cumulative filled
+  quantity
+
+#### Scenario: No own fill evidence at all fails closed
+- **WHEN** ABI cannot obtain any evidence that a trade cycle's own entry order has filled at all
+- **THEN** ABI fails the reconciliation attempt closed
+- **AND** ABI does not reconcile protection toward a zero or otherwise assumed quantity
 
 ### Requirement: Reconciliation acts only on freshly observed evidence
 ABI SHALL determine a trade cycle's actual attributable native Partial protection state from a freshly

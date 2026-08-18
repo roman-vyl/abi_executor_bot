@@ -33,15 +33,19 @@ differ — amend the existing children in place to match. It never creates or ca
 tested, but wired to nothing production calls. Activation is `abi-native-partial-protection-cutover-v1`'s
 job alone.
 
-**Two of four design questions this proposal must answer are resolved without further gating**
-(triggered/race discipline, minimal pair-wide qty write-plan) **because they depend only on ABI-side
-logic, not on unverified exchange behavior.** A third (multi-fill representability) resolves to "no
-special-casing needed" — the reconciler's existing fail-closed behavior on anything other than
-`none`/`attributed` already covers it. **The fourth (the exact surrogate TAKE distance) is answered with
-a concrete default and a verification task**, not a fresh multi-day spike: the master plan explicitly
-forbids inventing an unverified percentage and shipping it as if proven, so the default below is
-documented as provisional, gated by a bounded pre-implementation check against Bybit's own accepted price
-range for the instrument, not by another full Demo exploration.
+**Three of four design questions this proposal must answer are resolved without any further gating**
+(fresh-evidence/race discipline; minimal pair-wide qty write-plan, now a total rule over every
+trigger/qty-change combination; and the qty a reconciliation attempt targets, resolved from this cycle's
+own current fill facts without waiting for terminal finality) **because they depend only on ABI-side
+logic and already-established own-order data, not on unverified exchange behavior.** A fourth
+(multi-fill representability) resolves to "no special-casing needed" — the reconciler's existing
+fail-closed behavior on anything other than `none`/`attributed` already covers it. **The surrogate TAKE
+distance is answered with a concrete default plus static-bounds clamping**, not a verification task
+against one Demo instrument: the master plan explicitly forbids inventing an unverified percentage and
+shipping it as if proven, and instead of gating the shipped constant on a bounded pre-implementation check
+against one instrument's accepted price range, this proposal clamps the computed candidate into the
+instrument's own decoded `minPrice`/`maxPrice` bounds — making the result exchange-valid by construction,
+for every instrument, without per-instrument verification.
 
 **OCO-after-amend remains `NOT PROVEN`** — neither spike checked whether Bybit atomically neutralizes a
 sibling leg when the other fills, after both legs have been through amend. This change does not depend on
@@ -53,10 +57,11 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
 
 - New adapter primitive: `POST /v5/order/amend`, scoped to `{category, symbol, orderId, triggerPrice?,
   qty?}` — the only Bybit write this change introduces.
-- `InstrumentTradingRules` (`instrumentTradingRulesResponseDecoder.ts`) gains `tickSize`, decoded from
-  the same `/v5/market/instruments-info` response `BybitInstrumentTradingRulesProvider` already queries
-  for `minOrderQty`/`qtyStep`/`minNotionalValue` — no new Bybit query, an additional field read from an
-  existing one.
+- `InstrumentTradingRules` (`instrumentTradingRulesResponseDecoder.ts`) gains `tickSize`, `minPrice`, and
+  `maxPrice`, decoded from the same `/v5/market/instruments-info` response
+  `BybitInstrumentTradingRulesProvider` already queries for `minOrderQty`/`qtyStep`/`minNotionalValue` —
+  no new Bybit query, additional fields read from an existing response. `minPrice`/`maxPrice` are what let
+  the surrogate TAKE formula below be exchange-valid by construction.
 - New price-side step-rounding primitive (`floorToStep`, alongside the existing `ceilToStep` in
   `exactDecimal.ts`) — needed so a computed surrogate price can be rounded consistently away from the
   reference price in either direction (up for a LONG surrogate, down for a SHORT surrogate).
@@ -66,8 +71,14 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
   call is issued), sends them, and re-verifies with a fresh, independent read-back before reporting
   success. Never creates or cancels an order.
 - Surrogate TAKE price computation for `take_price = null`: deterministic, derived from this cycle's own
-  `average_entry_price` (Change 1), tick-normalized, side-aware (far above for long, far below for
-  short), idempotent for a repeated identical intent.
+  immutable `desired_entry.planned_entry_price` (never the mutable cumulative average execution price),
+  tick-normalized, side-aware (far above for long, far below for short), idempotent for a repeated
+  identical intent, and clamped into the instrument's own `minPrice`/`maxPrice` bounds so it is
+  exchange-valid by construction.
+- Own-current-fill qty resolution for protection reconciliation: reuses this cycle's own fill facts when
+  already terminally final, otherwise issues a fresh own-order confirmation query — a still-partial fill
+  is an equally authoritative answer as a full fill, so reconciliation is never blocked waiting for the
+  entry order to finish filling; only a genuine absence of fill evidence fails closed.
 - A new, non-production-decision method on `ProtectionApplicationService` exercising the full
   reconciliation flow — `ProtectionApplicationService.process()` (the production HTTP path) is not
   touched; the existing `setTradingStop`/`tpslMode: "Full"` path and the
@@ -101,5 +112,7 @@ already means.
   Neither the mapping cutover, the admission-guard removal, nor the
   `shared_scope_protection_unsupported` removal happens in this change.
 - Remaining precondition for `abi-native-partial-protection-cutover-v1`, not this change: OCO-after-amend
-  stays `NOT PROVEN`; the surrogate TAKE distance default below is provisional pending the bounded
-  verification task in `tasks.md`, not a second full spike.
+  stays `NOT PROVEN`. The surrogate TAKE distance itself is not provisional — clamping against
+  `minPrice`/`maxPrice` (design.md Decision 5) makes it exchange-valid by construction — but this design
+  does not check for a possible *dynamic*, mark-price-relative deviation guard beyond those static
+  bounds; that residual gap is stated explicitly in design.md's Risks section, not hidden.

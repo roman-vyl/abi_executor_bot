@@ -23,19 +23,34 @@ removal, no close integration.
   exact TAKE child by its `orderId` deactivates **both** legs (`Deactivated`, identical `updatedTime`),
   and Experiment B proved a TAKE child's `takeProfit: "0"` amend is an observed no-op — TAKE stays
   `Untriggered` with unchanged `qty`/`triggerPrice`. Neither is a valid mechanism for removing a leg.
-- `early_execution_observation.avg_execution_price` / `isFillFactFinal()`
-  (`src/services/entryPackage/packageConfirmation.ts`, `abi-virtual-exposure-state-foundation-v1`) — this
-  cycle's own, own-order-sourced average entry price and fill-finality predicate. This change's surrogate
-  TAKE computation and its `qty` desired-state both read through this, never re-deriving or estimating.
+- `confirmEntryPackage()` / `PackageConfirmationOutcome`
+  (`src/services/entryPackage/packageConfirmation.ts`, `abi-virtual-exposure-state-foundation-v1`) —
+  this cycle's own, own-order-sourced fill-fact query. Both its `partial_fill` and `full_fill` outcomes
+  carry a full `EarlyExecutionObservation` (including `cumulative_filled_qty`) — either is authoritative
+  for "how much of this cycle's own entry is currently filled" at the moment queried. This change's
+  qty resolution (Decision 4) reads through this directly, never re-deriving or estimating, and
+  deliberately does not require the fill to be `isFillFactFinal` — see Decision 4 for why waiting for
+  finality would be wrong here.
+- `desired_entry.planned_entry_price` (`src/domain/entryPackageApi.ts:4`,
+  `abi-virtual-exposure-state-foundation-v1`) — this cycle's own commanded entry price, set once when
+  `desired_entry` is first bound and never rewritten in place for the life of one generation: grep of
+  `entryPackageApplicationService.ts` confirms `desired_entry` is only ever nulled via
+  `persistAbsentNoHistory`/`persistTransitionToAbsent`, both reached only once no fill is durably
+  provable for that generation — any real change to a live/filled generation's desired entry requires a
+  CANCEL first, never an in-place amend. This makes `planned_entry_price` the stable, cycle-owned
+  reference this change's surrogate TAKE (Decision 5) anchors to — unlike a cumulative average execution
+  price, which can move with every additional partial fill.
 - `ceilToStep(valueText, stepText)` (`src/domain/exactDecimal.ts:85`) — existing step-rounding primitive,
   used today for `qtyStep` rounding in `src/risk/positionSizeCalculator.ts`. No `floorToStep` counterpart
   exists yet.
 - `InstrumentTradingRules` (`src/exchange/instrumentTradingRulesResponseDecoder.ts:3-7`) currently decodes
   only `minOrderQty`, `qtyStep`, `minNotionalValue` from `/v5/market/instruments-info`'s `lotSizeFilter` —
-  no price tick size (`priceFilter.tickSize`) is decoded anywhere in this codebase today.
+  no `priceFilter` field (`tickSize`, `minPrice`, `maxPrice`) is decoded anywhere in this codebase today.
   `BybitInstrumentTradingRulesProvider` (`src/exchange/instrumentTradingRulesProvider.ts`) already
-  fetches and caches the underlying response per `(category, symbol)`; adding a field to what it decodes
-  needs no new Bybit query.
+  fetches and caches the underlying response per `(category, symbol)`; adding fields to what it decodes
+  needs no new Bybit query. `minPrice`/`maxPrice` (Bybit's own accepted price bounds for the instrument)
+  are what let this change's surrogate TAKE formula (Decision 5) be exchange-valid by construction,
+  instead of by an unverified assumption about one instrument.
 - `ProtectionCommand` (`src/domain/positionManagementApi.ts:10-15`): `{ strategyInstanceId,
   tradeCycleId, stopPrice: string, takePrice: string | null }` — unchanged by this proposal.
 - `ProtectionApplicationService`'s existing `evaluateReadBack()`/`isNumericallyEqualExactDecimal()`
@@ -51,7 +66,9 @@ removal, no close integration.
 - Given a trade cycle's desired protection state, reconcile the actually attributable native Partial
   children to match it using only `amend` — never `create`, never `cancel`.
 - Represent `take_price = null` as a deterministic, tick-valid, far-away dormant surrogate TAKE, computed
-  from this cycle's own stable `average_entry_price`, never from fluctuating current market price.
+  from this cycle's own stable `planned_entry_price`, clamped into the instrument's own exchange-valid
+  price bounds, never from fluctuating current market price and never from a value that can move on its
+  own as later fills accumulate.
 - Never act on stale evidence: re-read attributable state immediately before amending, and independently
   re-verify with a fresh read after.
 - Treat any classifier outcome other than `none`/`attributed` (including anything a future multi-fill
@@ -65,9 +82,11 @@ removal, no close integration.
   cutover-v1`.
 - Proving OCO-after-amend — stays `NOT PROVEN`, a `abi-native-partial-protection-cutover-v1` precondition
   only if that change's own design ends up depending on it.
-- A verified, exchange-confirmed final surrogate-distance constant — Decision 5 below gives a structural
-  formula and a provisional default; `tasks.md` gates the exact constant on a bounded verification step,
-  not a claim of proof this document doesn't have.
+- A dynamic, mark-price-relative max-deviation guard Bybit may separately enforce beyond the static
+  `minPrice`/`maxPrice` instrument bounds — Decision 5 clamps against the static bounds only; a live
+  guard beyond that, if one exists, is an accepted residual gap (Risks section), not something this
+  design checks (checking it would require exactly the live-market-price dependency this design forbids
+  itself from taking).
 - Any real multi-fill materialization behavior (auto-resize, additional pairs) — Decision 8 explains why
   this change needs no special-case logic for it regardless of which shape Bybit actually produces.
 - Partial close / `exposure_fraction < 1` — outside this program's current scope (see master plan's
@@ -165,11 +184,29 @@ serve both without sometimes rounding a surrogate closer to entry than intended.
 
 ### 4. Desired protection state resolution
 
-Given a `ProtectionCommand` (`stopPrice`, `takePrice: string | null`) and the record's own
-`early_execution_observation`:
+Given a `ProtectionCommand` (`stopPrice`, `takePrice: string | null`) and this cycle's own correlation
+record, `qty` is resolved by a dedicated step that deliberately does **not** wait for
+`isFillFactFinal()`:
 
 ```
-qty = record.early_execution_observation.cumulative_filled_qty   // requires isFillFactFinal(...) — see below
+function resolveCurrentOwnFilledQty(record, confirmEntryPackage): Result<string, "no_authoritative_qty"> {
+  if (record.early_execution_observation !== null && isFillFactFinal(record.early_execution_observation)) {
+    return ok(record.early_execution_observation.cumulative_filled_qty);
+  }
+  const outcome = confirmEntryPackage(record's own entry orderLinkId);
+  switch (outcome.kind) {
+    case "partial_fill":
+    case "full_fill":
+      return ok(outcome.observation.cumulative_filled_qty);
+    case "pending_confirmed":
+    case "terminal_without_fill":
+    case "not_found":
+    case "ambiguous":
+      return err("no_authoritative_qty");
+  }
+}
+
+qty = resolveCurrentOwnFilledQty(record, confirmEntryPackage)   // fail closed on err — see below
 stop.triggerPrice = command.stopPrice
 stop.qty = qty
 take.triggerPrice = command.takePrice !== null
@@ -178,54 +215,135 @@ take.triggerPrice = command.takePrice !== null
 take.qty = qty
 ```
 
-**`qty` requires `isFillFactFinal`.** If this cycle's own fill facts are not yet final (a live,
-still-partial entry order), the reconciler does not have an authoritative `qty` to reconcile toward —
-this is a **caller-side precondition**, not something `reconcileNativePartialProtection()` itself checks
-(mirrors `resolveOwnAttachedProtection()`'s own context-free design, Decision 1): the new
-`ProtectionApplicationService` method (Decision 11) refreshes and checks `isFillFactFinal` before calling
-the reconciler at all, exactly as the master plan's flow already specifies ("refresh own cumulative fill
-facts" as its own first step, before attribution).
+**Why not gate on `isFillFactFinal`.** This change's own live semantics (the master plan, and Change 1's
+own design) already establish that a trade cycle enters "open trade" state on its **first** partial fill —
+the entry order's own remainder stays live and un-cancelled, exactly as designed, while the cycle is
+already own-exposed for whatever has filled so far. A `PUT .../protection` call arriving while that entry
+remainder is still live must be able to protect the cycle's **current** own exposure, not block until the
+entry order eventually reaches a terminal fill state that may be seconds or minutes away — an
+`isFillFactFinal` precondition here would make protection unusable for exactly the window it matters most
+(a partially-filled, still-exposed, still-unprotected position). The prior version of this design borrowed
+`isFillFactFinal` as a precondition by analogy with `OpenPositionResolutionService.resolveOwnFillFacts()`;
+that analogy does not hold — `resolveOwnFillFacts()` answers "does an open position currently exist,"
+where premature exposure to a still-moving qty is undesirable, while this reconciler answers "protect
+whatever is currently, authoritatively, this cycle's own filled exposure," where premature use of a
+still-moving qty is exactly correct — the qty is expected to change again on a later fill, and the next
+reconciliation call is expected to pick that up (see Decision 8, unaffected by this change).
+
+**Resolution rule:**
+- If the record's own `early_execution_observation` is already present and `isFillFactFinal(...)` is
+  true, reuse its `cumulative_filled_qty` directly — no exchange call needed (this is the terminal,
+  no-remainder-left case, and reuse here is a pure optimization, not a correctness requirement).
+- Otherwise, issue a fresh `confirmEntryPackage()` call for this cycle's own entry order. Both
+  `partial_fill` and `full_fill` outcomes carry a full `EarlyExecutionObservation`, and **either is
+  equally authoritative** for "this cycle's current cumulative own fill, as of this reconciliation
+  attempt" — `partial_fill` is not treated as a lesser or provisional answer than `full_fill`; it is
+  simply a different, still-valid point on the same monotonically-non-decreasing `cumulative_filled_qty`
+  series.
+- `pending_confirmed` (no fill evidence obtained yet), `terminal_without_fill` (order ended with zero
+  fill), `not_found`, and `ambiguous` all resolve to `no_authoritative_qty` — a **fail-closed** outcome,
+  not a fallback to `"0"`. Reconciling protection toward a zero qty would be a contradiction (there is
+  nothing to protect, and a zero-qty amend is not this reconciler's job to interpret); the caller
+  (Decision 11) surfaces this as a distinct reconciliation failure before any attribution or amend call is
+  attempted. This is a deliberate divergence from `OpenPositionResolutionService.resolveOwnFillFacts()`,
+  which treats its own `terminal_without_fill` case as a valid `cumulativeFilledQty: "0"` answer — that
+  function is answering "does a position exist" (zero is a valid, informative answer to that question);
+  this resolution is answering "what quantity should protection now cover" (zero is not an actionable
+  answer to that question, and folding it in silently would risk a reconciler amending toward a
+  nonsensical zero-qty desired state instead of failing visibly).
+- Every reconciliation attempt re-resolves `qty` fresh by this same rule — there is no caching of a
+  resolved qty across attempts. A later attempt seeing a larger `cumulative_filled_qty` (because the
+  entry order received an additional fill in the meantime) is not a special case; it is the same rule
+  producing a different, equally authoritative answer, exactly as Decision 8 already establishes for
+  multi-fill in general.
 
 Both legs always carry the same `qty` — this is not a coincidence of the desired-state construction, it is
 the same pair-wide invariant `effective stop coverage == effective take coverage == own cumulative fill`
 the master plan states, applied identically whether the take leg is the caller's real desired price or a
 computed surrogate.
 
-### 5. Surrogate TAKE price: formula and provisional distance
+### 5. Surrogate TAKE price: stable reference, exchange-valid bounds by clamping
 
-**Structure (fixed by this design, not gated):**
+**Reference: `desired_entry.planned_entry_price`, not `average_entry_price`.** The prior version of this
+design anchored the surrogate to `early_execution_observation.avg_execution_price`. That is wrong: a
+cumulative average execution price is defined to change on every additional partial fill of the same
+entry order — anchoring to it would make a *repeated, unchanged* `take_price: null` intent compute a
+*different* surrogate after a later fill, silently violating this section's own idempotency requirement
+and Decision 9's already-satisfied short-circuit (a later fill would make an already-reconciled surrogate
+look stale even though the caller's logical intent never changed). `desired_entry.planned_entry_price` has
+no such problem: per the Context section's own grep-confirmed invariant, it is set once when the entry is
+first bound and never rewritten in place for the life of one generation, through partial fills, through
+the eventual full fill, for as long as any own exposure from that generation remains live. It is therefore
+the correct stable, cycle-owned reference — same cycle, same generation, same number, no matter how many
+partial fills have landed by the time a given `PUT .../protection` call reconciles.
+
+**Structure:**
 
 ```
-reference = record's own average_entry_price (early_execution_observation.avg_execution_price,
-            requires isFillFactFinal — same precondition as Decision 4's qty)
+reference = record's own desired_entry.planned_entry_price   // stable for the life of this generation
 
 if side == "long":
   raw = reference * (1 + SURROGATE_TAKE_DISTANCE_RATIO)
-  surrogateTakePrice = ceilToStep(raw, tickSize)     // round further away from reference
+  candidate = ceilToStep(raw, tickSize)          // round further away from reference
 else:
   raw = reference * (1 - SURROGATE_TAKE_DISTANCE_RATIO)
-  surrogateTakePrice = floorToStep(raw, tickSize)    // round further away from reference
+  candidate = floorToStep(raw, tickSize)         // round further away from reference
+
+surrogateTakePrice = clampToInstrumentBounds(candidate, minPrice, maxPrice, tickSize, side)
 ```
 
-This satisfies every policy requirement the master plan (ревизия v17) states: deterministic (pure
-function of `reference`, `side`, `tickSize`, and the fixed ratio — no current-price input at all);
-anchored to a stable cycle-owned reference (`average_entry_price`, immutable once `isFillFactFinal`,
-never re-estimated); correctly directional (multiplicatively above for long, below for short — never
-produces a non-positive price for short, unlike a purely additive offset that could exceed 100%);
-tick-normalized; and idempotent — the same `(average_entry_price, side, tickSize)` always produces the
-same surrogate, so a repeated identical `take_price: null` intent never moves the surrogate on a later
-reconcile call, matching the already-satisfied short-circuit (Decision 9).
+**Exchange-valid by construction, via clamping — not by an unverified constant.** Change 7 already
+extends `InstrumentTradingRules` with `tickSize` (Decision 3); this design extends that same addition to
+also decode `priceFilter.minPrice` and `priceFilter.maxPrice` from the same already-fetched
+`/v5/market/instruments-info` response (no new Bybit query — same reasoning as `tickSize` itself). Given
+those, `clampToInstrumentBounds` guarantees a **provably in-range** result without ever having verified
+one specific instrument's behavior as a stand-in for all instruments:
 
-**Provisional default, explicitly not proven: `SURROGATE_TAKE_DISTANCE_RATIO = 0.5` (50%).** Reasoning,
-not a claim of verification: normal stop/take distances this system's strategies use are observed in the
-single-digit-to-low-teens percent range (the stop-only spike's own experiments used ~5% stop/take
-distances on ETHUSDT); 50% is an order of magnitude beyond that, making an ordinary trade's price
-excursion reaching it extremely unlikely, while remaining modest enough to plausibly clear whatever
-maximum-price-deviation guard Bybit enforces for conditional/TP-SL order placement — a guard this
-codebase has never queried or observed directly. **This ratio is a placeholder pending `tasks.md`'s
-verification task, not a proven constant** — the master plan (ревизия v17) explicitly forbids fixing a
-percentage without justification and shipping it as settled; this section states the justification and
-leaves the number provisional until that task closes.
+```
+function clampToInstrumentBounds(candidate, minPrice, maxPrice, tickSize, side): Result<string, "surrogate_unrepresentable"> {
+  if (side == "long") {
+    if (candidate <= maxPrice) return ok(candidate);
+    clamped = floorToStep(maxPrice, tickSize);          // pull back inside the ceiling, stay tick-valid
+  } else {
+    if (candidate >= minPrice) return ok(candidate);
+    clamped = ceilToStep(minPrice, tickSize);            // pull up inside the floor, stay tick-valid
+  }
+  if (clamped == reference) return err("surrogate_unrepresentable");  // no room left to be a dormant TAKE at all
+  return ok(clamped);
+}
+```
+
+The 50%-distance preference (`SURROGATE_TAKE_DISTANCE_RATIO = 0.5`, unchanged from the prior version, kept
+as a named documented constant — task 4.1) is retained as the **preferred** distance precisely because it
+is now only a preference, not a claim: when `reference * 1.5` (long) / `reference * 0.5` (short) already
+falls inside `[minPrice, maxPrice]`, it is used as-is; when it does not, clamping pulls it back to the
+nearest tick-valid price still inside the instrument's own accepted range, which by definition Bybit
+itself defines as acceptable for that instrument — no live verification of any single instrument's
+tolerance is needed to trust that outcome. `surrogate_unrepresentable` (clamping would leave the surrogate
+exactly at the reference price, i.e. no room exists for *any* distinct dormant TAKE on this instrument's
+current bounds) is a new, explicit fail-closed reconciliation outcome — an edge case, expected to be rare
+to never in practice for real trading instruments, but named and handled rather than silently producing a
+surrogate indistinguishable from the entry price.
+
+This satisfies every remaining policy requirement: deterministic (pure function of `reference`, `side`,
+`tickSize`, `minPrice`, `maxPrice`, and the fixed ratio — no current-price input at all); anchored to a
+stable, truly immutable cycle-owned reference; correctly directional (multiplicatively above for long,
+below for short — never produces a non-positive price for short, unlike a purely additive offset that
+could exceed 100%); tick-normalized; provably exchange-valid from static instrument data alone; and
+idempotent — the same `(planned_entry_price, side, tickSize, minPrice, maxPrice)` always produces the
+same surrogate, so a repeated identical `take_price: null` intent never moves the surrogate on a later
+reconcile call, matching Decision 9's already-satisfied short-circuit, and — because the reference no
+longer moves with later fills — never moves it *because of* a later fill either.
+
+**No live-Demo verification task is needed before this reaches production-reachable code.** The prior
+version gated the shipped constant on a bounded Bybit Demo check (formerly `tasks.md` task 4.2) because a
+single Demo instrument's acceptance of `reference * 1.5` was, at best, evidence about that one instrument,
+never a general proof. Clamping against `minPrice`/`maxPrice` removes the need for that evidence entirely:
+the result is in-range by construction for whichever instrument's own decoded bounds are used, for every
+instrument, without per-instrument verification. What clamping does **not** rule out — a dynamic,
+mark-price-relative maximum-deviation guard Bybit might separately enforce at order-placement time,
+beyond its static `minPrice`/`maxPrice` — is called out explicitly as a residual, accepted gap in Risks
+below, not silently assumed away.
 
 **Rejected: a purely additive offset (`reference ± fixed_amount`).** Fails the "correctly directional,
 never produces a non-positive price" requirement for instruments trading at low absolute prices, and does
@@ -234,30 +352,54 @@ not scale with the instrument's own price level the way a ratio does.
 **Rejected: deriving the surrogate from live current market price.** Explicitly disallowed by the master
 plan — a moving reference breaks idempotency (the same logical intent would compute a different surrogate
 depending on when it happens to reconcile), and reintroduces exactly the "fluctuating price" dependency
-`average_entry_price` was chosen to avoid.
+this design otherwise avoids entirely by anchoring to `planned_entry_price` instead.
 
-### 6. Reconciliation write-plan: minimal amend calls, reusing the confirmed `qty` sync
+### 6. Reconciliation write-plan: qty travels in at most one amend call, STOP is always the qty carrier
+
+The confirmed spike fact is stronger than "a single amend can carry triggerPrice and qty together" — it is
+"amending **either** leg's `qty` pair-wide-synchronizes the sibling's `qty`." That means qty must never be
+sent twice in one reconciliation attempt, even split across two different calls that each also carry a
+`triggerPrice` change — sending it on both legs' calls would be a redundant, meaningless second write of
+the same pair-wide value. This design fixes **STOP as the sole, deterministic qty carrier**: whenever
+`qty` needs to change, it travels only in the STOP leg's `amendOrder` call, whether or not STOP's own
+`triggerPrice` also changed in the same attempt. The TAKE leg's `amendOrder` call, when one is needed,
+never includes `qty` — it relies entirely on the confirmed sync fact.
 
 Given `actual` (from `resolveOwnAttachedProtection()`, `kind: "attributed"`) and `desired`
-(`DesiredProtectionState`):
+(`DesiredProtectionState`), let `triggerChanged(leg)` mean `actual.<leg>.triggerPrice !=
+desired.<leg>.triggerPrice` (exact-decimal) and `qtyChanged` mean `actual.stop.qty != desired.stop.qty`
+(equivalently `actual.take.qty != desired.take.qty` — both legs' desired `qty` are always equal by
+construction, Decision 4, and are compared against their own actual leg independently only as an
+already-satisfied check, never as separate desired values).
 
-- If `actual.stop.triggerPrice == desired.stop.triggerPrice` (exact-decimal) and
-  `actual.take.triggerPrice == desired.take.triggerPrice` and both legs' `qty` already equal
-  `desired.stop.qty` (== `desired.take.qty`, always equal by construction) — nothing to do (Decision 9).
-- Otherwise, for each leg whose `triggerPrice` differs from desired: **one** `amendOrder` call for that
-  leg's `orderId`, carrying the new `triggerPrice` and, if `qty` also differs, the new `qty` in the same
-  call (the spike's own Experiment B confirmed a single amend can carry both together).
-- If **only** `qty` differs (both `triggerPrice`s already match desired) — **exactly one** `amendOrder`
-  call, deterministically always on the STOP leg's `orderId`, carrying only the new `qty`. The confirmed
-  pair-wide sync fact means the TAKE leg's `qty` updates as a side effect — a second, redundant `qty`-only
-  amend on the TAKE leg is never issued. (Choosing STOP over TAKE is an arbitrary but fixed, documented
-  choice — either leg would work given the confirmed sync; STOP is chosen for consistency with this
-  service's existing stop-price-first ordering elsewhere.)
-- At most two `amendOrder` calls are ever issued in one reconciliation attempt (one per leg whose
-  `triggerPrice` changed), never more.
+The full case matrix:
 
-This is the "minimal write-plan" the master plan defers to this design phase — expressed as a deterministic
-rule, not a per-call optimization decision made ad hoc at runtime.
+| STOP trigger changed | TAKE trigger changed | qty changed | STOP call | TAKE call |
+|---|---|---|---|---|
+| no | no | no | none | none — `already_satisfied` (Decision 9) |
+| yes | no | no | `triggerPrice` only | none |
+| no | yes | no | none | `triggerPrice` only |
+| yes | yes | no | `triggerPrice` only | `triggerPrice` only |
+| yes | no | yes | `triggerPrice` + `qty` | none |
+| no | yes | yes | `qty` only | `triggerPrice` only |
+| yes | yes | yes | `triggerPrice` + `qty` | `triggerPrice` only |
+| no | no | yes | `qty` only | none |
+
+In every row where `qtyChanged` is true, exactly one call carries `qty` — the STOP leg's call — and it is
+issued even when STOP's own `triggerPrice` did not change (the "no / no / yes" and "no / yes / yes" rows),
+specifically so the sync fact has a call to ride on. TAKE's call, whenever issued, carries `triggerPrice`
+only, never `qty`. At most two `amendOrder` calls are ever issued in one reconciliation attempt (one per
+leg with any change at all), and **at most one of those two ever carries `qty`** — this second bound is
+the correction over the prior version of this design, which left the qty-and-triggerPrice-changed-together
+case ambiguous enough to potentially send `qty` on both legs' calls.
+
+(Choosing STOP over TAKE as the fixed qty carrier is an arbitrary but fixed, documented choice — either
+leg would work given the confirmed sync; STOP is chosen for consistency with this service's existing
+stop-price-first ordering elsewhere.)
+
+This is the "minimal write-plan" the master plan defers to this design phase — expressed as a total,
+deterministic rule over all eight trigger/qty-change combinations, not a per-call optimization decision
+made ad hoc at runtime.
 
 ### 7. Fresh-evidence / race discipline
 
@@ -336,9 +478,10 @@ own precondition if it turns out to need one) and does not assume OCO already ha
 ### 11. `ProtectionApplicationService` integration: additive, not wired to `process()`
 
 A new public method, `reconcileNativePartial(command: ProtectionCommand): Promise<ReconciliationOutcome>`,
-added to `ProtectionApplicationService`, following the same flow the master plan specifies: refresh own
-cumulative fill (Change 1) → check `isFillFactFinal` (fail closed if not) → resolve desired state
-(Decision 4, including surrogate computation) → `reconcileNativePartialProtection()` (Decisions 1-9).
+added to `ProtectionApplicationService`, following the flow Decision 4 now specifies: resolve this cycle's
+current authoritative own filled qty (reuse-if-final, else fresh `confirmEntryPackage()`, fail closed on
+`no_authoritative_qty`) → resolve desired state (Decision 4/5, including surrogate computation) →
+`reconcileNativePartialProtection()` (Decisions 1-9).
 `process()` (the method `apply()`/the production HTTP path actually calls) is **not modified** — this is
 a sibling method, called only by this change's own tests and, later, by
 `abi-native-partial-protection-cutover-v1`'s production-decision switch. Locking: reuses the same
@@ -348,11 +491,14 @@ will.
 
 ## Risks / Trade-offs
 
-- [The provisional 50% surrogate distance ratio (Decision 5) might not clear Bybit's actual max-price
-  constraint, or might turn out too close to be reliably dormant] → Accepted as this document's own
-  explicitly-flagged provisional decision, not a silent guess: `tasks.md` gates the shipped constant on a
-  bounded verification step before this reaches production-reachable code (though even then it stays
-  unreachable until `abi-native-partial-protection-cutover-v1`).
+- [Bybit may enforce a dynamic, mark-price-relative maximum price-deviation guard for conditional/TP-SL
+  order placement, beyond its static `minPrice`/`maxPrice` instrument bounds — this design's clamping
+  (Decision 5) only guarantees validity against the static bounds, and checking a dynamic guard would
+  require exactly the live-market-price dependency this design deliberately avoids] → Accepted as an
+  explicit, stated gap, not a silent one: if such a guard exists and rejects a clamped-but-still-far
+  surrogate, the reconciliation attempt fails closed via the ordinary `amend_rejected` path (Decision 7)
+  — no silent fallback, no retry with a different distance. Closing this gap for real, if it ever proves
+  necessary, is `abi-native-partial-protection-cutover-v1`'s concern, not this change's.
 - [At most two `amendOrder` calls per reconciliation attempt is not atomic — a partial failure between
   the two leaves one leg amended and one not] → Accepted, matching this codebase's established pattern
   for multi-step exchange writes (e.g. `CloseApplicationService`'s cancel-then-close sequence): Decision 7
