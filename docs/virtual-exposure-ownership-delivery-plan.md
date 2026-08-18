@@ -327,6 +327,27 @@
 > `abi-entry-cycle-recovery-attribution-v1`), не здесь; этот пункт master-plan фиксирует только исправление
 > ошибочной premise и итоговую архитектуру, не полный design.
 
+> **Ревизия v12 — второй blocker в п.3/п.5 ревизии v11 (найден review до apply Change 4), исправлен.** v11
+> п.3 использовал для close-ордера тот же `classifyOrderForRecovery`, что и для entry-ордера — этот
+> primitive доказывает только **non-zero fill**, не то, что close-ордер закрыл ровно ожидаемое qty.
+> Change 2 (`CloseApplicationService.resolveCloseOrderOutcome`) уже имеет более строгую semantics:
+> terminality + exact qty match (`confirmEntryPackage` + `decimalEquals`) против ожидаемого qty. Reuse
+> только coarse-classifier позволил бы **partial** close-ордер fill ошибочно репортиться как чистый
+> `terminal_after_fill`. Исправлено: п.3 v11 заменяется на: close-ордер classification переиспользует
+> **ровно** Change 2's exact-qty-match strictness через новый **минимальный shared read-only primitive**
+> (`classifyOwnCloseOrderOutcome`, извлечён из single-shot ядра `resolveCloseOrderOutcome` в
+> `packageConfirmation.ts`), который вызывают **оба** — `CloseApplicationService` (thin wrapper вокруг
+> его собственного bounded-retry, поведение байт-в-байт сохранено) и `EntryCycleRecoveryResolutionService`
+> (один раз на свою уже существующую bounded-retry попытку). Итоговая taxonomy для close-attempted fill
+> case: exact qty match → `terminal_after_fill` (aggregate не консультируется, как и раньше); terminal
+> zero-fill (rejected) → `position_open` (та же aggregate sanity, что и no-close-attempted case); terminal
+> **partial**-fill (qty mismatch) → **fail closed** (новое: ни `position_open`, ни `terminal_after_fill` —
+> genuine unresolved partial close, ABI не гадает, какое из двух состояний ближе); live/not_found/
+> inconclusive → fail closed, без изменений. П.5 v11 ("никакой новой close-side machinery... ни одного
+> нового primitive") уточняется: ровно один новый **shared, read-only, single-shot** classification
+> primitive — не duplicate Change 2's логики, не generic OMS, не новый adapter/decoder/cancel/dispatch
+> путь. Остальные пункты v11 (1, 2, 4, 6) остаются в силе без изменений.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope

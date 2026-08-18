@@ -43,19 +43,27 @@ be determined by this cycle's own `close_order_link_id`:
   `open-position-resolution`'s own aggregate-sanity check for the identical purpose — not
   proof this cycle exclusively owns that position, only that a matching-side exposure
   genuinely exists).
-- If `close_order_link_id` is durably recorded for this cycle, ABI SHALL query that
-  order's own current state using the same own-order-query mechanism already used for the
-  entry order, and resolve from its own positive finding: a positively confirmed fill on
-  this cycle's own close order resolves `terminal_after_fill`, with no fill facts in the
-  response and with no aggregate physical position query consulted at all for this
-  determination — this cycle's own two-order evidence chain (its entry order's own fill,
-  its close order's own fill) is sufficient by itself and is never overridden or
+- If `close_order_link_id` is durably recorded for this cycle, ABI SHALL classify that
+  order's own current state using the same exact-quantity-matching strictness
+  `close-execution` already uses to confirm its own dispatch fully succeeded (terminality,
+  then this cycle's own close order's confirmed cumulative fill compared exactly against
+  this cycle's own entry order's confirmed cumulative fill) — never the coarser "any fill
+  occurred" check this capability uses to classify the entry order itself, and never the
+  aggregate. A positively confirmed **exact** quantity match on this cycle's own close
+  order resolves `terminal_after_fill`, with no fill facts in the response and with no
+  aggregate physical position query consulted at all for this determination — this
+  cycle's own two-order evidence chain (its entry order's own confirmed fill, its close
+  order's own confirmed matching fill) is sufficient by itself and is never overridden or
   reinterpreted by a same-side sibling's own aggregate contribution. A positively
   confirmed terminal state with zero fill on this cycle's own close order (the close
   attempt was rejected or otherwise never executed) resolves `position_open` instead,
   using the same sourcing and the same aggregate existence-only sanity check as the
-  no-close-attempted case above. Any other finding for this cycle's own close order (still
-  live, not found, or inconclusive) SHALL NOT resolve either state — ABI fails safe,
+  no-close-attempted case above. A positively confirmed terminal state with a fill that
+  does **not** exactly match this cycle's own expected close quantity (a genuine, unresolved
+  partial close) SHALL NOT resolve either `position_open` or `terminal_after_fill` — ABI
+  fails safe, since neither state correctly describes an exposure that was only partially
+  reduced by an unconfirmed amount. Any other finding for this cycle's own close order
+  (still live, not found, or inconclusive) SHALL NOT resolve either state — ABI fails safe,
   exactly as it would for any other not-yet-established evidence.
 
 A fill signal on the entry order's own query without a positive determination of the
@@ -109,10 +117,12 @@ resolve `position_open` or `terminal_after_fill`.
 - **AND** ABI fails safe instead — this is a genuine contradiction between this cycle's
   own evidence and physical reality, not a normal shared-scope condition
 
-#### Scenario: A fill with the cycle's own close order confirmed filled resolves to terminal_after_fill, with no aggregate consultation, regardless of a same-side sibling's own open position
+#### Scenario: A fill with the cycle's own close order confirmed an exact quantity match resolves to terminal_after_fill, with no aggregate consultation, regardless of a same-side sibling's own open position
 - **WHEN** the own-order query positively observes a fill, a close order is durably
-  recorded for this cycle, and querying that close order's own current state positively
-  confirms it filled
+  recorded for this cycle, and classifying that close order's own current state (using the
+  same exact-quantity-matching strictness `close-execution` already uses) positively
+  confirms its own confirmed cumulative fill exactly matches this cycle's own entry
+  order's confirmed cumulative fill
 - **THEN** ABI resolves `terminal_after_fill`
 - **AND** ABI does not query, or use in any way, the aggregate physical position query to
   reach this determination
@@ -121,9 +131,9 @@ resolve `position_open` or `terminal_after_fill`.
   the sibling's own open position never causes this cycle to be mis-resolved as
   `position_open`
 
-#### Scenario: A fill with the cycle's own close order confirmed rejected resolves to position_open
+#### Scenario: A fill with the cycle's own close order confirmed rejected (zero fill) resolves to position_open
 - **WHEN** the own-order query positively observes a fill, a close order is durably
-  recorded for this cycle, and querying that close order's own current state positively
+  recorded for this cycle, and classifying that close order's own current state positively
   confirms it is terminal with zero fill (the close attempt was rejected or otherwise
   never executed)
 - **THEN** ABI resolves `position_open`, sourced and sanity-checked exactly as the
@@ -131,11 +141,23 @@ resolve `position_open` or `terminal_after_fill`.
   `average_entry_price`, this cycle's own durable capture for `first_fill_at_ms`,
   aggregate existence-only sanity on the matching side)
 
+#### Scenario: A partial fill on the cycle's own close order fails safe rather than resolving either state
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state positively
+  confirms it is terminal with a fill that does NOT exactly match this cycle's own entry
+  order's confirmed cumulative fill
+- **THEN** ABI does NOT resolve `position_open` (some of this cycle's own exposure was
+  reduced, so reporting it as still fully open would be wrong) and does NOT resolve
+  `terminal_after_fill` (the reduction is not confirmed complete)
+- **AND** ABI fails safe instead, regardless of what the aggregate physical position query
+  reports
+
 #### Scenario: A fill with the cycle's own close order not yet positively resolved fails safe
 - **WHEN** the own-order query positively observes a fill, a close order is durably
-  recorded for this cycle, and querying that close order's own current state does not
-  positively confirm either a fill or a zero-fill terminal state (it is still live, not
-  found, or the query is inconclusive)
+  recorded for this cycle, and classifying that close order's own current state does not
+  positively confirm any of: an exact quantity match, a zero-fill terminal state, or a
+  partial (non-matching) fill — it is still live, genuinely not found, or the
+  classification is otherwise inconclusive
 - **THEN** ABI does NOT resolve `position_open` or `terminal_after_fill` from this attempt
 - **AND** ABI fails safe instead, regardless of what the aggregate physical position query
   reports
