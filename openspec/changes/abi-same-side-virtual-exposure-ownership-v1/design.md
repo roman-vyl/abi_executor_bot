@@ -1,306 +1,217 @@
 ## Context
 
-See `proposal.md` for Why/What. This design implements master-plan Change 5 as corrected by a short
-architecture-review pass against the actually-applied Changes 1-4 (not the master plan's original v3-era
-text, which the plan's own "Примечание к ревизиям v4/v5" caveat already flags as stale for Changes 4-6).
-That review's findings are authoritative for this design; see `proposal.md`'s "Why" for the two concrete
-gaps it found (the `findOwnerByScope` single-pointer primitive, and the self-conflict bug it produces).
-
-This is an **activation-only** change: it does not build anything new. Every primitive it needs already
-exists and is already proven for exactly this purpose — `findActiveRecordsForScope()` (Change 1,
-already reused by Change 2), `isDurablyClosedEntryPackageStatus` (pre-existing), the existing
-`scopeMutex`/`mutex` `KeyedMutex` instances (pre-existing, already correctly scoped). The only genuinely
-new code is: one rewritten decision inside an existing critical section (admission), one rewritten
-comparison inside an existing replay function (startup), one rewritten decision inside an existing method
-(protection guard), and one new closed-vocabulary error code.
+See `proposal.md` for Why/What, including the retracted first premise (this change activates same-side
+production sharing) and the safety blocker that retracted it: entry-package's own entry-order creation
+already attaches position-level `tpslMode: "Full"` protection (`bybitOrderMapper.ts:124-129`), which a
+second same-side owner's own entry order would silently clobber the instant it is placed — a hazard
+`PUT .../protection`'s guard alone cannot prevent, since the unsafe write happens inside entry-package
+creation, not inside the protection endpoint. This design implements the corrected scope: foundation only,
+proven against synthetic fixtures, one explicit temporary guard keeping real admission exactly as
+exclusive as it is today.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Any number of same-side trade cycles can claim and hold one physical scope concurrently; opposite-side
-  claims continue to be rejected exactly as any conflicting claim is today (fail closed, before any
-  durable write or exchange call).
-- Fix the two correctness gaps the architecture review found (`findOwnerByScope`'s unsoundness for
-  admission decisions, and the self-conflict bug it causes) as part of this change, not as follow-up.
-- Replay reconstructs multi-owner scopes correctly and continues to fail readiness closed on any
-  genuine (mixed-side) conflict, with no time window in which a corrupted or ambiguous scope is silently
-  accepted.
-- `PUT .../protection` never lets one owner's write silently manage another same-scope owner's exposure —
-  this ships in the same change as admission, not as separate follow-up work, closing the unsafe window
-  the master plan itself already calls out.
-- No new store, index, mutex, or registry. Every decision this change makes is computed on demand from
-  data `EntryPackageCorrelationRepository` already durably holds.
+- Fix the two real correctness gaps the architecture review found in `findOwnerByScope()`
+  (unsoundness for admission decisions, and the self-conflict bug it would produce) — as foundation, so
+  Change 8's later activation does not have to rediscover and fix them under production pressure.
+- Prove the full same-side admission classification, side-aware replay reconstruction, and the
+  shared-scope protection guard against synthetic multi-owner fixtures — the same testing discipline
+  Changes 1-4 already used before their own consumers were production-reachable.
+- Leave every currently-reachable production behavior byte-for-byte unchanged.
+- Make the one remaining activation step (Change 8) as small as possible: remove one clearly-labeled
+  guard, once pair-owned protection has actually replaced position-level `tpslMode: "Full"` writes.
 
 **Non-Goals:**
-- Opposite-side coexistence (hedge mode or any dual-side model) — remains rejected, unconditionally, per
-  the master plan's own explicit user requirement.
-- Pair-owned protection (Changes 6-8) — the guard added here is a temporary safety companion, not a
-  redesign; it is explicitly meant to be *removed* by a later change (Change 7/8), not extended.
+- Activating real same-side admission in production. That is Change 8's job, gated on pair-owned
+  protection (Changes 6-7) actually existing first.
+- Any change to entry-package's own TP/SL attachment behavior, including any `tpslMode: "Partial"`
+  workaround. `mapEntryPackageToBybit()` is not touched by this change at all.
+- Pair-owned protection itself (Changes 6-8).
 - Any Runtime-side change.
-- A `VirtualExposure` type or a new persisted per-cycle-quantity field — this change touches only *who*
-  may hold a scope, never *how much* of it any owner holds (that boundary was already resolved by
-  Changes 1/2, out of this change's scope).
-- Renaming the `position-scope-exclusivity` capability id/folder to something like
-  `virtual-exposure-ownership`, even though the master plan's original text suggests it. The capability's
-  *requirements* change substantially (see the spec delta), but Change 3 already established the
-  precedent of rewriting a capability's requirements in place — including a full purpose/semantics change
-  — without renaming its id (`open-position-resolution` kept its name through Change 3's own
-  fill-derived-vs-aggregate-derived rewrite). Renaming a capability folder is a documentation-organization
-  decision independent of this change's actual code delta, and doing it here would be scope creep against
-  "activation only." If a future reviewer wants the rename, it can be done as its own zero-behavior-change
-  documentation pass.
-- Any change to `findOwnerByScope()`'s or `byScope`'s own implementation. They are correct at what they
-  already do (report the most recent writer); this change only stops treating that answer as sufficient
-  for a decision that needs the full active set.
+- A `VirtualExposure` type, a new persisted per-cycle-quantity field, a new mutex/store/index — unchanged
+  from the prior draft's non-goals.
+- Renaming the `position-scope-exclusivity` capability id/folder — unchanged from the prior draft's
+  reasoning (Change 3 precedent: rewrite requirements in place, keep the id stable).
 
-## Decision 1 — Admission: `findActiveRecordsForScope()` replaces `findOwnerByScope()` inside the existing critical section
+## Decision 1 — Admission: a correct classification, gated by one temporary, explicitly-labeled production guard
 
-Current code (`entryPackageApplicationService.ts:278-296`):
+**The classification (foundation, fully active, fully tested):**
 
 ```ts
-const claim = await this.deps.scopeMutex.withKeyLock(positionScopeKey(category, symbol), async () => {
-  const owner = this.deps.correlationRepository.findOwnerByScope(category, symbol);
-  const ownedByAnotherActivePair =
-    owner !== undefined && !isOwnedBySamePair(owner, command) && !isDurablyClosedEntryPackageStatus(owner.status);
-  if (ownedByAnotherActivePair) return "conflict";
-  await this.deps.correlationRepository.save(provisional);
-  return "claimed";
-});
-```
+const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, symbol);
+const otherActiveRecords = activeRecords.filter((r) => !isOwnedBySamePair(r, command));
 
-New logic, same critical section, same "claimed" | "conflict" return shape:
-
-```ts
-const claim = await this.deps.scopeMutex.withKeyLock(positionScopeKey(category, symbol), async () => {
-  const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, symbol);
-  const otherActiveRecords = activeRecords.filter((r) => !isOwnedBySamePair(r, command));
-
-  for (const other of otherActiveRecords) {
-    if (other.desired_entry === null) {
-      return "corrupt"; // new outcome — see below
-    }
+for (const other of otherActiveRecords) {
+  if (other.desired_entry === null) {
+    return "corrupt";
   }
-  const conflictingSide = otherActiveRecords.find((r) => r.desired_entry!.side !== desiredEntry.side);
-  if (conflictingSide !== undefined) {
-    return "conflict";
-  }
-
-  await this.deps.correlationRepository.save(provisional);
-  return "claimed";
-});
+}
+const conflictingSide = otherActiveRecords.find((r) => r.desired_entry!.side !== desiredEntry.side);
 ```
 
-**Why filter out the requested pair's own record first, not just check `isOwnedBySamePair` inline per
-candidate as the old code did.** The old code only ever compared against a *single* `owner` value, so
-"is this the same pair" and "is this pair's own record" were the same question. Once `activeRecords` can
-contain more than one record, the requested pair's own (possibly still-active) record must be excluded
-from the "others" set *before* the side comparison runs — otherwise a pair would trivially "conflict"
-with itself (same side, so harmless in practice, but conceptually wrong and wasteful) and, more
-importantly, a stale reviewer extending this logic later could accidentally compare the pair against its
-own record instead of only against genuine others. Filtering first makes "am I already active here" and
-"do the *other* active owners' sides allow me to join" two clearly separate questions — this is also
-exactly what fixes the self-conflict bug the architecture review found: the requested pair's own record,
-wherever it is (including if it happens to be what `findOwnerByScope` would NOT have pointed to), is never
-compared against itself.
+This step is unchanged from the prior draft and is exactly what Change 8 will eventually rely on
+unmodified — see that draft's Decision 1 rationale for why self-exclusion must happen before the side
+comparison, and why a `null` `desired_entry` among other active records is a structural contradiction, not
+a state to guess through.
 
-**The `null desired_entry` case.** An active (non-durably-closed) record with `desired_entry === null` is
-not a state any current write path produces — `createOrder()` always writes a real `desired_entry`
-alongside any non-`absent` status, and a null-`desired_entry` CANCEL write durably transitions status to
-`absent` in the same write (`isDurablyClosedEntryPackageStatus` already excludes it from
-`findActiveRecordsForScope`'s results). This is the same class of "structurally impossible, verify anyway"
-defensive check already used throughout this codebase (e.g. `CloseApplicationService`'s repeated
-"Unreachable... re-verified rather than assumed" checks). Encountering it here is a genuine correlation
-data contradiction — a request under it must fail closed, not silently exclude that record from the side
-check (which could let a real opposite-side owner go undetected) or crash with a null-dereference.
-
-**Why this new "corrupt" outcome doesn't need a new public error code.** Both `"conflict"` and this new
-contradiction both already map to the same pre-exchange-call safe error the caller returns for a scope
-conflict today (`internalErrorResult()`, no new correlation write, no exchange call) — see "Decision 4:
-error codes" below for why this stays as-is rather than gaining its own code.
-
-## Decision 2 — `findOwnerByScope()`/`byScope`: reclassified, not removed, not repaired
-
-`findOwnerByScope()` continues to return exactly what it always has — the record from the most recent
-non-durably-closed write to a scope. That answer remains **correct** for what it actually promises; what
-changes is that after this proposal, no remaining production code path is allowed to treat "the current
-`byScope` pointer" as "the current owner" for an admission or protection decision, because once same-side
-sharing is active in production, that promise is no longer strong enough for either decision. This
-proposal's two rewrites (Decisions 1 and 3 for the guard) are, together, the last two production call
-sites of `findOwnerByScope()` — after this change ships, no production decision-making code calls it.
-It is deliberately left in place (not deleted, not repointed to a set) as a cheap, still-truthful,
-non-authoritative existence/debugging primitive — repointing it to return a set would just be
-`findActiveRecordsForScope()` again under a different name, and deleting a correct, harmless primitive
-with no remaining unsafe callers is unrelated churn this "activation only" change does not need.
-
-## Decision 3 — Replay: side comparison replaces identity comparison, no new persisted index
-
-Current code (`entryPackageCorrelationRepository.ts:268-320`, `rebuildScopeIndexFromReplay`): any second
-active record for a scope, regardless of side, is an unconditional hard failure.
-
-New logic — a **local, function-scoped** `Map<string, "long" | "short">` tracking, per scope, the side
-already seen among that scope's active records during this one replay pass (discarded when the function
-returns; never exposed, never persisted, not a new index in the sense the review was asked to avoid):
+**The temporary production guard, new in this correction:**
 
 ```ts
-private rebuildScopeIndexFromReplay(): string | undefined {
-  this.byScope.clear();
-  const activeSideByScope = new Map<string, "long" | "short">();
-
-  for (const record of this.byCompositeKey.values()) {
-    // ...existing category/symbol contradiction checks, unchanged...
-    if (isDurablyClosedEntryPackageStatus(record.status)) continue;
-
-    const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
-    const side = record.desired_entry?.side;
-    if (side === undefined) {
-      return `record for ${key} is active but has no usable desired_entry.side`;
-    }
-
-    const existingSide = activeSideByScope.get(scope);
-    if (existingSide !== undefined && existingSide !== side) {
-      return `conflicting scope ownership for ${scope}: mixed sides among active records`;
-    }
-    activeSideByScope.set(scope, side);
-    this.byScope.set(scope, record); // last-writer-in-iteration-order pointer, unchanged semantics
-  }
-
-  return undefined;
+// TEMPORARY, per abi-same-side-virtual-exposure-ownership-v1: entry-package's own
+// entry-order creation attaches position-level tpslMode: "Full" protection
+// (bybitOrderMapper.ts) — a second same-side owner's own entry order would
+// silently clobber the first owner's protection the instant it is placed,
+// before pair-owned protection (Changes 6-8) exists to prevent that. Real
+// same-side admission is therefore gated here until Change 8 (once pair-owned
+// protection has replaced position-level TP/SL writes) removes this block and
+// lets the classification above decide admission on its own.
+if (otherActiveRecords.length > 0) {
+  return "conflict"; // same-side, opposite-side, and corrupt all conflict for now
 }
+await this.deps.correlationRepository.save(provisional);
+return "claimed";
 ```
 
-`byScope` itself keeps being populated exactly as before (last record wins) — Decision 2 already
-established that no production decision depends on which specific record `byScope` ends up pointing to
-after replay, only on `findActiveRecordsForScope()`'s full scan, which is untouched by this change (it
-already derives everything fresh from `byCompositeKey` on every call, replay included).
+**Why this is the right shape, not a config flag or a second mutex.** The classification and the guard are
+two clearly separated steps in the same function, not two different code paths — Change 8's entire job on
+the admission side is deleting the guard block and letting the classification's own three-way answer
+(empty / same-side / opposite-side) drive the outcome directly, instead of collapsing same-side into
+conflict. No flag, environment variable, or config toggle is introduced — this is not a feature that needs
+to be turned on/off at runtime, it is prepared code waiting for a follow-up change to delete a few lines,
+exactly the same shape Change 7's own "guard from Change 5 stays active" already uses for protection.
 
-**Why `record.desired_entry?.side === undefined` (missing, not present) fails closed here, distinct from
-Decision 1's `null` check.** Replay works from raw records already validated by
-`isValidEntryPackageExecutionRecord` — `desired_entry` there is typed `DesiredEntryDto | null`, so a
-present-but-`null` value decodes to exactly `undefined` under `?.side` here too; this is the same
-contradiction as Decision 1's, expressed as a startup readiness failure instead of a request-time one,
-consistent with how this same function already turns other structural contradictions (missing exchange
-binding on a non-durably-closed record) into readiness failures rather than silently excluding the record.
+**Why the self-exclusion fix ships now even though its precondition can't occur in production yet.**
+`otherActiveRecords` can only be non-empty in production today for a genuinely different pair (since no
+second owner of *any* side can ever successfully join while this guard stands) — so today, self-exclusion
+changes nothing observable: a genuinely different pair was already correctly treated as a conflict before
+this change, and still is, via the guard above. What self-exclusion protects against is a bug that would
+otherwise be *introduced* the moment Change 8 deletes the guard and same-side joining becomes real: without
+self-exclusion, a pair's own retry could, at that point, misread a same-side sibling as "the owner" (under
+the old single-pointer primitive) and self-conflict. Fixing this now, as foundation, means Change 8's own
+diff is exactly "delete the guard block" — it does not also have to get admission's classification correct
+under time pressure at the activation moment. This is the same "build correct now, activate later" pattern
+Change 1 (data model) and Change 6 (protection identity) already use elsewhere in this program.
 
-**Iteration order independence.** `byCompositeKey.values()` iterates in insertion order (JS `Map`
-semantics), which for a fresh replay is file order — but the side-conflict check above is symmetric
-(compares against whatever side was recorded *first* for that scope, regardless of which pair that was),
-so which of two same-side records happens to be "first" never changes the outcome, only which one
-`byScope` ends up pointing to (which, per Decision 2, no longer matters).
+**Regression analysis.** For every pair, in every production-reachable scenario today: `otherActiveRecords`
+is empty (no other pair holds the scope) → claim, identical to today's `findOwnerByScope`-based "no owner"
+path; or `otherActiveRecords` is non-empty (a genuinely different pair holds it, single-owner world) →
+conflict via the guard, identical to today's `findOwnerByScope`-based "owned by another pair" path. There
+is no reachable input for which this change's output differs from today's.
 
-## Decision 4 — Protection guard: placed before `determine()`, using the same `findActiveRecordsForScope()` primitive
+## Decision 2 — `findOwnerByScope()`/`byScope`: unchanged from the prior draft
 
-Current code (`protectionApplicationService.ts:93-102`):
+No implementation change; reclassified as a legacy/convenience primitive, no longer valid for any
+ownership/admission decision. See the prior draft's Decision 2 for the full rationale — unaffected by this
+correction.
 
-```ts
-const owner = this.deps.correlationRepository.findOwnerByScope(category, record.exchange_symbol);
-if (owner === undefined || owner.strategy_instance_id !== command.strategyInstanceId || owner.trade_cycle_id !== command.tradeCycleId) {
-  return internalErrorResult();
-}
-```
+## Decision 3 — Replay: side-aware reconstruction, naturally inert in production until Change 8
 
-New logic, same call site (replacing this block entirely, immediately before the existing
-`determine()` call):
+Unchanged in mechanism from the prior draft's Decision 3 (a local, function-scoped
+`Map<scope, side>`, discarded after one replay pass; mixed-side remains a hard failure; a missing side on
+an active record fails readiness closed). What changes in this correction is only the framing: this
+relaxation cannot be exercised by genuine production writes today, because Decision 1's guard never lets
+a real second same-side owner come into existence in the first place. It is exercised only by tests that
+seed a synthetic second active record directly into the correlation store (bypassing the admission gate
+entirely, the same technique Changes 1-4 already used for their own multi-owner tests) — proving the
+replay mechanism itself is correct and ready, without requiring or implying that production can reach that
+state yet. No explicit "guard" is needed on the replay side the way Decision 1 needs one: replay simply
+reflects whatever the durable log contains, and the durable log can never legitimately contain a
+same-side-shared scope until Change 8 removes Decision 1's guard.
 
-```ts
-const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
-const selfIsActive = activeRecords.some(
-  (r) => r.strategy_instance_id === command.strategyInstanceId && r.trade_cycle_id === command.tradeCycleId,
-);
-if (!selfIsActive) {
-  return internalErrorResult(); // same outcome as today's "ownership mismatch"
-}
-if (activeRecords.length > 1) {
-  return sharedScopeProtectionUnsupportedResult(); // new — before determine(), before any exchange call
-}
-```
+## Decision 4 — Protection guard: ships fully active, inert only because admission makes it unreachable
 
-**Why before `determine()`, not after.** `determine()` is itself read-only (a live position query, no
-exchange write) — placing the guard after it would still technically satisfy "fail closed before any
-exchange *mutation*." This design places it *before* anyway, for the same reason `entryPackageApplicationService`'s
-own claim check runs before its exchange call rather than merely before the write half of it: cheaper
-(skips a live query that can never matter for a scope this request can't act on regardless of what it
-returns), and it keeps this method's decision order legible — "who am I, is this scope safe for me to act
-on, only then what is its live state" — rather than interleaving an ownership decision in the middle of a
-read-only determination the guard doesn't need.
+Unchanged in mechanism from the prior draft's Decision 4 (replace the `findOwnerByScope()`-based
+re-verification with `findActiveRecordsForScope()`; fail closed if the requesting pair is not among the
+active records; return `shared_scope_protection_unsupported` if more than one active record exists, before
+`determine()` and before any exchange call; single-owner behavior is completely unchanged).
 
-**Single-owner path is untouched.** When `activeRecords.length === 1` and that one record is the
-requested pair, execution falls through to exactly the same `determine()` call, the same already-satisfied
-short-circuit, the same write, and the same read-back this method already has — none of that code changes.
+**What changes in this correction is that this code needs no guard of its own.** Unlike admission, which
+can (once Decision 1's classification runs) actually *decide* to admit a same-side owner and therefore
+needs an explicit temporary override to stop it from doing so, protection's `activeRecords.length > 1`
+branch has no such decision to make — it can only ever be reached if a scope with more than one active
+owner already exists, and Decision 1's guard is what prevents that state from ever existing in production.
+Protection's guard is therefore **not** provisional or temporary in the way Decision 1's is: it is the
+real, final logic Change 8 will still rely on unmodified — Change 8's job is entirely on the admission side
+(deleting Decision 1's guard); nothing on the protection side needs to change when that happens. This
+mirrors exactly how Change 7 already describes its own protection-lifecycle work as "production-инертен"
+without needing an explicit guard of its own — inertness is a structural consequence of admission, not a
+property protection has to enforce itself.
 
-**Error code: `shared_scope_protection_unsupported`, additive to the closed vocabulary, not a
-reinterpretation of `internal_error`.** Unlike Decision 1's admission conflict (kept as the existing
-`internal_error`, see below), this is a genuinely new, distinct, and — importantly — **caller-actionable**
-outcome: a Runtime caller seeing `shared_scope_protection_unsupported` learns something it can use (this
-scope currently has more than one owner, protection is not yet available for it, try
-`GET .../open-position` or wait for Change 7/8) that `internal_error` cannot communicate. This mirrors
-exactly why `close_execution_incomplete` (Change 2) was given its own code instead of reusing
-`internal_error`: both are outcomes a caller can reasonably distinguish and act on differently, not a
-generic "something went wrong."
+**Error code decision — unchanged from the prior draft.** `shared_scope_protection_unsupported` is a new,
+additive, caller-actionable code (the `close_execution_incomplete` precedent); admission's own conflict
+(Decision 1) continues to reuse the existing `internal_error`, per `position-scope-exclusivity`'s own
+existing "no new public error code for admission conflicts" requirement, which this proposal does not
+touch.
 
-**Why admission's opposite-side conflict does NOT get a new code, but protection's shared-scope guard
-does.** The master plan's own §6 risk list left this as an open question; this design resolves it by
-precedent, not by symmetry for its own sake. Admission's conflict (Decision 1) is reported through the
-*same* `internal_error` response the pre-existing same-pair conflict already uses
-(`position-scope-exclusivity` spec, "This capability introduces no public HTTP contract change") — that
-requirement is explicit that a scope-acquisition conflict, of any kind, reuses the existing safe error
-with no new code, and this proposal does not touch that requirement's substance, only the condition under
-which the existing error fires (opposite-side, instead of any-second-owner). Protection's guard is a
-*new* capability-level outcome this scope has never been able to produce before (there was no way to
-reach a "more than one owner" state to guard against), so there is no existing "reuse this" precedent to
-follow the way admission has one — and per the pattern `close_execution_incomplete` already set, a new
-distinguishable, actionable outcome earns its own code rather than being folded into `internal_error`.
+## Decision 5 — Release: unchanged from the prior draft
 
-## Decision 5 — Release needs no design; it already works
+No design needed; already complete via existing `isDurablyClosedEntryPackageStatus` filtering and Change
+2's already-shipped `finalizeMultiOwnerClose`. Unaffected by this correction.
 
-`findActiveRecordsForScope()` already filters on `isDurablyClosedEntryPackageStatus`
-(`entryPackageCorrelationRepository.ts:171`), and `CloseApplicationService`'s multi-owner path (Change 2,
-already shipped) already durably writes `terminal_closed` for only the closing pair's own record
-(`finalizeMultiOwnerClose`, `closeApplicationService.ts:518-529`), never touching a sibling's record. The
-combination of these two already-shipped mechanisms is a complete, correct release implementation — a
-closed pair's record stops appearing in `findActiveRecordsForScope()`'s results on its very next call,
-with zero code in this proposal. The master plan's original phrasing ("Release generalized... реализовано
-в Change 2/1") is accurate about *where* the mechanism lives but reads as a work item for this change; it
-is not — see `proposal.md`'s corrected description and the master-plan revision this design's own
-correction produces.
+## Regression analysis (production, today's only reachable state, and — after this change ships — still
+the only reachable state)
+
+Every one of Decisions 1-5 either (a) reuses a primitive already proven behaviorally identical for
+single-owner (protection, replay's untouched mixed-side/missing-exchange-binding checks), or (b) is
+explicitly gated so its new branch cannot be reached by any production write path (admission's temporary
+guard; replay's side relaxation, inert as a structural consequence of (b) for admission). There is no
+requirement in any of the three modified capability specs whose production-observable scenario changes.
+The only new, real code this proposal adds that is *not* gated is the admission self-exclusion fix — whose
+effect is unobservable today for the reason given in Decision 1's own regression analysis.
 
 ## Required tests
 
-1. Two same-side pairs (A long, B long) on one scope: both claims succeed, both remain independently
-   active, `findActiveRecordsForScope` returns both.
-2. Self-claim/retry: pair A already active on a scope, pair B joins (same side) after A — so `byScope`'s
-   pointer now reflects B — a subsequent retry/new-generation `createOrder()` for pair A itself succeeds
-   without a false conflict (the specific bug the architecture review found).
-3. Opposite-side conflict: pair A long already active, pair B attempts short on the same scope — B's
-   attempt fails closed (`internal_error`, unchanged code) before any durable write or exchange call for
-   B; A's ownership is unaffected.
-4. An active record with `desired_entry: null` present among a scope's active records → the requesting
-   pair's claim attempt fails closed, distinct assertion from the opposite-side case (both currently map
-   to the same response, but the two conditions are tested separately since they are logically distinct
-   per Decision 1).
-5. Replay: a correlation log whose final state has two same-side active records for one scope → replay
-   succeeds, both are reconstructed as active.
-6. Replay: a correlation log whose final state has mixed-side active records for one scope → replay
-   fails, entry-package readiness reports not-ready (same failure shape as today's "conflicting scope
-   ownership", reworded per Decision 3).
+1. **Admission classification (pure, synthetic — proves the foundation, does not require production
+   activation)**: given a requesting pair and a set of other active records, `findActiveRecordsForScope()`
+   correctly identifies: no other owner (empty); other owner(s), same side; other owner(s), opposite side;
+   other active record with `desired_entry: null`. Verified by seeding synthetic active records directly
+   into the correlation repository, not by two real `service.apply()` calls both succeeding.
+2. **Admission self-exclusion (pure, synthetic)**: a requesting pair's own active record is present among
+   `findActiveRecordsForScope()`'s results alongside a genuinely different, same-side active record seeded
+   synthetically — the requesting pair's own record is correctly excluded from the "other" set before the
+   side comparison runs, independent of what the temporary production guard (Test 6) does with the result.
+3. **Admission temporary guard (end-to-end, `service.apply()`)**: two different pairs, same side,
+   concurrently racing the same scope — exactly one succeeds, the other fails closed, identically to
+   today's existing behavior. This is the same assertion the existing
+   `entryPackageApplicationService.test.ts` scope-race tests (lines ~827-946) already make and requires
+   **no adaptation** — those tests' pairs already default to the same side (`makeDesiredEntry()`'s
+   `side: "long"` default) and continue to correctly assert a single winner under this proposal, since the
+   temporary guard makes same-side and opposite-side racing behave identically today.
+4. **Self-repeat regression (end-to-end)**: a pair that already solely owns a scope issues a repeat/retry
+   command — succeeds without a false conflict, using the existing
+   `entryPackageApplicationService.test.ts` self-repeat coverage (already present, must continue passing
+   unmodified — this is the baseline self-exclusion behavior the original `findOwnerByScope`-based code
+   already had, carried forward by the rewritten primitive, not a new scenario this proposal introduces).
+5. Replay: a correlation log whose final state has two same-side active records for one scope (seeded
+   synthetically, not reachable via real writes today) → replay succeeds, both reconstructed as active.
+6. Replay: a correlation log whose final state has mixed-side active records for one scope → replay fails,
+   entry-package readiness reports not-ready.
 7. Replay: an active record with no usable `desired_entry.side` → replay fails readiness closed.
-8. Durable close of pair A (multi-owner close path, Change 2) does not affect pair B's continued active
-   ownership of the same scope — reuses/extends Change 2's own existing close tests under real (not
-   synthetic) multi-owner activation.
-9. Protection: two active owners (A, B) on one scope — `PUT .../protection` for either returns
-   `shared_scope_protection_unsupported`, and no `setTradingStop`/exchange write of any kind is sent.
+8. Durable close of a synthetically-seeded pair A does not affect a synthetically-seeded same-scope
+   sibling B's continued active ownership — reuses `CloseApplicationService`'s already-owner-aware Change
+   2 logic against directly-seeded multi-owner fixtures, the same technique Change 2's own tests already
+   use.
+9. Protection: two synthetically-seeded active owners on one scope — `PUT .../protection` for either
+   returns `shared_scope_protection_unsupported`, and no `setTradingStop`/exchange write of any kind is
+   sent.
 10. Protection: exactly one active owner, matching the requested pair — full regression of today's
-    existing behavior (already-satisfied short-circuit, write, read-back) — byte-for-byte unchanged.
-11. Protection: the requested pair is not among the scope's active records (e.g. a stale/inconsistent
-    record) — fails closed with the existing `internal_error`, unchanged from today's "ownership mismatch"
-    outcome, not the new shared-scope code (the two failure conditions must remain distinguishable in the
-    implementation even though this design does not require them to be distinguishable to the caller).
-12. Full regression of existing `entryPackageApplicationService.test.ts` scope-race tests
-    (`entryPackageApplicationService.test.ts:827-946`) — these currently use same-side (`long`) commands
-    for both racing pairs implicitly (`makeDesiredEntry()`'s default), which under the corrected same-side
-    semantics would now legitimately *both succeed* rather than conflict. Each of these tests needs its
-    non-owning pair's command changed to the opposite side to keep testing genuine conflict semantics, and
-    a new sibling test added alongside each, asserting the same-side case now succeeds. Tests not
-    concerned with conflict at all (different-scope independence, restart/release tests) are unaffected
-    and are not adapted.
-13. Full regression of `protectionApplicationService.test.ts`'s existing single-owner scenarios —
-    unchanged assertions.
+    existing behavior, byte-for-byte unchanged.
+11. Protection: the requested pair is not among the scope's active records — fails closed with the
+    existing `internal_error`, distinguishable in the implementation from the shared-scope guard.
+12. Full regression of `protectionApplicationService.test.ts`'s existing single-owner scenarios.
+13. Full regression of the existing `entryPackageApplicationService.test.ts` suite in its entirety,
+    including every scope-race test — **no test in this file needs to change** (see Test 3 above); this
+    is itself a required regression check, not a no-op.
+
+## Deferred to Change 8 (not written by this proposal)
+
+- Removing Decision 1's temporary guard, letting the classification's own same-side answer admit a second
+  owner in production.
+- Any end-to-end test asserting that two same-side pairs' `service.apply()` calls **both** durably succeed
+  and remain independently active — this is the activation-level assertion the first draft of this
+  proposal incorrectly included as a Change 5 test; it belongs to Change 8, once admission's guard is
+  gone.
+- Any end-to-end test exercising the shared-scope protection guard or the side-aware replay relaxation
+  against a scope that became multi-owner through **real** entry-package traffic (as opposed to synthetic
+  seeding) — meaningful only once Change 8 has shipped.

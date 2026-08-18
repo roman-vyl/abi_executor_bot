@@ -412,6 +412,46 @@
 > Полная truth table, design decisions и обоснование — в design-фазе Change 5 (OpenSpec
 > `abi-same-side-virtual-exposure-ownership-v1`), не здесь.
 
+> **Ревизия v14 — новый safety blocker, найден до apply Change 5: Change 5 БОЛЬШЕ НЕ activation.**
+> `PUT .../entry-package` уже сегодня прикрепляет **position-level** protection в момент создания
+> entry-ордера: `mapEntryPackageToBybit()` (`bybitOrderMapper.ts:107-129`) отправляет `tpslMode: "Full"`,
+> `stopLoss`, `takeProfit` прямо в `/v5/order/create`. Это физическая позиция целиком, не per-order
+> протекция — `PUT .../protection`'s собственный guard (v10-v13, вся предыдущая коррекция Change 5) защищал
+> только отдельный endpoint, но не сам entry-package create. Если бы Change 5 реально разрешил второму
+> same-side owner присоединиться к scope, его же собственный entry-ордер молча перезаписал бы TP/SL
+> первого owner в момент постановки на биржу — до Change 6-8, до `PUT .../protection` вообще. Guard
+> одного endpoint не делает same-side sharing безопасным, пока сам entry-package create несёт Full
+> position-level TP/SL.
+>
+> **Следствие: единственная безопасная activation point всей программы — Change 8**, после того как
+> pair-owned protection (Changes 6-7) реально заменит position-level `tpslMode: "Full"` per-cycle
+> reduce-only ордерами — и для `PUT .../protection`, и (неявно) для того, что раньше делало entry-package
+> create. Change 5 **не пытается** решить это через `tpslMode: "Partial"` или любой другой early fix —
+> у программы уже есть полный, отдельно спроектированный ответ (Changes 6-8), решать это раньше значит
+> дублировать работу и вносить небезопасный промежуточный шаг.
+>
+> **Роль Change 5 понижена до foundation/preparation**, тот же паттерн, что уже применён к Change 1 и
+> Change 6: построить и полностью протестировать на synthetic multi-owner fixtures — `findActiveRecordsForScope`
+> вместо `findOwnerByScope` (исправляет self-conflict баг заодно, независимо от того, activated ли
+> same-side), side-aware replay reconstruction, `shared_scope_protection_unsupported` guard в protection —
+> но **не разрешать реальное появление второго active owner в production**, даже same-side. Механизм:
+> внутри admission-классификации (`findActiveRecordsForScope` + exclude-self + side-compare, уже полностью
+> корректной и готовой) добавлен один явный, точечно закомментированный temporary guard — "любой другой
+> active record (any side) → conflict", удаляемый только в Change 8. Replay's side-aware relaxation и
+> protection's shared-scope guard остаются в коде уже сейчас (полностью протестированы на synthetic
+> fixtures), но структурно недостижимы через реальные production write paths, пока guard в admission стоит
+> — им не нужен собственный override, их недостижимость — следствие admission's guard, не отдельная логика.
+>
+> **Изменения в тексте программы** (прямые правки, не только эта ревизия): таблица §2 (строки Change 5/8),
+> dependency graph §4, "Финальный рекомендуемый порядок" §7 (шаги 6 и 9) — везде убран "Activation #1" у
+> Change 5, "Activation #2" у Change 8 переименован в единственную "Activation" программы; заголовок секции
+> Change 5 (`### Change 5 — ...`) и Change 8 (`### Change 8 — ...`) обновлены точечно (только заголовок,
+> тело Change 6/7/8 не переписывается). Demo smoke-тест шага 6 (Change 5) больше не проверяет same-side
+> coexistence — эта проверка перенесена в шаг 9 (Change 8), где она впервые становится реально достижимой.
+>
+> Полная truth table, design decisions (включая точный код temporary guard'а) и обоснование — в
+> design-фазе Change 5 (OpenSpec `abi-same-side-virtual-exposure-ownership-v1`), не здесь.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -645,10 +685,10 @@ protection: lifecycle строится и тестируется в Change 7 pro
 | 2 | `abi-pair-scoped-close-execution-v1` | `close-execution` + `abi-position-management-api` (contract change) | **Public contract change** (`DELETE .../open-position` → `POST .../close`, `exposure_fraction`) + consumer prep (owner-aware); требует скоординированного Runtime change |
 | 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений; durable-поле — открытый design-вопрос, см. Change 3) |
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
-| 5 | `abi-same-side-virtual-exposure-ownership-v1` | супersedes `position-scope-exclusivity`; малый guard в `protection-execution` | **Activation #1** — базовое ownership |
+| 5 | `abi-same-side-virtual-exposure-ownership-v1` | `position-scope-exclusivity` (internal mechanism only); guard в `protection-execution` | **Foundation, не activation** (ревизия v14) — admission-механика и side-aware replay готовятся и тестируются на synthetic fixtures; production exclusivity (максимум один active owner на scope, любой стороны) сохраняется temporary guard'ом до Change 8 |
 | 6 | `abi-pair-owned-protection-state-foundation-v1` | новая: pair-owned protection identity/state (+ additive к `protection-execution`) | Data model/identity, без изменения поведения |
 | 7 | `abi-pair-owned-protection-execution-v1` | `protection-execution` | Execution lifecycle, **production-инертно** (guard из Change 5 не снимается) |
-| 8 | `abi-pair-owned-protection-close-cleanup-v1` | `close-execution` (расширение) | Close-cleanup + **Activation #2** — снимает guard |
+| 8 | `abi-pair-owned-protection-close-cleanup-v1` | `close-execution` (расширение) | Close-cleanup + **единственная Activation программы** (ревизия v14) — снимает Change 5's admission guard, тем самым реально включает same-side multi-owner в production |
 
 Changes 2, 3, 4 формально зависят только от Change 1 и **не зависят друг от друга** — их можно вести
 параллельно/в любом порядке. Change 8 можно слить с Change 7 только если объединённый change по-прежнему
@@ -1229,7 +1269,7 @@ error-таксономии `abi-open-position-lookup-api` сверх уже су
 
 ---
 
-### Change 5 — `abi-same-side-virtual-exposure-ownership-v1` (Activation #1 — "активация базового ownership")
+### Change 5 — `abi-same-side-virtual-exposure-ownership-v1` (Foundation — production exclusivity сохраняется; см. ревизию v14)
 
 **Цель.** Архитектурная идея №1 — заменить physical-scope exclusivity на virtual same-side exposure
 ownership. Это единственный change из первой пятёрки, реально включающий multi-owner в production.
@@ -1416,7 +1456,7 @@ Change 6/7's `qty = ABI-resolved authoritative exposure этого cycle` фор
 
 ---
 
-### Change 8 — `abi-pair-owned-protection-close-cleanup-v1` (Activation #2 — снимает guard)
+### Change 8 — `abi-pair-owned-protection-close-cleanup-v1` (Close-cleanup + единственная Activation программы — снимает Change 5's guard; см. ревизию v14)
 
 **Цель.** Завершить redesign protection: `CloseApplicationService` при закрытии cycle отменяет его
 собственные protection-ордера как часть терминального перехода, и **только после этого** guard из
@@ -1494,20 +1534,20 @@ Change 1 (foundation: exposure state)
    ├──> Change 2 (close, owner-aware)         ──┐
    ├──> Change 3 (open-position, owner-aware) ──┤
    └──> Change 4 (recovery, owner-aware)      ──┤
-                                                 ├──> Change 5 (Activation #1: same-side ownership + protection guard)
+                                                 ├──> Change 5 (foundation: admission/replay mechanics, production guard stays up)
                               (2,3 напрямую;     │        │
                                4 — по соглас-    │        ├──> Change 6 (foundation: protection identity/state)
                                ованности)        │        │        │
                                                   │        │        └──> Change 7 (protection lifecycle, guard НЕ снимается)
                                                   │        │                 │
-                                                  │        │                 └──> Change 8 (close cleanup + Activation #2: снимает guard)
+                                                  │        │                 └──> Change 8 (close cleanup + единственная Activation: снимает Change 5's guard)
                                                   │        │                          ▲
                                                   └────────┴──────────────────────────┘ (Change 8 также зависит от Change 2)
 ```
 
-Текстово: 1 → {2, 3, 4} (параллельно возможны) → 5 (требует 1,2,3, желательно 4; **Activation #1**) →
-6 (требует 1, может идти параллельно с 2/3/4/5) → 7 (требует 6, 5, 3; production-инертен) →
-8 (требует 7, 2; **Activation #2**).
+Текстово: 1 → {2, 3, 4} (параллельно возможны) → 5 (требует 1,2,3, желательно 4; foundation, не activation
+— ревизия v14) → 6 (требует 1, может идти параллельно с 2/3/4/5) → 7 (требует 6, 5, 3; production-инертен)
+→ 8 (требует 7, 2; единственная Activation программы).
 
 ---
 
@@ -1680,19 +1720,25 @@ Change 1 (foundation: exposure state)
    явно не входит в ABI's scope (v9); ответ по-прежнему не содержит quantity-поля.
 5. **Change 4** → apply → smoke: убить/перезапустить процесс посреди активного trade cycle (в т.ч. с
    partial fill) на Demo, подтвердить recovery-state не изменился относительно baseline.
-6. **Change 5 (Activation #1)** → apply → это шаг с наибольшим риском живого поведения для базового
-   ownership → smoke на Bybit Demo: два same-side entry-package на одном symbol от разных trade cycles
-   оба успешно создаются и сосуществуют; третья opposite-side попытка отклоняется; `PUT protection` на
-   любом из двух active owners отклоняется новым guard-кодом; close одного cycle уменьшает физическую
-   позицию строго на его долю, второй cycle остаётся нетронутым (позиция и его открытость).
+6. **Change 5 (foundation, не activation — ревизия v14)** → apply → smoke на Bybit Demo: **никакого
+   same-side coexistence теста здесь** — это шаг сознательно без production-риска, guard из Decision 1
+   сохраняет ровно сегодняшнее поведение. Вместо этого smoke подтверждает регрессию: второй
+   entry-package (любой стороны, включая same-side) на уже занятый scope по-прежнему отклоняется, как и
+   сегодня; self-repeat/retry для собственного scope по-прежнему проходит без ложного conflict;
+   `PUT protection` для единственного owner ведёт себя байт-в-байт как раньше. Multi-owner classification/
+   replay/protection-guard-логика уже полностью протестирована модульно на synthetic fixtures (часть этого
+   change), но не в Demo smoke — на Demo её физически нельзя вызвать, пока guard стоит.
 7. **Change 6** → apply → smoke: identity-генерация и replay protection-полей работают изолированно;
    `PUT .../protection` ведёт себя байт-в-байт как до этого change.
 8. **Change 7** → apply → smoke: lifecycle protection-ордеров корректно работает при прямом вызове (не
    через production `PUT .../protection`); production-путь `PUT .../protection` для multi-owner scope
    по-прежнему возвращает guard-отказ — явно проверить, что ничего не изменилось для пользователя.
-9. **Change 8 (Activation #2)** → apply → smoke на Bybit Demo: guard снят; у двух same-side cycles
-   независимые stop/take conditional-ордера через `PUT .../protection`; close одного cycle отменяет
-   именно его conditional-ордера, не трогая ордера второго; `terminal_closed` достигается только после
+9. **Change 8 (единственная Activation программы — ревизия v14)** → apply → smoke на Bybit Demo: Change 5's
+   admission guard снят — впервые в программе два same-side entry-package на одном symbol от разных
+   trade cycles оба успешно создаются и сосуществуют; третья opposite-side попытка отклоняется; у двух
+   same-side cycles независимые stop/take conditional-ордера через `PUT .../protection`; close одного
+   cycle уменьшает физическую позицию строго на его долю (или отменяет именно его conditional-ордера,
+   не трогая второго), второй cycle остаётся нетронутым; `terminal_closed` достигается только после
    обоих постусловий.
 
 Каждый шаг — самостоятельно принимаемый OpenSpec change с собственным proposal/design/tasks, отдельным

@@ -18,6 +18,13 @@ to just one of them. This shared-scope check runs before the live-position check
 any exchange call. Only when the requesting pair is confirmed to be the scope's sole active owner
 does ABI proceed to the live-position check.
 
+`position-scope-exclusivity`'s own admission requirement continues to admit at most one active
+owner per scope through ABI's ordinary write paths — the shared-scope case this requirement
+describes is real, tested logic, but is reachable today only via a scope whose active-owner set
+was not produced by ABI's own admission path (this capability's own test fixtures use this
+technique, the same way `position-scope-exclusivity`'s own replay tests do). It becomes reachable
+through genuine traffic only once a later change relaxes that admission requirement.
+
 #### Scenario: Unknown pair fails closed
 - **WHEN** no correlation record exists for the requested pair
 - **THEN** ABI returns `unknown_trade_cycle_binding`
@@ -43,7 +50,8 @@ does ABI proceed to the live-position check.
 - **AND** ABI sends no request of any kind to the exchange for this attempt
 
 #### Scenario: Single-owner behavior is unchanged
-- **WHEN** a scope has exactly one active owner and it is the requesting pair
+- **WHEN** a scope has exactly one active owner and it is the requesting pair — the only
+  production-reachable state today
 - **THEN** ABI's behavior from this point forward (live-position check, already-satisfied
-  short-circuit, write, read-back) is identical to its behavior before same-side multi-owner
-  activation
+  short-circuit, write, read-back) is identical to its behavior before this capability's ownership
+  lookup was changed to a full active-set check
