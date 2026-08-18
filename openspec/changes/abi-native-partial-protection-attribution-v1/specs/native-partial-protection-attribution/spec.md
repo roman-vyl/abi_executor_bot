@@ -59,16 +59,46 @@ take-profit role. ABI SHALL NOT resolve any other combination of attributed cand
   remaining candidates form a clean pair
 
 ### Requirement: Attribution covers both live and already-terminal children
-ABI SHALL consider both currently live and already-terminal (filled or cancelled) candidate orders when
-resolving a trade cycle's attached protection, and SHALL NOT limit attribution to only currently live
-orders.
+ABI SHALL consider both currently live and already-terminal (filled, cancelled, or deactivated)
+candidate orders when resolving a trade cycle's attached protection, and SHALL NOT limit attribution to
+only currently live orders.
 
 #### Scenario: A terminal child is still attributed
-- **WHEN** one of a trade cycle's own attached protection children has already filled or already been
-  cancelled by the time ABI resolves attribution
+- **WHEN** one of a trade cycle's own attached protection children has already filled, been cancelled, or
+  been deactivated by the time ABI resolves attribution
 - **THEN** ABI still attributes it to that trade cycle's own entry order if its parent-order linkage
   matches
 - **AND** ABI does not require a child to still be live to be considered
+- **AND** a terminal candidate's own reported quantity is read as-is, not assumed to be zero or rewritten
+
+### Requirement: The same underlying child is never counted twice across query sources
+ABI SHALL treat a candidate appearing in results from more than one query source as a single child,
+identified by its own order identity, and SHALL NOT count it as two separate candidates toward role
+uniqueness.
+
+#### Scenario: The same child found in two sources is not double-counted
+- **WHEN** the same underlying protection child appears in both the live and the historical query results
+  ABI consults while resolving attribution
+- **THEN** ABI treats it as one candidate, not two
+- **AND** ABI does not report a false duplicate-role outcome caused only by seeing the same child twice
+
+#### Scenario: Inconsistent evidence for the same order identity fails closed
+- **WHEN** the same underlying child's order identity appears in more than one query source with
+  disagreeing evidence (for example, a different role or quantity reported by each source)
+- **THEN** ABI reports this as ambiguous
+- **AND** ABI does not silently prefer one source's evidence over the other's
+
+### Requirement: An absent or incomplete historical result is not treated as proof that no terminal child exists
+ABI SHALL NOT treat a query result that omits an expected terminal candidate as proof that no such
+candidate exists, because the underlying historical record is not guaranteed to be immediately complete
+after a child transitions to a terminal state.
+
+#### Scenario: A just-terminalized child not yet visible in history is not treated as definitively absent
+- **WHEN** ABI resolves attached protection shortly after one of a trade cycle's own children has
+  transitioned to a terminal state
+- **THEN** ABI's report reflects only what the queries actually returned
+- **AND** ABI does not itself assert that a candidate is permanently absent solely because one query
+  attempt did not find it
 
 ### Requirement: No matching candidates is reported plainly, without ABI inferring whether that is expected
 ABI SHALL report the absence of any attributed candidate as its own distinct outcome, and SHALL NOT

@@ -23,43 +23,51 @@ children, if any, has Bybit materialized for this cycle's own entry order" — t
 replacement lifecycle (`abi-native-partial-protection-lifecycle-v1`) and the eventual cutover
 (`abi-native-partial-protection-cutover-v1`) are built on.
 
-**A technical fact this proposal's design depends on is not yet independently confirmed against a real
-Bybit response**: that Bybit's order-query endpoints expose a field naming a `tpslMode: "Partial"` child
-order's parent order, and a field reliably distinguishing a stop-loss child from a take-profit child.
-`docs/virtual-exposure-ownership-delivery-plan.md`'s §6 risk 4 (revised in revision v15) already flags
-this and recommends a Demo-based technical spike before this proposal is written. This proposal is
-written anyway, on the following basis: every requirement and primitive below is phrased around
-*behavior* (attribution, classification, fail-closed ambiguity), not around a specific assumed field
-name, and `tasks.md` §1 makes the spike the first, blocking task — nothing past it may be implemented
-against an assumed shape. If the spike finds the mechanism does not work as hypothesized (no reliable
-parent-attribution field, or no reliable leg-role field), that is this change's own kill/redesign
-condition, evaluated before any other task proceeds, not a risk to discover mid-implementation.
+**The technical fact this proposal's design depends on has now been confirmed against real Bybit Demo
+responses** (`docs/virtual-exposure-ownership-delivery-plan.md`'s §6 risk 4, revised in revision v15,
+called for exactly this spike before this proposal was finalized). Confirmed: a `tpslMode: "Partial"`
+child order carries `parentOrderLinkId`, equal to the parent entry's own `orderLinkId` — the sole
+attribution key; a child's own `orderLinkId` is observed empty and is never used as identity;
+`stopOrderType = "PartialTakeProfit"`/`"PartialStopLoss"` is the sole role discriminator, corroborated by
+`createType`; live children are visible via the existing symbol-scoped realtime query, terminal children
+via a symbol-scoped history query (subject to a propagation lag — an immediate empty history result is
+not proof of absence); the same child appearing in both query sources must be deduplicated by `orderId`.
+Full detail: `design.md` Decision 0. What the spike did **not** settle — multi-fill parent semantics
+(whether a multi-fill parent always ends up with exactly one pair, whether children auto-resize, whether
+Bybit ever creates additional pairs, whether materialization is atomic) — is left explicitly `NOT PROVEN`
+and out of this change's scope; see `design.md`'s "What remains explicitly unproven" and Non-Goals. This
+change's own classifier is safe under that gap: any shape beyond one attributed stop/take pair fails
+closed rather than being silently accepted.
 
 ## What Changes
 
 - New read-only, query-driven primitive that answers "what are this cycle's own attached protection
   children right now": given a trade cycle's own entry `orderLinkId`, query Bybit's order state for the
-  same `(category, symbol)` scope, filter to orders whose parent-attribution field matches that entry
-  `orderLinkId`, and classify the result — never guessing between multiple plausible candidates.
+  same `(category, symbol)` scope, filter to orders whose confirmed `parentOrderLinkId` matches that
+  entry `orderLinkId`, deduplicate by `orderId`, and classify the result — never guessing between
+  multiple plausible candidates.
 - A new decode primitive for **list**-shaped order-query responses (potentially several rows for one
   `(category, symbol)` scope), distinct from the existing `decodeOrderQueryResponse`
   (`src/services/entryPackage/orderQueryResponseDecoder.ts:47-141`), which is hard-scoped to exactly one
   `orderLinkId` and rejects more than one returned row by design. Children are not looked up by their own
-  `orderLinkId` (ABI never generates or knows it in advance — Bybit assigns it) — they are found by
-  scanning a broader, symbol-scoped query and filtering client-side by parent-attribution.
+  `orderLinkId` — confirmed observed as empty on every native child, never a usable identity — they are
+  found by scanning a broader, symbol-scoped query and filtering client-side by `parentOrderLinkId`.
 - One new adapter primitive on `BybitAdapter`/`RestBybitAdapter` for a **symbol-scoped, not
   `orderLinkId`-scoped**, order-history query. `getActiveOrders` (`src/exchange/bybitAdapter.ts:148-158`)
   already queries `/v5/order/realtime` scoped by symbol alone and is directly reusable for **live**
-  children; nothing in the codebase today queries `/v5/order/history` without a required `orderLinkId`
-  (`BybitGetOrderHistoryPayload`, `src/exchange/bybitOrderMapper.ts:61-66`), so a **terminal** child
-  (already filled, or already cancelled) is not currently discoverable at all. This gap is real and is
-  this change's own problem to close — not deferred to a later change — because correct classification
-  (Decisions below) requires seeing terminal children, not only live ones.
-- Strict classification of whatever set of matching children is found for one entry `orderLinkId`:
-  zero children is valid only while no fill is proven and/or mapping is not yet `"Partial"`; exactly one
-  stop-role and one take-role child is the only healthy "attributed pair" outcome; anything else (extra
-  or duplicate candidates, an unclassifiable child, zero children when fill+Partial is already proven)
-  is `ambiguous` and fails closed — never resolved by picking "the most plausible" candidate.
+  children (confirmed by the spike); nothing in the codebase today queries `/v5/order/history` without a
+  required `orderLinkId` (`BybitGetOrderHistoryPayload`, `src/exchange/bybitOrderMapper.ts:61-66`), so a
+  **terminal** child (already filled, or already cancelled/deactivated) is not currently discoverable at
+  all. This gap is real and is this change's own problem to close — not deferred to a later change —
+  because correct classification (Decisions below) requires seeing terminal children, not only live ones.
+  The history query has a confirmed propagation lag; the primitive reports what it finds rather than
+  asserting absence.
+- Strict classification of whatever deduplicated set of matching children is found for one entry
+  `orderLinkId`: zero children is reported plainly, without ABI itself judging whether that is expected;
+  exactly one stop-role and one take-role child, with no contradictory duplicate evidence, is the only
+  healthy "attributed pair" outcome; anything else (extra or duplicate-role candidates, an unclassifiable
+  child, only one role present, or the same `orderId` reported inconsistently across sources) is
+  `ambiguous` and fails closed — never resolved by picking "the most plausible" candidate.
 - A `tpslMode: "Partial"` payload prepared and unit-tested in `src/exchange/bybitOrderMapper.ts`, but
   **not** wired into `mapEntryPackageToBybit()`'s production path. Entry create keeps sending
   `tpslMode: "Full"` until `abi-native-partial-protection-cutover-v1`.
@@ -94,6 +102,7 @@ is unchanged; `position-scope-exclusivity` is unaffected.
   replacement/update lifecycle for a cycle's stop/take pair) and, eventually,
   `abi-native-partial-protection-cutover-v1` (the mapping cutover and Change 5 guard removal) are built
   on. Neither of those is implemented, wired, or activated by this change.
-- Blocking precondition: `tasks.md` §1's technical spike against Bybit (Demo) must confirm the
-  parent-attribution and leg-role fields exist and behave as hypothesized before any decode/classification
-  code in this proposal is implemented against them.
+- Remaining precondition for `abi-native-partial-protection-lifecycle-v1`, not this change: multi-fill
+  parent semantics are explicitly `NOT PROVEN` (`design.md`, "What remains explicitly unproven") and are
+  blocking evidence that change still needs — this change's own scope (single attributed pair, fail
+  closed otherwise) does not depend on it.
