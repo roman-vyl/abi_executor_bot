@@ -42,18 +42,6 @@ exchange price-bound mechanism; that determination is a separate, evidence-gated
 - **THEN** the computed surrogate take-profit price is identical to the previously computed one
 - **AND** ABI does not amend an already-correctly-placed surrogate leg
 
-### Requirement: Computing a disabled-take surrogate depends on a fresh current-price-limits read, and fails closed without it
-When the client's desired take is disabled, ABI SHALL obtain a fresh reading of the exchange's current
-order-price limits for that instrument as part of computing the surrogate take-profit price, and SHALL
-fail the reconciliation attempt closed, without amending anything, when that reading cannot be obtained.
-
-#### Scenario: A current-price-limits read failure fails the reconciliation closed
-- **WHEN** ABI cannot obtain a current order-price-limits reading for the instrument while reconciling a
-  trade cycle whose desired take is disabled
-- **THEN** ABI fails the reconciliation attempt closed
-- **AND** ABI does not amend any protection child and does not resolve the trade cycle's attributable
-  protection state for this attempt
-
 ### Requirement: Reconciliation targets a trade cycle's current own filled quantity, without waiting for its entry to finish filling
 ABI SHALL resolve the quantity a reconciliation attempt targets from the trade cycle's own currently
 known filled quantity, including a quantity known only from a still-live, partially filled entry order,

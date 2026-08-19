@@ -48,14 +48,16 @@ result "exchange-valid by construction." That claim is retracted: no version of 
 established that any current-price-band concept — static instrument bounds, or the dynamic `buyLimit`/
 `sellLimit` current order-price limits Bybit exposes via `/v5/market/price-limit` — is actually the
 applicable validity bound for a native Partial **TP `triggerPrice` amend** specifically, as opposed to
-ordinary order placement. This proposal instead **reuses**, as an injected read-only dependency, the
-already-implemented and archived `abi-current-order-price-limits-v1`
-(`CurrentOrderPriceLimitsProvider`, archive commit `6ec349fcd02e0b908020a5eb74881cb79b6b949f`, canonical
-capability `openspec/specs/order-price-limits/spec.md`) rather than building a second, duplicate provider
-for the same kind of dynamic price data — and defers the concrete surrogate formula to a bounded, blocking
-Demo evidence task (`tasks.md` task 0) that must close, with its result folded back into design.md
-Decision 5, before that formula is designed or implemented. `take_price = null → dormant surrogate TAKE`
-remains this program's accepted architectural decision; only the numeric formula behind it is deferred.
+ordinary order placement. `tasks.md` task 0 closed this question against Bybit Demo (evidence and result
+in design.md Decision 5): amending a native Partial TP child's `triggerPrice` to a value 1.5× beyond the
+already-implemented and archived `abi-current-order-price-limits-v1`'s (`CurrentOrderPriceLimitsProvider`,
+archive commit `6ec349fcd02e0b908020a5eb74881cb79b6b949f`, canonical capability
+`openspec/specs/order-price-limits/spec.md`) `buyLimit` was accepted identically to a normal-range amend —
+that capability's current order-price band does **not** constrain this amend, so this proposal does not
+consume it. `take_price = null → dormant surrogate TAKE` remains this program's accepted architectural
+decision; the concrete formula (Decision 5) is a deterministic, tick-normalized offset from
+`planned_entry_price` with no exchange-bound clamp — validity is enforced only by Bybit's own amend-time
+acceptance or rejection.
 
 **OCO-after-amend remains `NOT PROVEN`** — neither spike checked whether Bybit atomically neutralizes a
 sibling leg when the other fills, after both legs have been through amend. This change does not depend on
@@ -71,11 +73,6 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
   from the same `/v5/market/instruments-info` response `BybitInstrumentTradingRulesProvider` already
   queries for `minOrderQty`/`qtyStep`/`minNotionalValue` — no new Bybit query, an additional field read
   from an existing response, used only to tick-normalize whatever `triggerPrice` this change amends to.
-- A new, injected, read-only dependency on the already-implemented and archived
-  `CurrentOrderPriceLimitsProvider` (`abi-current-order-price-limits-v1`) for the surrogate-TAKE branch of
-  desired-state resolution — no new provider, decoder, or Bybit query is built for dynamic price
-  boundaries; this proposal reuses the existing generic capability instead of duplicating it. Any failure
-  from that provider fails the reconciliation attempt closed before any attribution read or amend call.
 - New price-side step-rounding primitive (`floorToStep`, alongside the existing `ceilToStep` in
   `exactDecimal.ts`) — needed so a computed surrogate price can be rounded consistently away from the
   reference price in either direction (up for a LONG surrogate, down for a SHORT surrogate).
@@ -86,9 +83,10 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
   success. Never creates or cancels an order.
 - Surrogate TAKE architecture kept from revision v17 (`take_price = null` → dormant surrogate, anchored to
   this cycle's own immutable `desired_entry.planned_entry_price`, never the mutable cumulative average
-  execution price, never live market price). The concrete price formula itself — including whether/how
-  `CurrentOrderPriceLimitsProvider`'s `buyLimit`/`sellLimit` bound it — is **not** fixed by this proposal;
-  it is blocked on `tasks.md` task 0's evidence.
+  execution price, never live market price). The concrete price formula (design.md Decision 5, task 0
+  closed) is a deterministic, tick-normalized offset with no exchange-bound clamp — task 0's evidence
+  ruled out `CurrentOrderPriceLimitsProvider`'s `buyLimit`/`sellLimit` as an applicable bound, and this
+  proposal does not consume that provider.
 - Own-current-fill qty resolution for protection reconciliation: reuses this cycle's own fill facts when
   already terminally final, otherwise issues a fresh own-order confirmation query — a still-partial fill
   is an equally authoritative answer as a full fill, so reconciliation is never blocked waiting for the

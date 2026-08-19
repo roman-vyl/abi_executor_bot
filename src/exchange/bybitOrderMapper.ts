@@ -50,6 +50,19 @@ export type BybitCancelOrderPayload = {
   orderLinkId: string;
 };
 
+// Scoped by orderId, never orderLinkId — a native Partial protection
+// child's own orderLinkId is confirmed empty
+// (abi-native-partial-protection-attribution-v1 design.md Decision 0,
+// fact 2), so orderId is the only usable identity for amending it
+// (abi-native-partial-protection-lifecycle-v1 design.md Decision 2).
+export type BybitAmendOrderPayload = {
+  category: string;
+  symbol: string;
+  orderId: string;
+  triggerPrice?: string;
+  qty?: string;
+};
+
 export type BybitCancelAllOrdersPayload = {
   category: string;
   symbol?: string;

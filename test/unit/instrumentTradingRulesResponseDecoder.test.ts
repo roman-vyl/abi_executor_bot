@@ -15,10 +15,18 @@ function lotSizeFilter(overrides: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+function priceFilter(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    tickSize: "0.5",
+    ...overrides,
+  };
+}
+
 function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     symbol: "BTCUSDT",
     lotSizeFilter: lotSizeFilter(),
+    priceFilter: priceFilter(),
     ...overrides,
   };
 }
@@ -42,7 +50,12 @@ test("a single matching linear row decodes success", () => {
   const decoded = decodeInstrumentTradingRulesResponse({ response: response([row()]), expected });
   assert.deepEqual(decoded, {
     ok: true,
-    rules: { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" },
+    rules: {
+      minOrderQty: "0.001",
+      qtyStep: "0.001",
+      minNotionalValue: "5",
+      tickSize: "0.5",
+    },
   });
 });
 
@@ -53,8 +66,36 @@ test("minNotionalValue of exactly 0 decodes success", () => {
   });
   assert.deepEqual(decoded, {
     ok: true,
-    rules: { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "0" },
+    rules: {
+      minOrderQty: "0.001",
+      qtyStep: "0.001",
+      minNotionalValue: "0",
+      tickSize: "0.5",
+    },
   });
+});
+
+test("a missing priceFilter fails with missing_price_filter", () => {
+  assertFailure({ response: response([row({ priceFilter: undefined })]) }, "missing_price_filter");
+});
+
+test("a non-object priceFilter fails with missing_price_filter", () => {
+  assertFailure({ response: response([row({ priceFilter: "nope" })]) }, "missing_price_filter");
+});
+
+test("a malformed/negative/zero tickSize fails with invalid_tick_size", () => {
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "0" }) })]) },
+    "invalid_tick_size",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "-0.5" }) })]) },
+    "invalid_tick_size",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "abc" }) })]) },
+    "invalid_tick_size",
+  );
 });
 
 test("an empty list fails with wrong_row_count", () => {

@@ -6,6 +6,7 @@ import {
   ceilToStep,
   compareDecimal,
   decimalEquals,
+  floorToStep,
   maxDecimal,
   subtractDecimal,
 } from "../../src/domain/exactDecimal.js";
@@ -34,6 +35,25 @@ test("ceilToStep still rounds up correctly with the wider grammar", () => {
 
 test("ceilRatioToStep exact-decimal division is unaffected by the grammar widening", () => {
   assert.equal(ceilRatioToStep("5", "3", "0.001"), "1.667");
+});
+
+test("floorToStep leaves an exact-multiple-of-step input unchanged", () => {
+  assert.equal(floorToStep("1.5", "0.5"), "1.5");
+  assert.equal(floorToStep("0.001", "0.001"), "0.001");
+});
+
+test("floorToStep rounds a value strictly between two step boundaries down to the lower one", () => {
+  assert.equal(floorToStep("0.0019", "0.001"), "0.001");
+  assert.equal(floorToStep("1.0009", "0.001"), "1");
+});
+
+test("floorToStep and ceilToStep differ whenever the input is not already an exact multiple", () => {
+  assert.equal(floorToStep("0.0019", "0.001"), "0.001");
+  assert.equal(ceilToStep("0.0019", "0.001"), "0.002");
+  assert.notEqual(floorToStep("0.0019", "0.001"), ceilToStep("0.0019", "0.001"));
+
+  // Exact multiples: both agree (no rounding needed either way).
+  assert.equal(floorToStep("1.5", "0.5"), ceilToStep("1.5", "0.5"));
 });
 
 test("maxDecimal and subtractDecimal handle bare-dot and signed forms", () => {
