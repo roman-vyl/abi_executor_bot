@@ -303,18 +303,25 @@ spec `openspec/specs/order-price-limits/spec.md`) documents Bybit's current perm
 this design has no evidence either way. Asserting a mapping without that evidence is exactly the kind of
 unverified claim the master plan forbids (`docs/virtual-exposure-ownership-delivery-plan.md` revision v18).
 
-**Dependency this design DOES fix: `CurrentOrderPriceLimitsProvider` is wired in, read-only, fail-closed.**
-Desired-state resolution (Decision 4's sibling step for the take leg) queries
-`CurrentOrderPriceLimitsProvider.getCurrent({ category, symbol })` fresh on every reconciliation attempt —
-no caching, mirroring the capability's own "every provider request reads a fresh exchange snapshot"
-requirement. Any `OrderPriceLimitsFailure` (`unsupported_category`, `transport_failure`, or
-`protocol_failure`, any reason) makes the whole reconciliation attempt fail closed — `{ kind:
-"fail_closed", reason: "order_price_limits_unavailable" }` — **before any attribution read or amend call**,
-zero protection-amend writes issued. This mirrors exactly how `no_authoritative_qty` (Decision 4) is
-surfaced by the caller (Decision 11) ahead of any exchange write. The provider itself remains, as its
-canonical spec requires, entirely ignorant of protection — it returns `{ buyLimit, sellLimit,
-observedAtMs }` and nothing else; every interpretation of what those numbers mean for a surrogate TAKE
-happens (or, currently, does not yet happen) on this change's side of the boundary.
+**Dependency this design DOES fix: `CurrentOrderPriceLimitsProvider` is wired in, read-only, fail-closed —
+but only on the surrogate path.** This provider is consulted **if and only if `command.takePrice ===
+null`** — i.e. only when a dormant surrogate TAKE must actually be computed. When `command.takePrice` is
+non-null, the real strategy TAKE passes straight through as `take.triggerPrice` (Decision 4's existing
+resolution), `CurrentOrderPriceLimitsProvider` is **not called at all**, and its availability has no
+bearing on that reconciliation attempt — an outage of this dependency can never block a `PUT
+.../protection` call that carries a real take price.
+
+When `command.takePrice === null`, desired-state resolution (Decision 4's sibling step for the take leg)
+queries `CurrentOrderPriceLimitsProvider.getCurrent({ category, symbol })` fresh for that attempt — no
+caching, mirroring the capability's own "every provider request reads a fresh exchange snapshot"
+requirement, scoped to the attempts that actually need it. Any `OrderPriceLimitsFailure`
+(`unsupported_category`, `transport_failure`, or `protocol_failure`, any reason) makes that reconciliation
+attempt fail closed — `{ kind: "fail_closed", reason: "order_price_limits_unavailable" }` — **before any
+attribution read or amend call**, zero protection-amend writes issued. This mirrors exactly how
+`no_authoritative_qty` (Decision 4) is surfaced by the caller (Decision 11) ahead of any exchange write.
+The provider itself remains, as its canonical spec requires, entirely ignorant of protection — it returns
+`{ buyLimit, sellLimit, observedAtMs }` and nothing else; every interpretation of what those numbers mean
+for a surrogate TAKE happens (or, currently, does not yet happen) on this change's side of the boundary.
 
 **What is blocked on evidence, not assumed (tasks.md task 0 — bounded, not a new spike subsystem):**
 whether `/v5/market/price-limit`'s band constrains a native Partial TP `triggerPrice` amend at all, and if
