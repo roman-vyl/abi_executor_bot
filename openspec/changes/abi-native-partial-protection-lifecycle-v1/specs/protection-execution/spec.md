@@ -25,14 +25,14 @@ SHALL NOT attempt to represent "take disabled" as the absence of an attached tak
 client's desired take is disabled, ABI SHALL compute a deterministic surrogate take-profit price from
 that trade cycle's own immutable planned entry price — a reference fixed once for the life of the trade
 cycle's current generation and never affected by any later partial fill — placed on the side of that
-price consistent with the trade cycle's own direction and within that instrument's own valid price
-bounds, and SHALL NOT derive it from current market price.
+price consistent with the trade cycle's own direction, and SHALL NOT derive it from current market price.
+This requirement does not assert that the resulting price is proven valid against any particular
+exchange price-bound mechanism; that determination is a separate, evidence-gated concern.
 
 #### Scenario: A disabled take reconciles to a surrogate, not a missing leg
 - **WHEN** a trade cycle's desired protection state has its take disabled
 - **THEN** ABI reconciles the take-profit child to a deterministic surrogate price derived from that
-  trade cycle's own immutable planned entry price, valid within that instrument's own accepted price
-  range
+  trade cycle's own immutable planned entry price
 - **AND** ABI does not attempt to leave the take-profit child absent, cancelled, or otherwise removed as
   a way of representing the disabled take
 
@@ -41,6 +41,18 @@ bounds, and SHALL NOT derive it from current market price.
   where that trade cycle's own cumulative filled quantity has changed since a previous reconciliation
 - **THEN** the computed surrogate take-profit price is identical to the previously computed one
 - **AND** ABI does not amend an already-correctly-placed surrogate leg
+
+### Requirement: Computing a disabled-take surrogate depends on a fresh current-price-limits read, and fails closed without it
+When the client's desired take is disabled, ABI SHALL obtain a fresh reading of the exchange's current
+order-price limits for that instrument as part of computing the surrogate take-profit price, and SHALL
+fail the reconciliation attempt closed, without amending anything, when that reading cannot be obtained.
+
+#### Scenario: A current-price-limits read failure fails the reconciliation closed
+- **WHEN** ABI cannot obtain a current order-price-limits reading for the instrument while reconciling a
+  trade cycle whose desired take is disabled
+- **THEN** ABI fails the reconciliation attempt closed
+- **AND** ABI does not amend any protection child and does not resolve the trade cycle's attributable
+  protection state for this attempt
 
 ### Requirement: Reconciliation targets a trade cycle's current own filled quantity, without waiting for its entry to finish filling
 ABI SHALL resolve the quantity a reconciliation attempt targets from the trade cycle's own currently

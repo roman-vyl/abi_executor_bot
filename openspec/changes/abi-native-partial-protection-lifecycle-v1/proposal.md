@@ -39,13 +39,23 @@ trigger/qty-change combination; and the qty a reconciliation attempt targets, re
 own current fill facts without waiting for terminal finality) **because they depend only on ABI-side
 logic and already-established own-order data, not on unverified exchange behavior.** A fourth
 (multi-fill representability) resolves to "no special-casing needed" — the reconciler's existing
-fail-closed behavior on anything other than `none`/`attributed` already covers it. **The surrogate TAKE
-distance is answered with a concrete default plus static-bounds clamping**, not a verification task
-against one Demo instrument: the master plan explicitly forbids inventing an unverified percentage and
-shipping it as if proven, and instead of gating the shipped constant on a bounded pre-implementation check
-against one instrument's accepted price range, this proposal clamps the computed candidate into the
-instrument's own decoded `minPrice`/`maxPrice` bounds — making the result exchange-valid by construction,
-for every instrument, without per-instrument verification.
+fail-closed behavior on anything other than `none`/`attributed` already covers it.
+
+**The surrogate TAKE distance is deliberately NOT answered by this proposal — it is evidence-gated.** An
+earlier version of this proposal computed a candidate from `planned_entry_price` and a fixed ratio, then
+clamped it into `InstrumentTradingRules`' static `minPrice`/`maxPrice` price-filter bounds, and called the
+result "exchange-valid by construction." That claim is retracted: no version of this proposal has ever
+established that any current-price-band concept — static instrument bounds, or the dynamic `buyLimit`/
+`sellLimit` current order-price limits Bybit exposes via `/v5/market/price-limit` — is actually the
+applicable validity bound for a native Partial **TP `triggerPrice` amend** specifically, as opposed to
+ordinary order placement. This proposal instead **reuses**, as an injected read-only dependency, the
+already-implemented and archived `abi-current-order-price-limits-v1`
+(`CurrentOrderPriceLimitsProvider`, archive commit `6ec349fcd02e0b908020a5eb74881cb79b6b949f`, canonical
+capability `openspec/specs/order-price-limits/spec.md`) rather than building a second, duplicate provider
+for the same kind of dynamic price data — and defers the concrete surrogate formula to a bounded, blocking
+Demo evidence task (`tasks.md` task 0) that must close, with its result folded back into design.md
+Decision 5, before that formula is designed or implemented. `take_price = null → dormant surrogate TAKE`
+remains this program's accepted architectural decision; only the numeric formula behind it is deferred.
 
 **OCO-after-amend remains `NOT PROVEN`** — neither spike checked whether Bybit atomically neutralizes a
 sibling leg when the other fills, after both legs have been through amend. This change does not depend on
@@ -57,11 +67,15 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
 
 - New adapter primitive: `POST /v5/order/amend`, scoped to `{category, symbol, orderId, triggerPrice?,
   qty?}` — the only Bybit write this change introduces.
-- `InstrumentTradingRules` (`instrumentTradingRulesResponseDecoder.ts`) gains `tickSize`, `minPrice`, and
-  `maxPrice`, decoded from the same `/v5/market/instruments-info` response
-  `BybitInstrumentTradingRulesProvider` already queries for `minOrderQty`/`qtyStep`/`minNotionalValue` —
-  no new Bybit query, additional fields read from an existing response. `minPrice`/`maxPrice` are what let
-  the surrogate TAKE formula below be exchange-valid by construction.
+- `InstrumentTradingRules` (`instrumentTradingRulesResponseDecoder.ts`) gains `tickSize` only, decoded
+  from the same `/v5/market/instruments-info` response `BybitInstrumentTradingRulesProvider` already
+  queries for `minOrderQty`/`qtyStep`/`minNotionalValue` — no new Bybit query, an additional field read
+  from an existing response, used only to tick-normalize whatever `triggerPrice` this change amends to.
+- A new, injected, read-only dependency on the already-implemented and archived
+  `CurrentOrderPriceLimitsProvider` (`abi-current-order-price-limits-v1`) for the surrogate-TAKE branch of
+  desired-state resolution — no new provider, decoder, or Bybit query is built for dynamic price
+  boundaries; this proposal reuses the existing generic capability instead of duplicating it. Any failure
+  from that provider fails the reconciliation attempt closed before any attribution read or amend call.
 - New price-side step-rounding primitive (`floorToStep`, alongside the existing `ceilToStep` in
   `exactDecimal.ts`) — needed so a computed surrogate price can be rounded consistently away from the
   reference price in either direction (up for a LONG surrogate, down for a SHORT surrogate).
@@ -70,11 +84,11 @@ protection-cutover-v1` needs if its close/activation semantics come to rely on i
   `amend` calls needed (reusing the confirmed pair-wide `qty` sync — never more than one `qty`-only amend
   call is issued), sends them, and re-verifies with a fresh, independent read-back before reporting
   success. Never creates or cancels an order.
-- Surrogate TAKE price computation for `take_price = null`: deterministic, derived from this cycle's own
-  immutable `desired_entry.planned_entry_price` (never the mutable cumulative average execution price),
-  tick-normalized, side-aware (far above for long, far below for short), idempotent for a repeated
-  identical intent, and clamped into the instrument's own `minPrice`/`maxPrice` bounds so it is
-  exchange-valid by construction.
+- Surrogate TAKE architecture kept from revision v17 (`take_price = null` → dormant surrogate, anchored to
+  this cycle's own immutable `desired_entry.planned_entry_price`, never the mutable cumulative average
+  execution price, never live market price). The concrete price formula itself — including whether/how
+  `CurrentOrderPriceLimitsProvider`'s `buyLimit`/`sellLimit` bound it — is **not** fixed by this proposal;
+  it is blocked on `tasks.md` task 0's evidence.
 - Own-current-fill qty resolution for protection reconciliation: reuses this cycle's own fill facts when
   already terminally final, otherwise issues a fresh own-order confirmation query — a still-partial fill
   is an equally authoritative answer as a full fill, so reconciliation is never blocked waiting for the
@@ -111,8 +125,11 @@ already means.
 - Prerequisite relationship: this is the foundation `abi-native-partial-protection-cutover-v1` activates.
   Neither the mapping cutover, the admission-guard removal, nor the
   `shared_scope_protection_unsupported` removal happens in this change.
-- Remaining precondition for `abi-native-partial-protection-cutover-v1`, not this change: OCO-after-amend
-  stays `NOT PROVEN`. The surrogate TAKE distance itself is not provisional — clamping against
-  `minPrice`/`maxPrice` (design.md Decision 5) makes it exchange-valid by construction — but this design
-  does not check for a possible *dynamic*, mark-price-relative deviation guard beyond those static
-  bounds; that residual gap is stated explicitly in design.md's Risks section, not hidden.
+- Remaining preconditions before this change's own design is complete, not deferred to
+  `abi-native-partial-protection-cutover-v1`: `tasks.md` task 0 — "Are Bybit current order-price limits
+  applicable to native Partial TP triggerPrice, and if so, which limit maps to which protection
+  direction?" — must close and be folded back into design.md Decision 5 before the surrogate-price
+  formula (task 4) is designed or implemented. Separately, and remaining a precondition for
+  `abi-native-partial-protection-cutover-v1`: OCO-after-amend stays `NOT PROVEN`. Even once task 0
+  closes, a possible *dynamic*, mark-price-relative deviation guard beyond whatever bound the eventual
+  formula uses is an accepted residual gap, stated explicitly in design.md's Risks section, not hidden.

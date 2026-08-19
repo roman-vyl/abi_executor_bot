@@ -1,3 +1,35 @@
+## 0. Blocking evidence task — order-price-limits applicability to native Partial TP `triggerPrice`
+
+**This task must close, and its result must be folded back into design.md Decision 5 as a follow-up
+correction, before task 4's surrogate-price formula is designed or implemented.** It is a bounded Demo
+evidence check, not a new spike subsystem — no new provider, decoder, or production code is built to run
+it; it consumes only what `abi-native-partial-protection-attribution-v1` and
+`abi-current-order-price-limits-v1` already provide.
+
+- [ ] 0.1 On Bybit Demo, for one representative linear instrument:
+      1. obtain a fresh `CurrentOrderPriceLimitsProvider.getCurrent({ category: "linear", symbol })`
+         snapshot (`buyLimit`, `sellLimit`, `observedAtMs`);
+      2. materialize an attributable native Partial `STOP + TAKE` pair for a test position (same
+         mechanism already used by `abi-native-partial-protection-attribution-v1`'s own spike);
+      3. record the exact TAKE child's `orderId`;
+      4. attempt `POST /v5/order/amend` on that `orderId`'s `triggerPrice`, first to a value clearly
+         inside a plausible normal trading range, then to a value at or beyond the corresponding
+         `buyLimit`/`sellLimit` boundary from step 1;
+      5. perform an independent fresh read-back after each amend acknowledgment (not reusing pre-amend
+         evidence), per this change's own Decision 7 discipline;
+      6. record the raw `retCode`/`retMsg` and the child's actual resulting state (not an assumption) for
+         each attempt;
+      7. determine and record in design.md Decision 5: (a) whether `/v5/market/price-limit`'s band
+         constrains this TP `triggerPrice` amend at all; (b) if it does, which of `buyLimit`/`sellLimit`
+         is the applicable bound for a LONG TP versus a SHORT TP; (c) if it does not, that conclusion is
+         recorded explicitly and design.md Decision 5 is revised to select a different, separately-proven
+         boundary source rather than silently keeping the unproven mapping.
+- [ ] 0.2 Do not generalize a single instrument's result into a universal claim without the same caveat
+      this program has applied to every other single-instrument Demo finding so far (e.g. the stop-only
+      spike's own explicit "evidence about one instrument" framing) — if genuine doubt remains about
+      cross-instrument applicability, say so in the recorded result rather than asserting certainty task
+      0.1 does not support.
+
 ## 1. `floorToStep` (exact-decimal primitive)
 
 - [ ] 1.1 Add `floorToStep(valueText: string, stepText: string): string` to `src/domain/exactDecimal.ts`,
@@ -7,21 +39,24 @@
       boundaries rounds down to the lower one; symmetry/asymmetry with `ceilToStep` on the same inputs is
       explicitly asserted (they must differ whenever the input is not already an exact multiple).
 
-## 2. `tickSize`, `minPrice`, `maxPrice` on `InstrumentTradingRules`
+## 2. `tickSize` on `InstrumentTradingRules`
 
-- [ ] 2.1 Add `tickSize: string`, `minPrice: string`, `maxPrice: string` to `InstrumentTradingRules`
+**Scope note:** this task adds `tickSize` only. It does **not** add `minPrice`/`maxPrice` — an earlier
+version of this task did, to support a now-retracted clamping formula (design.md Decision 5). Static
+instrument price-filter bounds are a different capability's remaining concern (if any) than the dynamic
+`order-price-limits` capability this change consumes instead (Context section, task 0).
+
+- [ ] 2.1 Add `tickSize: string` to `InstrumentTradingRules`
       (`src/exchange/instrumentTradingRulesResponseDecoder.ts`), decoded from the same response's
-      `priceFilter.tickSize`/`priceFilter.minPrice`/`priceFilter.maxPrice` (design.md Decision 3/5). Add
-      `missing_price_filter`/`invalid_tick_size`/`invalid_min_price`/`invalid_max_price` failure reasons
-      mirroring the existing `missing_lot_size_filter`/`invalid_qty_step` pattern.
+      `priceFilter.tickSize` (design.md Decision 3). Add `missing_price_filter`/`invalid_tick_size`
+      failure reasons mirroring the existing `missing_lot_size_filter`/`invalid_qty_step` pattern.
 - [ ] 2.2 `BybitInstrumentTradingRulesProvider` — no code change expected (it already returns whatever
       `decodeInstrumentTradingRulesResponse` produces); confirm via test that the cached value now
-      includes `tickSize`/`minPrice`/`maxPrice`.
-- [ ] 2.3 Tests: valid `priceFilter.{tickSize,minPrice,maxPrice}` decodes; missing `priceFilter` →
-      `missing_price_filter`; malformed/negative/zero `tickSize` → `invalid_tick_size`;
-      malformed/negative `minPrice`/`maxPrice` or `minPrice >= maxPrice` → `invalid_min_price`/
-      `invalid_max_price`. Full regression of existing `instrumentTradingRulesResponseDecoder.test.ts` —
-      unchanged assertions for `minOrderQty`/`qtyStep`/`minNotionalValue` still pass.
+      includes `tickSize`.
+- [ ] 2.3 Tests: valid `priceFilter.tickSize` decodes; missing `priceFilter` → `missing_price_filter`;
+      malformed/negative/zero `tickSize` → `invalid_tick_size`. Full regression of existing
+      `instrumentTradingRulesResponseDecoder.test.ts` — unchanged assertions for `minOrderQty`/`qtyStep`/
+      `minNotionalValue` still pass.
 
 ## 3. Adapter primitive: `amendOrder`
 
@@ -31,27 +66,22 @@
       every other adapter method does).
 - [ ] 3.2 Do not modify `setTradingStop`, `SetTradingStopInput`, or any existing caller.
 
-## 4. Surrogate TAKE price computation
+## 4. Surrogate TAKE price computation — BLOCKED on task 0
 
-- [ ] 4.1 New pure function (co-located with the reconciliation primitive or its own small module):
-      `computeSurrogateTakePrice(input: { plannedEntryPrice: string; side: "long" | "short"; tickSize:
-      string; minPrice: string; maxPrice: string }): Result<string, "surrogate_unrepresentable">` —
-      design.md Decision 5's formula, `SURROGATE_TAKE_DISTANCE_RATIO = 0.5` as a named, documented
-      constant (not a magic number inline), followed by `clampToInstrumentBounds(...)` (design.md
-      Decision 5) against `minPrice`/`maxPrice`.
-- [ ] 4.2 `clampToInstrumentBounds(candidate, minPrice, maxPrice, tickSize, side)` (design.md Decision 5):
-      pulls an out-of-bounds candidate back to the nearest tick-valid price still inside
-      `[minPrice, maxPrice]`; returns `err("surrogate_unrepresentable")` only when the clamped result
-      would equal `reference` itself (no room for any distinct dormant surrogate on this instrument's
-      current bounds). No live Bybit verification step — validity is guaranteed by construction from the
-      decoded instrument bounds (task 2.1), not by a bounded Demo check against one instrument.
-- [ ] 4.3 Tests: deterministic (same inputs → same output across calls); idempotent under repeated calls
-      with unchanged inputs; long produces a price strictly above `plannedEntryPrice`, short strictly
-      below, when unclamped; result is tick-aligned per the provided `tickSize`; long rounds away from
-      reference (up), short rounds away from reference (down) — assert the two directions are not
-      accidentally symmetric in rounding behavior; a candidate beyond `maxPrice` (long) or below
-      `minPrice` (short) clamps to the nearest valid tick inside the bound rather than being rejected;
-      a synthetic instrument whose bounds leave no room for a distinct surrogate → `surrogate_unrepresentable`.
+**This entire section is blocked until task 0 closes and its result is folded back into design.md
+Decision 5 as a follow-up correction.** Do not implement `computeSurrogateTakePrice` or any
+concrete surrogate-distance/clamping logic against a guessed boundary source before that correction
+exists — design.md Decision 5 explicitly retracts the prior `planned_entry_price * 1.5/0.5` +
+`clampToInstrumentBounds(minPrice, maxPrice)` formula and does not replace it with a new one here.
+
+- [ ] 4.1 **Not actionable yet.** Once task 0's evidence closes and design.md Decision 5 is corrected with
+      a proven formula (including which of `buyLimit`/`sellLimit`, or another proven boundary source, is
+      applicable and how), add the concrete pure function here, sourced from that corrected design.md
+      text — not invented at implementation time.
+- [ ] 4.2 **Not actionable yet.** Tests for whatever concrete function task 4.1 ends up defining
+      (determinism, idempotency, side-correct direction, tick-alignment, and boundary-edge behavior using
+      the evidence-proven boundary source) are written against that corrected formula, not against the
+      retracted one.
 
 ## 5. Desired-state resolution
 
@@ -65,9 +95,13 @@
       immediately-usable answer.
 - [ ] 5.2 New function resolving a `ProtectionCommand` + a record into a `DesiredProtectionState` (design.md
       Decision 4): `qty` from task 5.1 (propagates its `err` as fail-closed); `stop.triggerPrice` from
-      `command.stopPrice`; `take.triggerPrice` from `command.takePrice` when non-null, else
-      `computeSurrogateTakePrice(...)` (task 4.1) using `desired_entry.planned_entry_price`, `side`,
-      `tickSize`, `minPrice`, `maxPrice`; both legs always carry the same `qty`.
+      `command.stopPrice`; `take.triggerPrice` from `command.takePrice` when non-null. **When
+      `command.takePrice` is `null`:** query `CurrentOrderPriceLimitsProvider.getCurrent({ category,
+      symbol })` fresh (design.md Decision 5) — any `OrderPriceLimitsFailure` propagates as
+      `err("order_price_limits_unavailable")`, fail closed, before any attribution read or amend call; on
+      success, delegate to `computeSurrogateTakePrice(...)` (task 4.1 — **not actionable until task 0
+      closes**, so this branch cannot be completed end-to-end before then). Both legs always carry the
+      same `qty`.
 - [ ] 5.3 **Required test — current cumulative qty at partial fill, not final fill:** entry command qty
       `10`; first reconciliation attempt observes `confirmEntryPackage()` → `partial_fill` with
       `cumulative_filled_qty: "4"` → resolved desired protection `qty` is `"4"` (not blocked, not an
@@ -81,9 +115,14 @@
       both accepted as authoritative; `terminal_without_fill`/`not_found`/`ambiguous`/`pending_confirmed`
       → `no_authoritative_qty`, fail closed, distinct from `OpenPositionResolutionService
       .resolveOwnFillFacts()`'s own zero-fill-is-valid handling (assert the two functions disagree on
-      this input, documenting the deliberate divergence); non-null `take_price` passes through unchanged;
-      `take_price: null` invokes surrogate computation with this cycle's own `planned_entry_price`,
-      `side`, and instrument bounds; both legs' `qty` always equal regardless of which take path is taken.
+      this input, documenting the deliberate divergence); non-null `take_price` passes through unchanged
+      and does **not** query `CurrentOrderPriceLimitsProvider` at all (it is only consulted on the
+      `take_price: null` path); `take_price: null` with a `CurrentOrderPriceLimitsProvider` failure
+      (any `OrderPriceLimitsFailure` reason) → `no_authoritative_qty`-sibling fail-closed outcome
+      `order_price_limits_unavailable`, no attribution read, no amend call; both legs' `qty` always equal
+      regardless of which take path is taken. The `take_price: null` **success** path itself
+      (`computeSurrogateTakePrice` actually producing a price) is not testable end-to-end until task 4
+      unblocks — this task only covers the dependency-wiring and fail-closed behavior around it.
 
 ## 6. Reconciliation primitive
 
@@ -122,16 +161,21 @@
 
 - [ ] 8.1 `specs/protection-execution/spec.md` (this change's own delta) — MODIFIED, adding requirements
       for: reconciliation exists and is production-inert; amend-only, never create/cancel; surrogate TAKE
-      for `take_price = null` (anchored to the immutable planned entry price, valid within instrument price
-      bounds); reconciliation targets the trade cycle's current own filled quantity without waiting for its
-      entry to reach a terminal fill state, and fails closed on no own fill evidence at all; fresh-evidence
+      for `take_price = null` (anchored to the immutable planned entry price, deterministic, never derived
+      from live current market price — **not** asserting a proven instrument/exchange price-bound
+      mechanism, since that mapping is not yet established, see design.md Decision 5/task 0); computing
+      that surrogate depends on a fresh current-order-price-limits read and fails the reconciliation
+      attempt closed, before any attribution read or amend, when that read cannot be obtained;
+      reconciliation targets the trade cycle's current own filled quantity without waiting for its entry
+      to reach a terminal fill state, and fails closed on no own fill evidence at all; fresh-evidence
       discipline; fail-closed on non-attributed/ambiguous/race; already-satisfied short-circuit. Phrased
       around behavior, not literal field/function names, mirroring
       `abi-native-partial-protection-attribution-v1`'s spec.md convention.
 
-## 9. Tests (all synthetic/fixture-driven — no real Bybit call in the automated test suite; the surrogate
-      TAKE formula's exchange validity is proven by clamping against decoded instrument bounds, design.md
-      Decision 5, not by a manual Demo check)
+## 9. Tests (all synthetic/fixture-driven — no real Bybit call in the automated test suite; the
+      reconciliation primitive itself is exercised with synthetic `DesiredProtectionState` fixtures and
+      does not depend on task 4's still-blocked surrogate formula — only task 5.2's dependency-wiring and
+      fail-closed behavior around `CurrentOrderPriceLimitsProvider` do, per task 0/4's blocked status)
 
 - [ ] 9.1 Reconcile an already-attributed pair whose `triggerPrice`/`qty` already match desired →
       `already_satisfied`, zero `amendOrder` calls.
@@ -152,9 +196,12 @@
       `triggerPrice` unchanged) → exactly two `amendOrder` calls — STOP's call carries `qty` only (issued
       even though STOP's own `triggerPrice` did not change); TAKE's call carries only its new
       `triggerPrice`.
-- [ ] 9.5 `take_price: null` on a cycle with an already-materialized real (non-surrogate) TAKE → reconciles
-      the TAKE leg's `triggerPrice` toward the computed surrogate, same write-plan as any other
-      `take_price` change — no special-cased "removal" path exists or is attempted.
+- [ ] 9.5 A `DesiredProtectionState` whose `take.triggerPrice` differs from an already-materialized real
+      (non-surrogate) TAKE's actual `triggerPrice` → reconciles the TAKE leg's `triggerPrice` toward the
+      given desired value, same write-plan as any other `take_price` change — no special-cased "removal"
+      path exists or is attempted. This test exercises the reconciliation primitive directly with a
+      synthetic desired value (task 6.1) and does not require task 4's surrogate formula — it proves the
+      write-plan is agnostic to how `take.triggerPrice` was computed.
 - [ ] 9.6 Initial classification is `none` or `ambiguous` (any of the six reasons) →
       `attribution_lost`/`ambiguous_attribution`, zero `amendOrder` calls.
 - [ ] 9.7 An `amendOrder` call returns a non-zero `retCode` → whole attempt `amend_rejected`; if it was the
@@ -172,12 +219,17 @@
       an available `partial_fill` observation → reconciles toward that partial's `cumulative_filled_qty`,
       not blocked and not failed closed; no fill evidence obtainable at all
       (`terminal_without_fill`/`not_found`/`ambiguous`/`pending_confirmed`) → fail closed
-      (`no_authoritative_qty`) before any attribution/amend call; final fill facts + `take_price: null` →
-      surrogate desired state computed and reconciled; regression of `protectionApplicationService.test.ts`'s
+      (`no_authoritative_qty`) before any attribution/amend call; `take_price: null` with a
+      `CurrentOrderPriceLimitsProvider` failure → fail closed (`order_price_limits_unavailable`) before
+      any attribution/amend call (task 5.2/5.4 — testable now); `take_price: null` with a successful
+      `CurrentOrderPriceLimitsProvider` snapshot end-to-end through a computed surrogate desired state is
+      **not** testable here until task 4 unblocks; regression of `protectionApplicationService.test.ts`'s
       existing `apply()`/`process()` coverage — byte-for-byte unchanged, including the multi-owner
       guard-rejection test.
 - [ ] 9.11 Full regression: `entryPackageApplicationService.test.ts`,
-      `instrumentTradingRulesResponseDecoder.test.ts`, `bybitOrderMapper`-related tests, and any existing
+      `instrumentTradingRulesResponseDecoder.test.ts`, `bybitOrderMapper`-related tests,
+      `orderPriceLimitsDecoder.test.ts`/`orderPriceLimitsProvider.test.ts`/
+      `orderPriceLimitsModuleBoundary.test.ts` (`abi-current-order-price-limits-v1`), and any existing
       `exactDecimal`/`packageConfirmation`/`nativeProtectionAttribution` tests all pass unmodified — none
       of them call the new primitives, and every existing production path's output is unchanged.
 
@@ -188,4 +240,9 @@
       `EntryPackageCorrelationRepository`, `CloseApplicationService`, `EntryPackageApplicationService`'s
       claim logic, `mapEntryPackageToBybit()`, and `ProtectionApplicationService.process()`/`apply()`'s
       existing behavior are byte-for-byte unmodified; `setTradingStop`/`SetTradingStopInput` untouched;
-      no public HTTP route, DTO, or error code changed.
+      no public HTTP route, DTO, or error code changed; `src/exchange/orderPriceLimits/*` and
+      `openspec/specs/order-price-limits/spec.md` (`abi-current-order-price-limits-v1`'s own files) are
+      consumed only through `CurrentOrderPriceLimitsProvider`'s existing interface, never modified.
+- [ ] 10.3 Confirm task 0 has closed and its result is reflected in design.md Decision 5 before any task
+      4 work is merged — a diff that implements `computeSurrogateTakePrice` without a corresponding
+      design.md correction referencing task 0's recorded evidence is out of process for this change.
