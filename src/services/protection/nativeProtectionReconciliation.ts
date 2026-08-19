@@ -144,13 +144,15 @@ export async function reconcileNativePartialProtection(input: {
   // initial.kind === "attributed" — resolveOwnAttachedProtection() is
   // status-agnostic (a terminal historical pair still classifies
   // "attributed"), so a terminal leg must never be read as active,
-  // satisfied coverage here even when its stale triggerPrice/qty happen to
-  // numerically match desired — that pair is not live protection. Skipping
-  // the shortcut lets the normal write-plan/read-back path run instead,
-  // which independently detects this exact situation on its own fresh
-  // read-back (see the terminal check below) and fails closed rather than
-  // ever reporting either already_satisfied or reconciled for it.
-  if (matchesDesired(initial, desired) && !hasTerminalLeg(initial)) {
+  // satisfied coverage, and must never be planned into an amend either —
+  // fail closed immediately, before already_satisfied and before any
+  // write-plan is built, zero amendOrder calls. No create/cancel/
+  // replacement is attempted to work around it.
+  if (hasTerminalLeg(initial)) {
+    return { kind: "fail_closed", reason: "amend_race" };
+  }
+
+  if (matchesDesired(initial, desired)) {
     return { kind: "already_satisfied" };
   }
 

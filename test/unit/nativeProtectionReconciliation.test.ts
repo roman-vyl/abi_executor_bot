@@ -461,6 +461,18 @@ test("initial Deactivated pair whose triggerPrice/qty exactly match desired MUST
   assert.equal(bybit.amendOrderCalls.length, 0);
 });
 
+test("initial attributed pair with a terminal STOP whose triggerPrice differs from desired fails closed immediately, zero amendOrder calls", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit, { stop: { orderStatus: "Deactivated" } });
+
+  // Otherwise clean attribution — only the STOP leg's triggerPrice differs
+  // from desired, which would normally plan an amend on it.
+  const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000" }));
+
+  assert.deepEqual(result, { kind: "fail_closed", reason: "amend_race" });
+  assert.equal(bybit.amendOrderCalls.length, 0);
+});
+
 test("post-amend terminal pair whose triggerPrice/qty exactly match desired MUST NOT return reconciled", async () => {
   const bybit = new FakeBybitAdapter();
   attributedPair(bybit);
