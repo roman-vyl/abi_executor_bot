@@ -1,16 +1,20 @@
 ## 0. Blocking evidence task — order-price-limits applicability to native Partial TP `triggerPrice` (CLOSED)
 
 **Closed 2026-08-19 on Bybit Demo (linear `ETHUSDT`).** Full evidence recorded in design.md Decision 5.
-Result: `/v5/market/price-limit`'s band does **not** constrain a native Partial TP child's `triggerPrice`
-amend — an amend to `1.5 × buyLimit` was accepted (`retCode: 0`) identically to a normal-range amend, and
-the read-back confirmed the far value was actually applied. `CurrentOrderPriceLimitsProvider` is therefore
-**not** consumed anywhere in this change; design.md Decision 5 was revised accordingly (task 0.1.7c).
+Result: task 0 did not establish `/v5/market/price-limit`'s band as the far-side boundary a clamping
+surrogate policy would need — an amend to `1.5 × buyLimit` was accepted (`retCode: 0`) identically to a
+normal-range amend, and the read-back confirmed the far value was actually applied. This is the narrower,
+task-0-scoped finding that the one candidate mapping considered is not supported by the evidence obtained,
+not a claim that this band can never constrain any native Partial TP `triggerPrice` amend under any
+circumstance. `CurrentOrderPriceLimitsProvider` is therefore not consumed anywhere in this change;
+design.md Decision 5 was revised accordingly (task 0.1.7c).
 
 - [x] 0.1 Ran the exact procedure against Bybit Demo: fresh `CurrentOrderPriceLimitsProvider.getCurrent`
       snapshot; materialized attributable native Partial `STOP + TAKE` pair; amended the exact TAKE
       child's `orderId` twice (normal-range, then beyond `buyLimit`), independent fresh read-back after
       each; raw `retCode`/`retMsg`/resulting state recorded in design.md Decision 5; determination (c)
-      recorded — order-price-limits is not the applicable bound, no replacement boundary source adopted.
+      recorded — order-price-limits was not established as the applicable bound, no replacement boundary
+      source adopted.
 - [x] 0.2 Result explicitly scoped to the one instrument tested (`ETHUSDT`, linear) per design.md
       Decision 5, not generalized beyond what the evidence supports.
 
@@ -52,12 +56,13 @@ version of this task did, to support a now-retracted clamping formula (design.md
 
 - [x] 4.1 `computeSurrogateTakePrice(input: { plannedEntryPrice: string; side: "long" | "short"; tickSize:
       string }): string` (design.md Decision 5, task 0 evidence folded in): `SURROGATE_TAKE_DISTANCE_RATIO
-      = 0.5` as a named, documented constant; `reference * (1 ± ratio)`, tick-normalized away from
-      reference (`ceilToStep` for long, `floorToStep` for short). No clamp step, no
-      `CurrentOrderPriceLimitsProvider` dependency, no `surrogate_unrepresentable` outcome — task 0 ruled
-      out the only boundary source this design considered, so the function is total over its inputs and
-      carries no exchange-validity claim; Bybit's own amend-time acceptance/rejection is the only gate
-      (Decision 7's existing `amend_rejected` path).
+      = 0.5` as a named, documented constant; `reference * (1 ± ratio)` via exact-decimal multiplication
+      (`multiplyDecimal`, `src/domain/exactDecimal.ts`), tick-normalized away from reference
+      (`ceilToStep` for long, `floorToStep` for short). No clamp step, no
+      `CurrentOrderPriceLimitsProvider` dependency, no `surrogate_unrepresentable` outcome — task 0 did not
+      establish the only boundary source this design considered as applicable, so the function is total
+      over its inputs and carries no exchange-validity claim; Bybit's own amend-time acceptance/rejection
+      is the only gate (Decision 7's existing `amend_rejected` path).
 - [x] 4.2 Tests: deterministic (same inputs → same output across calls); idempotent under repeated calls
       with unchanged inputs; long produces a price strictly above `plannedEntryPrice`, short strictly
       below; result is tick-aligned per the provided `tickSize`; long rounds away from reference (up),
@@ -204,3 +209,47 @@ version of this task did, to support a now-retracted clamping formula (design.md
       not touched or consumed by this change at all.
 - [x] 10.3 Confirmed task 0 closed and its result is reflected in design.md Decision 5 before any task 4
       work — design.md's follow-up correction cites task 0's recorded evidence directly.
+
+## 11. Review-fix pass (integration/change7-current-design)
+
+- [x] 11.1 Terminal attributed protection must not count as active satisfied coverage
+      (`resolveOwnAttachedProtection()` is status-agnostic; the caller must interpret status).
+      `reconcileNativePartialProtection()` no longer returns `already_satisfied` when a terminal leg's
+      stale values happen to numerically match desired, and no longer returns `reconciled` when a
+      post-amend fresh read-back shows a terminal leg even if its values match desired — both paths fail
+      closed (`amend_race`). No create/cancel/replacement introduced. Regression tests added: initial
+      Deactivated pair with exact desired price/qty does not return `already_satisfied`; post-amend
+      terminal pair with exact desired price/qty does not return `reconciled`.
+- [x] 11.2 Removed the local decimal-multiplication implementation
+      (`parseForMultiply`/`formatForMultiply`/Number-ratio plumbing) from
+      `nativeProtectionReconciliation.ts`. Added `multiplyDecimal(aText, bText): string` to
+      `src/domain/exactDecimal.ts`, reusing the existing parser/grammar (no new regex, no binary float).
+      `computeSurrogateTakePrice` now multiplies by exact-decimal-text ratios `"1.5"`/`"0.5"`. Regression
+      test added: `plannedEntryPrice: "1e3"` (transport-legal exact-decimal exponent syntax) computes
+      correctly.
+- [x] 11.3 `InstrumentTradingRulesProvider.getRules()` throwing on the null-take path no longer rejects
+      `reconcileNativePartial()`'s returned Promise — `resolveDesiredProtectionState()` wraps the call and
+      resolves to a new typed failure, `trading_rules_unavailable`, surfaced as
+      `{ kind: "fail_closed", reason: "trading_rules_unavailable" }`. Tests added at both layers: a
+      `resolveDesiredProtectionState()` unit test, and a `reconcileNativePartial()` service-level test
+      asserting zero attribution reads, zero amend writes, and no thrown/rejected Promise.
+- [x] 11.4 Removed the no-longer-used `tradingRules`/`side` parameters from
+      `reconcileNativePartialProtection()` — the primitive never read them (desired-state computation,
+      including the surrogate's `tickSize` dependency, stays entirely the caller's concern per Decision 1).
+      Updated design.md Decision 1's signature and both call sites (service, tests) to match.
+- [x] 11.5 Documentation: added master-plan revision v19 (task 0 closed; `/price-limit` not established as
+      the surrogate boundary, not "proven to never constrain any TP triggerPrice"; Change 7 does not
+      consume `CurrentOrderPriceLimitsProvider`; ratio + tick normalization; Bybit amend acceptance/
+      rejection is the actual write gate). Fixed proposal.md's stale Impact paragraph that still named
+      task 0 as a remaining precondition. Removed a verbatim-duplicate paragraph in design.md Decision 5
+      ("Original architecture kept" / "What this design still fixes" said the same thing twice). Reworded
+      every "proved/does not constrain ... at all" claim to the narrower, evidence-accurate framing: task 0
+      did not establish `/price-limit` as the needed far-side boundary, so Change 7 does not use it — not a
+      universal claim about what Bybit's price-limit band can or cannot ever constrain. `abi-current-order-
+      price-limits-v1` (capability "6.5") is untouched, canonical, and not archived or removed by any of
+      this.
+- [x] 11.6 Synced `specs/protection-execution/spec.md`: added the terminal-leg-is-never-active-coverage
+      requirement (covers both the already-satisfied shortcut and the post-amend success path) and the
+      trading-rules-dependency-failure-fails-closed requirement; tightened the already-satisfied
+      requirement's own wording to require a non-terminal match; removed the now-stale "evidence-gated"
+      phrasing on the disabled-take requirement.

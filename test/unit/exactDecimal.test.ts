@@ -8,6 +8,7 @@ import {
   decimalEquals,
   floorToStep,
   maxDecimal,
+  multiplyDecimal,
   subtractDecimal,
 } from "../../src/domain/exactDecimal.js";
 
@@ -93,4 +94,15 @@ test("decimalEquals is total: malformed input is a mismatch, never a throw", () 
   assert.equal(decimalEquals("", "1"), false);
   assert.equal(decimalEquals("1.2.3", "1.2.3"), false);
   assert.equal(decimalEquals("1", "1"), true);
+});
+
+test("multiplyDecimal computes an exact product with no binary-float rounding", () => {
+  assert.equal(multiplyDecimal("100000", "1.5"), "150000");
+  assert.equal(multiplyDecimal("100000.33", "1.5"), "150000.495");
+  assert.equal(multiplyDecimal("0.1", "0.2"), "0.02");
+});
+
+test("multiplyDecimal accepts the exponent transport grammar (e.g. 1e3), matching isExactDecimalText", () => {
+  assert.equal(multiplyDecimal("1e3", "1.5"), "1500");
+  assert.equal(compareDecimal(multiplyDecimal("1e3", "1.5"), "1500"), 0);
 });

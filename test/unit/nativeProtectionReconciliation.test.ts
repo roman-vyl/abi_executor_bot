@@ -8,7 +8,6 @@ import {
 } from "../../src/services/protection/nativeProtectionReconciliation.js";
 import type { DesiredProtectionState } from "../../src/services/protection/nativeProtectionReconciliation.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
-import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
 
 const ENTRY_ORDER_LINK_ID = "abi-ep-entry-1";
 const CATEGORY = "linear" as const;
@@ -91,14 +90,11 @@ function desired(overrides: Partial<{ stopTriggerPrice: string; takeTriggerPrice
 }
 
 async function reconcile(bybit: FakeBybitAdapter, desiredState: DesiredProtectionState) {
-  const tradingRules = new FakeInstrumentTradingRulesProvider();
   return reconcileNativePartialProtection({
     bybit,
-    tradingRules,
     category: CATEGORY,
     symbol: SYMBOL,
     entryOrderLinkId: ENTRY_ORDER_LINK_ID,
-    side: "long",
     desired: desiredState,
   });
 }
@@ -128,6 +124,16 @@ test("result is tick-aligned per the provided tickSize", () => {
   const result = computeSurrogateTakePrice({ plannedEntryPrice: "100000.33", side: "long", tickSize: "0.5" });
   // 100000.33 * 1.5 = 150000.495 -> ceil to 0.5 tick -> 150000.5
   assert.equal(result, "150000.5");
+});
+
+test("an exponent-form plannedEntryPrice (transport-legal exact-decimal syntax) computes correctly, exact — not through binary float", () => {
+  // 1e3 == 1000, a syntactically valid exact-decimal string per the same
+  // grammar this transport already accepts (isExactDecimalText).
+  const longResult = computeSurrogateTakePrice({ plannedEntryPrice: "1e3", side: "long", tickSize: "0.5" });
+  assert.equal(longResult, "1500");
+
+  const shortResult = computeSurrogateTakePrice({ plannedEntryPrice: "1e3", side: "short", tickSize: "0.5" });
+  assert.equal(shortResult, "500");
 });
 
 test("long rounds away from reference (up), short rounds away from reference (down) — not accidentally symmetric", () => {
@@ -438,4 +444,52 @@ test("9.9 reconciling one cycle's own pair never touches another cycle's orderId
   assert.deepEqual(result, { kind: "reconciled" });
   assert.equal(bybit.amendOrderCalls.length, 1);
   assert.equal(bybit.amendOrderCalls[0].orderId, "stop-1");
+});
+
+// ---- Finding #1: terminal attributed protection is never active coverage ----
+
+test("initial Deactivated pair whose triggerPrice/qty exactly match desired MUST NOT return already_satisfied", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit, { stop: { orderStatus: "Deactivated" } });
+
+  const result = await reconcile(bybit, desired());
+
+  assert.notEqual(result.kind, "already_satisfied");
+  assert.deepEqual(result, { kind: "fail_closed", reason: "amend_race" });
+  // No create/cancel/replacement, and no amend either — matching values on
+  // a terminal leg gives the write-plan nothing to change.
+  assert.equal(bybit.amendOrderCalls.length, 0);
+});
+
+test("post-amend terminal pair whose triggerPrice/qty exactly match desired MUST NOT return reconciled", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit);
+  const originalGetActiveOrders = bybit.getActiveOrders.bind(bybit);
+  let callCount = 0;
+  bybit.getActiveOrders = async (queryInput) => {
+    callCount += 1;
+    if (callCount >= 2) {
+      // The amend itself applied the intended new triggerPrice, but the
+      // amended STOP leg also independently transitioned to terminal in
+      // the same window — values match desired exactly, but this is not
+      // live coverage.
+      return realtimeList([
+        childRow({ orderId: "stop-1", stopOrderType: "PartialStopLoss", orderStatus: "Deactivated", triggerPrice: "98000", qty: "0.004" }),
+        childRow({
+          orderId: "take-1",
+          stopOrderType: "PartialTakeProfit",
+          createType: "CreateByPartialTakeProfit",
+          triggerPrice: "103000",
+          qty: "0.004",
+        }),
+      ]);
+    }
+    return originalGetActiveOrders(queryInput);
+  };
+  bybit.orderHistoryForSymbolResponse = historyList([]);
+
+  const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000" }));
+
+  assert.notEqual(result.kind, "reconciled");
+  assert.deepEqual(result, { kind: "fail_closed", reason: "amend_race" });
 });

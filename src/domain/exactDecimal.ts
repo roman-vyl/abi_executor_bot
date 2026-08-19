@@ -71,6 +71,14 @@ function formatScaled(unscaled: bigint, scale: number): string {
   return fractionPart === "" ? `${sign}${integerPart}` : `${sign}${integerPart}.${fractionPart}`;
 }
 
+// Exact-decimal multiplication, computed with integer arithmetic — no
+// intermediate binary-float multiplication for either operand.
+export function multiplyDecimal(aText: string, bText: string): string {
+  const a = parseDecimal(aText);
+  const b = parseDecimal(bText);
+  return formatScaled(a.unscaled * b.unscaled, a.scale + b.scale);
+}
+
 // ceil((numerator / denominator) / step) * step, computed exactly with
 // integer arithmetic (no intermediate binary-float division).
 export function ceilRatioToStep(numeratorText: string, denominatorText: string, stepText: string): string {
