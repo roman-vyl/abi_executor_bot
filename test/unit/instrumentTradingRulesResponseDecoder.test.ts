@@ -15,10 +15,20 @@ function lotSizeFilter(overrides: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+function priceFilter(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    tickSize: "0.5",
+    minPrice: "0.5",
+    maxPrice: "1999999.98",
+    ...overrides,
+  };
+}
+
 function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     symbol: "BTCUSDT",
     lotSizeFilter: lotSizeFilter(),
+    priceFilter: priceFilter(),
     ...overrides,
   };
 }
@@ -42,7 +52,14 @@ test("a single matching linear row decodes success", () => {
   const decoded = decodeInstrumentTradingRulesResponse({ response: response([row()]), expected });
   assert.deepEqual(decoded, {
     ok: true,
-    rules: { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" },
+    rules: {
+      minOrderQty: "0.001",
+      qtyStep: "0.001",
+      minNotionalValue: "5",
+      tickSize: "0.5",
+      minPrice: "0.5",
+      maxPrice: "1999999.98",
+    },
   });
 });
 
@@ -53,8 +70,68 @@ test("minNotionalValue of exactly 0 decodes success", () => {
   });
   assert.deepEqual(decoded, {
     ok: true,
-    rules: { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "0" },
+    rules: {
+      minOrderQty: "0.001",
+      qtyStep: "0.001",
+      minNotionalValue: "0",
+      tickSize: "0.5",
+      minPrice: "0.5",
+      maxPrice: "1999999.98",
+    },
   });
+});
+
+test("a missing priceFilter fails with missing_price_filter", () => {
+  assertFailure({ response: response([row({ priceFilter: undefined })]) }, "missing_price_filter");
+});
+
+test("a non-object priceFilter fails with missing_price_filter", () => {
+  assertFailure({ response: response([row({ priceFilter: "nope" })]) }, "missing_price_filter");
+});
+
+test("a malformed/negative/zero tickSize fails with invalid_tick_size", () => {
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "0" }) })]) },
+    "invalid_tick_size",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "-0.5" }) })]) },
+    "invalid_tick_size",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ tickSize: "abc" }) })]) },
+    "invalid_tick_size",
+  );
+});
+
+test("a malformed/negative minPrice fails with invalid_min_price", () => {
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ minPrice: "-1" }) })]) },
+    "invalid_min_price",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ minPrice: "abc" }) })]) },
+    "invalid_min_price",
+  );
+});
+
+test("a malformed/negative maxPrice, or minPrice >= maxPrice, fails with invalid_max_price", () => {
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ maxPrice: "-1" }) })]) },
+    "invalid_max_price",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ maxPrice: "abc" }) })]) },
+    "invalid_max_price",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ minPrice: "100", maxPrice: "100" }) })]) },
+    "invalid_max_price",
+  );
+  assertFailure(
+    { response: response([row({ priceFilter: priceFilter({ minPrice: "100", maxPrice: "50" }) })]) },
+    "invalid_max_price",
+  );
 });
 
 test("an empty list fails with wrong_row_count", () => {

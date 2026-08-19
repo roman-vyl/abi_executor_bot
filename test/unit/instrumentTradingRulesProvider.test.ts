@@ -14,6 +14,7 @@ function validResponse(overrides: Record<string, unknown> = {}): unknown {
         {
           symbol: "BTCUSDT",
           lotSizeFilter: { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", ...overrides },
+          priceFilter: { tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" },
         },
       ],
     },
@@ -32,7 +33,7 @@ test("a valid response is cached and a repeat call within TTL does not call Bybi
   const first = await provider.getRules("BTCUSDT", "linear");
   const second = await provider.getRules("BTCUSDT", "linear");
 
-  assert.deepEqual(first, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
+  assert.deepEqual(first, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" });
   assert.deepEqual(second, first);
   assert.equal(bybit.getInstrumentInfoCalls.length, 1);
 });
@@ -56,7 +57,7 @@ test("after a failed call, the next call for the same category:symbol calls Bybi
   bybit.instrumentInfoResponse = validResponse();
   const rules = await provider.getRules("BTCUSDT", "linear");
 
-  assert.deepEqual(rules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
+  assert.deepEqual(rules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" });
   assert.equal(bybit.getInstrumentInfoCalls.length, 2);
 });
 
@@ -76,7 +77,7 @@ test("two different category:symbol pairs cache independently", async () => {
   bybit.instrumentInfoResponse = validResponse();
   const cachedBtc = await provider.getRules("BTCUSDT", "linear");
 
-  assert.deepEqual(cachedBtc, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
+  assert.deepEqual(cachedBtc, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" });
   // BTCUSDT was cached by the first successful call, so the third call here
   // is served from cache; only the BTCUSDT and ETHUSDT lookups hit Bybit.
   assert.equal(bybit.getInstrumentInfoCalls.length, 2);
@@ -91,7 +92,7 @@ test("an out-of-range exponent is not cached and getRules throws rather than ret
 
   bybit.instrumentInfoResponse = validResponse();
   const rules = await provider.getRules("BTCUSDT", "linear");
-  assert.deepEqual(rules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
+  assert.deepEqual(rules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" });
   assert.equal(bybit.getInstrumentInfoCalls.length, 2);
 });
 
@@ -104,5 +105,5 @@ test("getRules for spot throws without calling Bybit or caching anything", async
   assert.equal(bybit.getInstrumentInfoCalls.length, 0);
 
   const linearRules = await provider.getRules("BTCUSDT", "linear");
-  assert.deepEqual(linearRules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5" });
+  assert.deepEqual(linearRules, { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5", minPrice: "0.5", maxPrice: "1999999.98" });
 });

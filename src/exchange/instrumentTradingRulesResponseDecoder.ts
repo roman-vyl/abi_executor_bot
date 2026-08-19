@@ -4,6 +4,9 @@ export type InstrumentTradingRules = {
   minOrderQty: string;
   qtyStep: string;
   minNotionalValue: string;
+  tickSize: string;
+  minPrice: string;
+  maxPrice: string;
 };
 
 export type InstrumentTradingRulesFailureReason =
@@ -17,7 +20,11 @@ export type InstrumentTradingRulesFailureReason =
   | "missing_lot_size_filter"
   | "invalid_min_order_qty"
   | "invalid_qty_step"
-  | "invalid_min_notional_value";
+  | "invalid_min_notional_value"
+  | "missing_price_filter"
+  | "invalid_tick_size"
+  | "invalid_min_price"
+  | "invalid_max_price";
 
 export type DecodedInstrumentTradingRules =
   | { ok: true; rules: InstrumentTradingRules }
@@ -100,7 +107,29 @@ export function decodeInstrumentTradingRulesResponse(input: {
     return { ok: false, reason: "invalid_min_notional_value" };
   }
 
-  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue } };
+  const priceFilter = record.priceFilter;
+  if (typeof priceFilter !== "object" || priceFilter === null) {
+    return { ok: false, reason: "missing_price_filter" };
+  }
+
+  const priceFilterRecord = priceFilter as Record<string, unknown>;
+
+  const tickSize = priceFilterRecord.tickSize;
+  if (typeof tickSize !== "string" || !isStrictlyPositive(tickSize)) {
+    return { ok: false, reason: "invalid_tick_size" };
+  }
+
+  const minPrice = priceFilterRecord.minPrice;
+  if (typeof minPrice !== "string" || !isNonNegative(minPrice)) {
+    return { ok: false, reason: "invalid_min_price" };
+  }
+
+  const maxPrice = priceFilterRecord.maxPrice;
+  if (typeof maxPrice !== "string" || !isNonNegative(maxPrice) || !isGreaterThan(maxPrice, minPrice)) {
+    return { ok: false, reason: "invalid_max_price" };
+  }
+
+  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue, tickSize, minPrice, maxPrice } };
 }
 
 function isStrictlyPositive(text: string): boolean {
@@ -114,6 +143,14 @@ function isStrictlyPositive(text: string): boolean {
 function isNonNegative(text: string): boolean {
   try {
     return compareDecimal(text, "0") >= 0;
+  } catch {
+    return false;
+  }
+}
+
+function isGreaterThan(text: string, otherText: string): boolean {
+  try {
+    return compareDecimal(text, otherText) > 0;
   } catch {
     return false;
   }

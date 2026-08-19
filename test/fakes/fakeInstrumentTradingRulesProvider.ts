@@ -12,6 +12,9 @@ export class FakeInstrumentTradingRulesProvider implements InstrumentTradingRule
     minOrderQty: "0.001",
     qtyStep: "0.001",
     minNotionalValue: "5",
+    tickSize: "0.5",
+    minPrice: "0.5",
+    maxPrice: "1999999.98",
   };
   failure: Error | undefined;
 

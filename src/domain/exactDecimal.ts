@@ -52,6 +52,10 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
   return (numerator + denominator - 1n) / denominator;
 }
 
+function floorDiv(numerator: bigint, denominator: bigint): bigint {
+  return numerator / denominator;
+}
+
 function formatScaled(unscaled: bigint, scale: number): string {
   const negative = unscaled < 0n;
   const abs = negative ? -unscaled : unscaled;
@@ -84,6 +88,22 @@ export function ceilRatioToStep(numeratorText: string, denominatorText: string, 
 // ceil(value / step) * step
 export function ceilToStep(valueText: string, stepText: string): string {
   return ceilRatioToStep(valueText, "1", stepText);
+}
+
+// floor(value / step) * step, computed exactly with integer arithmetic —
+// same shape as ceilToStep, opposite rounding direction along the step
+// grid (toward zero for a positive value, rather than away from it).
+// An exact multiple of step is returned unchanged, matching ceilToStep.
+export function floorToStep(valueText: string, stepText: string): string {
+  const value = parseDecimal(valueText);
+  const step = parseDecimal(stepText);
+
+  const scale = Math.max(value.scale, step.scale);
+  const scaledValue = value.unscaled * pow10(scale - value.scale);
+  const scaledStep = step.unscaled * pow10(scale - step.scale);
+
+  const steps = floorDiv(scaledValue, scaledStep);
+  return formatScaled(steps * step.unscaled, step.scale);
 }
 
 export function maxDecimal(a: string, b: string): string {
