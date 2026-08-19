@@ -1,6 +1,5 @@
-import { ceilToStep, compareDecimal, floorToStep } from "../../domain/exactDecimal.js";
+import { ceilToStep, compareDecimal, floorToStep, multiplyDecimal } from "../../domain/exactDecimal.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
-import type { InstrumentTradingRulesProvider } from "../../exchange/instrumentTradingRulesProvider.js";
 import { FILLED_STATUSES, TERMINAL_WITHOUT_FILL_STATUSES } from "../entryPackage/packageConfirmation.js";
 import type { AttachedProtectionLeg } from "./nativeProtectionAttribution.js";
 import { resolveOwnAttachedProtection } from "./nativeProtectionAttribution.js";
@@ -13,6 +12,13 @@ import { resolveOwnAttachedProtection } from "./nativeProtectionAttribution.js";
 // exists for this V1 — validity is enforced only by Bybit's own amend-time
 // acceptance or rejection (Decision 7's amend_rejected path).
 export const SURROGATE_TAKE_DISTANCE_RATIO = 0.5;
+
+// Exact-decimal-text multipliers derived from SURROGATE_TAKE_DISTANCE_RATIO
+// (1 + ratio for long, 1 - ratio for short) — kept as literal exact-decimal
+// strings, not computed from the numeric constant above, so the multiply
+// itself never passes through binary floating point.
+const LONG_SURROGATE_MULTIPLIER = "1.5";
+const SHORT_SURROGATE_MULTIPLIER = "0.5";
 
 export type DesiredProtectionLeg = {
   triggerPrice: string;
@@ -40,7 +46,8 @@ export type ReconciliationFailureReason =
   // already-resolved DesiredProtectionState. Widened onto this same union
   // so ProtectionApplicationService.reconcileNativePartial() has exactly
   // one failure vocabulary to report through, rather than a parallel one.
-  | "no_authoritative_qty"; // resolveCurrentOwnFilledQty could not obtain any own fill evidence
+  | "no_authoritative_qty" // resolveCurrentOwnFilledQty could not obtain any own fill evidence
+  | "trading_rules_unavailable"; // InstrumentTradingRulesProvider.getRules() threw on the null-take path
 
 // Deterministic surrogate TAKE price for a trade cycle whose desired
 // take_price is null (design.md Decision 5, task 0 evidence folded in):
@@ -62,56 +69,10 @@ export function computeSurrogateTakePrice(input: {
 
   const raw =
     side === "long"
-      ? multiplyByRatio(plannedEntryPrice, 1 + SURROGATE_TAKE_DISTANCE_RATIO)
-      : multiplyByRatio(plannedEntryPrice, 1 - SURROGATE_TAKE_DISTANCE_RATIO);
+      ? multiplyDecimal(plannedEntryPrice, LONG_SURROGATE_MULTIPLIER)
+      : multiplyDecimal(plannedEntryPrice, SHORT_SURROGATE_MULTIPLIER);
 
   return side === "long" ? ceilToStep(raw, tickSize) : floorToStep(raw, tickSize);
-}
-
-// Multiplies an exact-decimal-text price by a fixed-precision ratio without
-// going through binary floating point for the exact-decimal operand — the
-// ratio itself (a fixed program constant, not exchange or user input) is
-// converted through Number, which is exact for the two-decimal-digit ratios
-// this module uses (1.5 and 0.5).
-function multiplyByRatio(valueText: string, ratio: number): string {
-  const ratioText = ratio.toFixed(4);
-  const [ratioInt, ratioFrac = ""] = ratioText.split(".");
-  const ratioUnscaled = BigInt(ratioInt + ratioFrac);
-  const ratioScale = ratioFrac.length;
-
-  const parsed = parseForMultiply(valueText);
-  const productUnscaled = parsed.unscaled * ratioUnscaled;
-  const productScale = parsed.scale + ratioScale;
-
-  return formatForMultiply(productUnscaled, productScale);
-}
-
-// Minimal local exact-decimal parse/format, mirroring exactDecimal.ts's own
-// internal shape closely enough for this module's narrow multiply need,
-// without reaching into that file's non-exported internals.
-function parseForMultiply(text: string): { unscaled: bigint; scale: number } {
-  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(text);
-  if (match === null) {
-    throw new Error(`not a supported exact-decimal string for multiply: ${text}`);
-  }
-  const negative = match[1] === "-";
-  const integerPart = match[2] ?? "";
-  const fractionPart = match[3] ?? "";
-  const unscaled = BigInt((integerPart || "0") + fractionPart);
-  return { unscaled: negative ? -unscaled : unscaled, scale: fractionPart.length };
-}
-
-function formatForMultiply(unscaled: bigint, scale: number): string {
-  const negative = unscaled < 0n;
-  const abs = negative ? -unscaled : unscaled;
-  const sign = negative ? "-" : "";
-  if (scale === 0) {
-    return `${sign}${abs.toString()}`;
-  }
-  const digits = abs.toString().padStart(scale + 1, "0");
-  const integerPart = digits.slice(0, digits.length - scale);
-  const fractionPart = digits.slice(digits.length - scale);
-  return `${sign}${integerPart}.${fractionPart}`;
 }
 
 type WritePlanCall = { role: "stop" | "take"; orderId: string; triggerPrice?: string; qty?: string };
@@ -164,16 +125,12 @@ function matchesDesired(actual: { stop: AttachedProtectionLeg; take: AttachedPro
 // reconcileNativePartial(), the only intended future caller.
 export async function reconcileNativePartialProtection(input: {
   bybit: BybitAdapter;
-  tradingRules: InstrumentTradingRulesProvider;
   category: "linear" | "spot";
   symbol: string;
   entryOrderLinkId: string;
-  side: "long" | "short";
   desired: DesiredProtectionState;
 }): Promise<ReconciliationOutcome> {
   const { bybit, category, symbol, entryOrderLinkId, desired } = input;
-  void input.tradingRules;
-  void input.side;
 
   const initial = await resolveOwnAttachedProtection({ bybit, category, symbol, entryOrderLinkId });
 
@@ -184,8 +141,16 @@ export async function reconcileNativePartialProtection(input: {
     return { kind: "fail_closed", reason: "ambiguous_attribution" };
   }
 
-  // initial.kind === "attributed"
-  if (matchesDesired(initial, desired)) {
+  // initial.kind === "attributed" — resolveOwnAttachedProtection() is
+  // status-agnostic (a terminal historical pair still classifies
+  // "attributed"), so a terminal leg must never be read as active,
+  // satisfied coverage here even when its stale triggerPrice/qty happen to
+  // numerically match desired — that pair is not live protection. Skipping
+  // the shortcut lets the normal write-plan/read-back path run instead,
+  // which independently detects this exact situation on its own fresh
+  // read-back (see the terminal check below) and fails closed rather than
+  // ever reporting either already_satisfied or reconciled for it.
+  if (matchesDesired(initial, desired) && !hasTerminalLeg(initial)) {
     return { kind: "already_satisfied" };
   }
 
@@ -225,13 +190,27 @@ export async function reconcileNativePartialProtection(input: {
     // now independently reports a terminal orderStatus that step 1 did
     // not — the amend raced that leg's own lifecycle transition, rather
     // than being cleanly rejected or simply producing wrong values.
-    if (isTerminalOrderStatus(readBack.stop.orderStatus) || isTerminalOrderStatus(readBack.take.orderStatus)) {
+    if (hasTerminalLeg(readBack)) {
       return { kind: "fail_closed", reason: "amend_race" };
     }
     return { kind: "fail_closed", reason: "read_back_mismatch" };
   }
 
+  // triggerPrice/qty numerically matching desired is not sufficient — a
+  // leg that independently transitioned to terminal in the same window is
+  // not live coverage, even when its last-known values happen to match
+  // (finding #1). Same amend_race reason as the mismatch case above: this
+  // is still the amend racing that leg's own lifecycle transition, just
+  // one where the stale values happened to coincide with desired.
+  if (hasTerminalLeg(readBack)) {
+    return { kind: "fail_closed", reason: "amend_race" };
+  }
+
   return { kind: "reconciled" };
+}
+
+function hasTerminalLeg(pair: { stop: AttachedProtectionLeg; take: AttachedProtectionLeg }): boolean {
+  return isTerminalOrderStatus(pair.stop.orderStatus) || isTerminalOrderStatus(pair.take.orderStatus);
 }
 
 function isTerminalOrderStatus(orderStatus: string): boolean {

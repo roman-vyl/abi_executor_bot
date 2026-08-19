@@ -26,8 +26,9 @@ client's desired take is disabled, ABI SHALL compute a deterministic surrogate t
 that trade cycle's own immutable planned entry price — a reference fixed once for the life of the trade
 cycle's current generation and never affected by any later partial fill — placed on the side of that
 price consistent with the trade cycle's own direction, and SHALL NOT derive it from current market price.
-This requirement does not assert that the resulting price is proven valid against any particular
-exchange price-bound mechanism; that determination is a separate, evidence-gated concern.
+This requirement does not assert that the resulting price is proven valid against any particular exchange
+price-bound mechanism — validity is established only by the exchange's own acceptance or rejection of the
+amend that carries it.
 
 #### Scenario: A disabled take reconciles to a surrogate, not a missing leg
 - **WHEN** a trade cycle's desired protection state has its take disabled
@@ -105,13 +106,45 @@ or silently retry past any such outcome within a single reconciliation attempt.
 - **THEN** ABI fails the reconciliation attempt closed
 - **AND** ABI does not report the reconciliation successful
 
+### Requirement: A terminal leg is never read as active, satisfied protection coverage
+ABI SHALL NOT treat a trade cycle's attributable protection leg as active, satisfied coverage when that
+leg's own order status is terminal, even when its last-known trigger price and quantity numerically match
+the desired protection state. This applies both before ABI decides whether any amend is needed, and after
+ABI has amended and freshly re-observed the trade cycle's attributable protection state.
+
+#### Scenario: A terminal leg matching desired values does not short-circuit as already satisfied
+- **WHEN** ABI resolves a trade cycle's attributable protection state before planning a reconciliation, and
+  a leg's order status is terminal even though that leg's trigger price and quantity already numerically
+  match the desired protection state
+- **THEN** ABI does not report the reconciliation attempt satisfied on the strength of that terminal leg
+- **AND** ABI does not create, cancel, or otherwise replace that leg to work around it
+
+#### Scenario: A terminal leg matching desired values after amend does not count as reconciled
+- **WHEN** ABI's post-amend, freshly resolved observation shows a leg whose order status is terminal, even
+  though that leg's trigger price and quantity match the desired protection state
+- **THEN** ABI does not report the reconciliation attempt successful
+- **AND** ABI does not create, cancel, or otherwise replace that leg to work around it
+
 ### Requirement: An already-satisfied protection state requires no write
 ABI SHALL report a reconciliation attempt as satisfied without sending any amend request when a freshly
 resolved observation of the trade cycle's attributable protection state already matches its desired
-state exactly.
+state exactly on both legs, and neither leg's order status is terminal.
 
 #### Scenario: A matching observed state short-circuits without a write
 - **WHEN** a freshly resolved observation of a trade cycle's attributable protection state already
-  matches its desired state on both legs
+  matches its desired state on both legs, and neither leg's order status is terminal
 - **THEN** ABI reports the reconciliation attempt satisfied
 - **AND** ABI does not send any amend request
+
+### Requirement: A trading-rules dependency failure on the disabled-take path fails the reconciliation closed, not the caller's Promise
+When the client's desired take is disabled, ABI SHALL resolve instrument trading rules to compute the
+surrogate take-profit price, and SHALL fail the reconciliation attempt closed — reported as a typed
+outcome, not a thrown exception or a rejected Promise — when that resolution fails.
+
+#### Scenario: A trading-rules failure resolves to a typed fail-closed outcome
+- **WHEN** ABI cannot resolve instrument trading rules while reconciling a trade cycle whose desired take
+  is disabled
+- **THEN** ABI reports the reconciliation attempt failed closed as an ordinary typed outcome
+- **AND** ABI does not throw an exception or leave the caller's request unresolved
+- **AND** ABI does not resolve the trade cycle's attributable protection state or send any amend request
+  for this attempt

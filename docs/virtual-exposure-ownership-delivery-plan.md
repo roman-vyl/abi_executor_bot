@@ -634,6 +634,26 @@
 > Остальная reconciliation-модель Change 7 (amend-only, own cumulative qty, fresh read-back, fail-closed
 > discipline, Change 8 как единственная activation) не меняется.
 
+> **Ревизия v19 — task 0 закрыт на Bybit Demo; Change 7 не consumes `order-price-limits` capability.**
+> Change 7's design-фаза (§ ревизия v18) выполнила bounded Demo evidence check (linear `ETHUSDT`):
+> amend native Partial TP-ноги `triggerPrice` на значение, на 50% превышающее `buyLimit` из свежего
+> `CurrentOrderPriceLimitsProvider.getCurrent()` snapshot, был принят биржей (`retCode: 0`) идентично
+> amend'у в обычном диапазоне, и fresh read-back подтвердил фактическое применение значения. **Точная
+> формулировка результата:** task 0 не установил `/v5/market/price-limit` как ту far-side boundary,
+> которую требует surrogate-политика — а не "доказал, что price-limit никогда ни при каких
+> обстоятельствах не может ограничивать любой TP triggerPrice". Поэтому Change 7 эту capability не
+> использует вовсе — ни как clamp-источник, ни как availability-gate.
+>
+> **Итоговая surrogate-формула.** `desired_entry.planned_entry_price × (1 ± 0.5)` (`SURROGATE_TAKE_DISTANCE_RATIO
+> = 0.5`, exact-decimal arithmetic, никакого binary float), tick-normalized через `ceilToStep`/`floorToStep`
+> в сторону от reference. Никакого clamp-шага. Единственный actual write gate — собственное acceptance/
+> rejection amend'а биржей (`amend_rejected` fail-closed путь, уже существующий в design Decision 7).
+>
+> **Что не меняется этой ревизией.** `abi-current-order-price-limits-v1` (Change "6.5" по факту
+> реализации/архивации) остаётся canonical, самостоятельной, полностью реализованной capability — эта
+> ревизия не удаляет и не архивирует её заново, она лишь фиксирует, что Change 7 конкретно её не
+> потребляет. Остальная reconciliation-модель Change 7 не меняется.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope

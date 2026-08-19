@@ -767,6 +767,25 @@ test("reconcileNativePartial: no fill evidence obtainable at all fails closed wi
   });
 });
 
+test("reconcileNativePartial: a trading rules provider failure on the null-take path fails closed with trading_rules_unavailable — no thrown/rejected Promise, zero attribution reads, zero amend writes", async () => {
+  await withService(async ({ service, bybit, repo, tradingRules }) => {
+    tradingRules.failure = new Error("transport failure");
+    await repo.save(makeRecord());
+    const originalGetActiveOrders = bybit.getActiveOrders.bind(bybit);
+    let attributionReadCount = 0;
+    bybit.getActiveOrders = async (queryInput) => {
+      attributionReadCount += 1;
+      return originalGetActiveOrders(queryInput);
+    };
+
+    const result = await service.reconcileNativePartial(makeCommand({ takePrice: null }));
+
+    assert.deepEqual(result, { kind: "fail_closed", reason: "trading_rules_unavailable" });
+    assert.equal(attributionReadCount, 0);
+    assert.equal(bybit.amendOrderCalls.length, 0);
+  });
+});
+
 test("reconcileNativePartial: final fill facts + take_price: null computes a surrogate desired state and reconciles it", async () => {
   await withService(async ({ service, bybit, repo, tradingRules }) => {
     tradingRules.defaultRules = { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5" };

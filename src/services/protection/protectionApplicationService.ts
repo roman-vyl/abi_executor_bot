@@ -113,11 +113,9 @@ export class ProtectionApplicationService {
 
     return reconcileNativePartialProtection({
       bybit: this.deps.bybit,
-      tradingRules,
       category,
       symbol: record.exchange_symbol,
       entryOrderLinkId: record.order_link_id,
-      side: record.desired_entry.side,
       desired: desiredResult.desired,
     });
   }
@@ -332,7 +330,7 @@ export async function resolveCurrentOwnFilledQty(input: {
   return { ok: false, reason: "no_authoritative_qty" };
 }
 
-export type DesiredProtectionStateResolutionFailure = "no_authoritative_qty";
+export type DesiredProtectionStateResolutionFailure = "no_authoritative_qty" | "trading_rules_unavailable";
 
 // Resolves a ProtectionCommand plus this cycle's own correlation record into
 // a full DesiredProtectionState (design.md Decision 4/5): qty from
@@ -367,7 +365,17 @@ export async function resolveDesiredProtectionState(input: {
   if (command.takePrice !== null) {
     takeTriggerPrice = command.takePrice;
   } else {
-    const rules = await tradingRules.getRules(record.exchange_symbol, category);
+    // getRules() throws on a transport/decode failure (see
+    // BybitInstrumentTradingRulesProvider) — this is an ordinary reconciler
+    // dependency failure, not a bug, so it must resolve to a typed
+    // fail-closed outcome rather than reject reconcileNativePartial()'s
+    // returned Promise.
+    let rules: Awaited<ReturnType<InstrumentTradingRulesProvider["getRules"]>>;
+    try {
+      rules = await tradingRules.getRules(record.exchange_symbol, category);
+    } catch {
+      return { ok: false, reason: "trading_rules_unavailable" };
+    }
     takeTriggerPrice = computeSurrogateTakePrice({
       plannedEntryPrice: record.desired_entry.planned_entry_price,
       side: record.desired_entry.side,

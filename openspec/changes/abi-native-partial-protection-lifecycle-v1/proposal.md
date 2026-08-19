@@ -41,10 +41,10 @@ logic and already-established own-order data, not on unverified exchange behavio
 (multi-fill representability) resolves to "no special-casing needed" — the reconciler's existing
 fail-closed behavior on anything other than `none`/`attributed` already covers it.
 
-**The surrogate TAKE distance is deliberately NOT answered by this proposal — it is evidence-gated.** An
+**The surrogate TAKE distance's exchange-validity claim is retracted; the formula itself is fixed.** An
 earlier version of this proposal computed a candidate from `planned_entry_price` and a fixed ratio, then
 clamped it into `InstrumentTradingRules`' static `minPrice`/`maxPrice` price-filter bounds, and called the
-result "exchange-valid by construction." That claim is retracted: no version of this proposal has ever
+result "exchange-valid by construction." That claim was retracted: no version of this proposal ever
 established that any current-price-band concept — static instrument bounds, or the dynamic `buyLimit`/
 `sellLimit` current order-price limits Bybit exposes via `/v5/market/price-limit` — is actually the
 applicable validity bound for a native Partial **TP `triggerPrice` amend** specifically, as opposed to
@@ -52,11 +52,14 @@ ordinary order placement. `tasks.md` task 0 closed this question against Bybit D
 in design.md Decision 5): amending a native Partial TP child's `triggerPrice` to a value 1.5× beyond the
 already-implemented and archived `abi-current-order-price-limits-v1`'s (`CurrentOrderPriceLimitsProvider`,
 archive commit `6ec349fcd02e0b908020a5eb74881cb79b6b949f`, canonical capability
-`openspec/specs/order-price-limits/spec.md`) `buyLimit` was accepted identically to a normal-range amend —
-that capability's current order-price band does **not** constrain this amend, so this proposal does not
-consume it. `take_price = null → dormant surrogate TAKE` remains this program's accepted architectural
-decision; the concrete formula (Decision 5) is a deterministic, tick-normalized offset from
-`planned_entry_price` with no exchange-bound clamp — validity is enforced only by Bybit's own amend-time
+`openspec/specs/order-price-limits/spec.md`) `buyLimit` was accepted identically to a normal-range amend.
+Task 0 did not establish that capability's current order-price band as the far-side boundary a clamping
+surrogate policy would need — not a claim that it can never constrain any TP `triggerPrice` amend under
+any circumstance, just that the one mapping this proposal considered is not supported by the evidence
+obtained — so this proposal does not consume it. `take_price = null → dormant surrogate TAKE` remains this
+program's accepted architectural decision; the concrete formula (Decision 5) is a deterministic,
+tick-normalized offset from `planned_entry_price` with no exchange-bound clamp — validity is enforced only
+by Bybit's own amend-time
 acceptance or rejection.
 
 **OCO-after-amend remains `NOT PROVEN`** — neither spike checked whether Bybit atomically neutralizes a
@@ -123,11 +126,10 @@ already means.
 - Prerequisite relationship: this is the foundation `abi-native-partial-protection-cutover-v1` activates.
   Neither the mapping cutover, the admission-guard removal, nor the
   `shared_scope_protection_unsupported` removal happens in this change.
-- Remaining preconditions before this change's own design is complete, not deferred to
-  `abi-native-partial-protection-cutover-v1`: `tasks.md` task 0 — "Are Bybit current order-price limits
-  applicable to native Partial TP triggerPrice, and if so, which limit maps to which protection
-  direction?" — must close and be folded back into design.md Decision 5 before the surrogate-price
-  formula (task 4) is designed or implemented. Separately, and remaining a precondition for
-  `abi-native-partial-protection-cutover-v1`: OCO-after-amend stays `NOT PROVEN`. Even once task 0
-  closes, a possible *dynamic*, mark-price-relative deviation guard beyond whatever bound the eventual
-  formula uses is an accepted residual gap, stated explicitly in design.md's Risks section, not hidden.
+- `tasks.md` task 0 is closed: task 0's Bybit Demo evidence did not establish `/v5/market/price-limit` as
+  the far-side boundary surrogate policy would need, so the surrogate formula (design.md Decision 5) does
+  not consume `CurrentOrderPriceLimitsProvider` at all — it is a deterministic, tick-normalized offset
+  from `planned_entry_price` with no clamp step. The only remaining precondition, unchanged and specific
+  to `abi-native-partial-protection-cutover-v1`: OCO-after-amend stays `NOT PROVEN`. A possible *dynamic*,
+  mark-price-relative deviation guard beyond ordinary amend acceptance/rejection is an accepted residual
+  gap, stated explicitly in design.md's Risks section, not hidden.

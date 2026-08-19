@@ -237,3 +237,19 @@ test("a fail-closed qty resolution propagates through resolveDesiredProtectionSt
   assert.deepEqual(result, { ok: false, reason: "no_authoritative_qty" });
   assert.equal(tradingRules.getRulesCalls.length, 0);
 });
+
+test("a trading rules provider failure on the null-take path resolves to trading_rules_unavailable, not a thrown/rejected error", async () => {
+  const bybit = new FakeBybitAdapter();
+  const record = baseRecord({ early_execution_observation: finalObservation({ cumulative_filled_qty: "6" }) });
+  const tradingRules = new FakeInstrumentTradingRulesProvider();
+  tradingRules.failure = new Error("transport failure");
+
+  const result = await resolveDesiredProtectionState({
+    command: { strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", stopPrice: "98000", takePrice: null },
+    record,
+    bybit,
+    tradingRules,
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "trading_rules_unavailable" });
+});
