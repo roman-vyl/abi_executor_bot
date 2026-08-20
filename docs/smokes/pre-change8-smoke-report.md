@@ -55,8 +55,10 @@ and before Change 7's own work began.**
   rework/review-fix/archive commits on this branch are all dated `2026-08-19`. This is not a regression
   introduced by Changes 6/7 — it is a pre-existing condition the campaign's baseline check happened to
   surface.
-- **No exchange residue from the stuck cycles.** Both correlation records show `order_id: null` — neither
-  cycle ever reached Bybit. A read-only Demo query at the time of this report confirms:
+- **No current exchange residue from the stuck cycles.** Both correlation records show `order_id: null`.
+  That field alone does **not** prove that the ambiguous create never reached Bybit; see the forensic
+  appendix below for the required exact-`orderLinkId` lookup. A read-only Demo query at the time of this
+  report confirms:
   `ETHUSDT: 0 active orders, 0 open positions`; `BTCUSDT: 0 active orders, 0 open positions`. The blocker
   is a Runtime↔ABI state-machine/HTTP issue, not a live financial-exposure risk today — but it does mean
   the two currently-enabled strategies have not been able to open a new trade cycle in ~39 hours, and
@@ -123,3 +125,213 @@ modified. Demo residue check (this report, Phase A investigation only):
 |---------|---------------|-----------------|
 | ETHUSDT | 0             | 0               |
 | BTCUSDT | 0             | 0               |
+
+## Appendix A — forensic investigation of the two stuck CREATE cycles
+
+Investigation performed `2026-08-20` on branch `integration/change7-current-design`, baseline HEAD
+`d347323e3363556c34d31a594dbcb2c35c2e9598`. The exchange inspection used signed **GET-only** requests
+to Bybit Demo (`https://api-demo.bybit.com`) with the canonical local secret source. No secret,
+signature, or credential value was logged. No Bybit write endpoint was called.
+
+### A.1 Durable ABI correlation records
+
+The JSONL repository contains the provisional record followed by the transition to `unknown` for each
+cycle. Fields not shown below are unchanged between the two rows.
+
+#### ETHUSDT
+
+```json
+{
+  "strategy_instance_id": "ema_pullback:243bcad65efa36d995d0830c",
+  "trade_cycle_id": "c7fd0188-1731-4d80-9dc5-fcd57bc14d2e",
+  "order_link_id": "abi-ep-2ece167a9819694a6130",
+  "order_id": null,
+  "status": "unknown",
+  "pending_action": "create",
+  "desired_entry": {
+    "side": "long",
+    "source_plan_bar_open_time_ms": 1786977000000,
+    "planned_entry_price": "1900.6558506776273",
+    "initial_stop_price": "1859.3629935347699",
+    "initial_take_price": "1941.9487078204847",
+    "locked_exit_profile": "neutral"
+  },
+  "calculated_quantity": "0.01",
+  "exchange_symbol": "ETHUSDT",
+  "exchange_category": "linear",
+  "early_execution_observation": null,
+  "binding_history": [],
+  "created_at": "2026-08-17T14:36:25.795Z",
+  "updated_at": "2026-08-17T14:36:26.034Z"
+}
+```
+
+The preceding provisional row was created at the same `created_at`/`updated_at`
+`2026-08-17T14:36:25.795Z` with `status:"pending_create"`. Thus the durable identity existed before
+dispatch and the transition `pending_create → unknown` took 239 ms.
+
+#### BTCUSDT
+
+```json
+{
+  "strategy_instance_id": "ema_pullback:53a32ecec5d565b3ac58eec0",
+  "trade_cycle_id": "76d30c85-ed76-4748-a89a-fa69c2afd207",
+  "order_link_id": "abi-ep-6b7261720b19351d3ebb",
+  "order_id": null,
+  "status": "unknown",
+  "pending_action": "create",
+  "desired_entry": {
+    "side": "short",
+    "source_plan_bar_open_time_ms": 1787027700000,
+    "planned_entry_price": "64174.15110988302",
+    "initial_stop_price": "64676.65110988304",
+    "initial_take_price": "63671.65110988301",
+    "locked_exit_profile": "neutral"
+  },
+  "calculated_quantity": "0.001",
+  "exchange_symbol": "BTCUSDT",
+  "exchange_category": "linear",
+  "early_execution_observation": null,
+  "binding_history": [],
+  "created_at": "2026-08-18T04:41:38.828Z",
+  "updated_at": "2026-08-18T04:41:39.064Z"
+}
+```
+
+The preceding provisional row was created at the same `created_at`/`updated_at`
+`2026-08-18T04:41:38.828Z` with `status:"pending_create"`. The transition took 236 ms.
+
+### A.2 ABI request timeline and exact failure boundary
+
+| Stage | ETH | BTC |
+|---|---:|---:|
+| ABI operation start | `14:36:25.217Z` | `04:41:38.360Z` |
+| provisional durable save | `14:36:25.795Z` (+578 ms) | `04:41:38.828Z` (+468 ms) |
+| durable `unknown` save | `14:36:26.034Z` (+239 ms) | `04:41:39.064Z` (+236 ms) |
+| ABI operation failure / HTTP 500 | `14:36:26.036Z` (+819 ms total) | `04:41:39.065Z` (+705 ms total) |
+
+Current implementation saves `pending_create`, constructs the order payload, and invokes
+`bybit.createOrder()`. Its catch branch persists the same record as `status:"unknown"` and returns
+`internal_error`. Therefore the durable sequence proves that an exception escaped from the
+`createOrder` transport/response path before ABI could decode and persist `orderId`. No realtime or
+history confirmation call is reachable in that initial catch path, and none appears in the logs.
+
+The structured ABI log retained only the public boundary:
+
+```json
+{"event":"operation_failed","operation":"put_entry_package","outcome":"internal_error","duration_ms":819.031959}
+{"event":"operation_failed","operation":"put_entry_package","outcome":"internal_error","duration_ms":705.229125}
+```
+
+It did **not** retain the thrown message, stack, HTTP status, Bybit `retCode`, or response body. Searches
+in each T−10m/T+10m window found no timeout, rate-limit, transport, exception, or Bybit-response event.
+ABI's configured request timeout is 10,000 ms; a failure only 236–239 ms after dispatch does not look
+like expiry of that client timeout, but it does not distinguish an immediate transport failure, HTTP
+failure, or Bybit application rejection. The exact exception is no longer recoverable from these logs.
+
+`order_id:null` consequently means only “ABI did not persist a decoded acknowledgement”; it does not
+mean “the request did not reach Bybit.” The exact stored `order_link_id` inspection in A.4 is the
+exchange-side evidence required for the ambiguous write.
+
+### A.3 Runtime cause bar, request, and recovery transition
+
+The genuine closed bar that dispatched ETH had `openTime=1786977000000`; Runtime recorded
+`strategy_cycle_dispatch_failed` at `2026-08-17T14:36:26.037241Z` with
+`ABI entry-package public error: internal_error`. BTC was dispatched by the genuine bar
+`openTime=1787027700000` and failed at `2026-08-18T04:41:39.066116Z` with the same public error. The
+corresponding orchestration summaries were emitted at `.038599Z` and `.067859Z`, each with one attempted
+and one failed cycle. Runtime received ABI HTTP 500 in both cases; there is no Runtime-side request
+timeout evidence.
+
+Runtime does not log the request body. The following bodies are reconstructed from the durable ABI
+record and Runtime's deterministic bridge/codec, not quoted from a raw HTTP-body log:
+
+```json
+{"ticker":"ETHUSDT.P","desired_entry":{"side":"long","source_plan_bar_open_time_ms":1786977000000,"planned_entry_price":"1900.6558506776273","initial_stop_price":"1859.3629935347699","initial_take_price":"1941.9487078204847","locked_exit_profile":"neutral"},"risk_multiplier":"1"}
+{"ticker":"BTCUSDT.P","desired_entry":{"side":"short","source_plan_bar_open_time_ms":1787027700000,"planned_entry_price":"64174.15110988302","initial_stop_price":"64676.65110988304","initial_take_price":"63671.65110988301","locked_exit_profile":"neutral"},"risk_multiplier":"1"}
+```
+
+Runtime persists `pending_entry_recovery` immediately before calling ABI. That state save has no
+separate timestamped journal event, so its precise time cannot be recovered; it is bounded by ABI
+operation start and Runtime's dispatch-failure event. The first observed recovery calls started at
+`14:36:50.545Z` (ETH) and `04:41:46.441Z` (BTC), failing after 3379.760 ms and 2921.877 ms respectively.
+Subsequent recovery-state calls repeated continuously.
+
+### A.4 Read-only Bybit Demo history reconstruction
+
+Signed queries were scoped by category and symbol. For ETH the queried window was
+`2026-08-17T14:26:25.795Z`–`14:46:25.795Z`; for BTC it was
+`2026-08-18T04:31:38.828Z`–`04:51:38.828Z`. For **both** symbols:
+
+- `/v5/order/history` returned `[]` for the complete window;
+- `/v5/execution/list` returned `[]` for the complete window;
+- `/v5/position/closed-pnl` returned `[]` for the complete window;
+- a separate history lookup by the exact stored `orderLinkId` returned `[]`;
+- no order found in broader history had a lifecycle crossing the target timestamp.
+
+These are clean successful empty API responses, not a decoder/query ambiguity: the same broader queries
+returned 45 orders / 44 executions for ETH and 23 orders / 29 executions for BTC. In particular, all
+requested candidate classes — other `abi-*`, empty/different `orderLinkId`, manual/spike, TP/SL child,
+and reduce-only — are absent from both exact windows, so there are no per-order rows to enumerate there.
+
+Nearest prior exchange evidence:
+
+| Symbol | Time | orderId / orderLinkId | Order | Fill / position evidence |
+|---|---|---|---|---|
+| ETH | `2026-08-17T14:16:25.681Z` | `9167462a-4bfa-42da-9bbd-e1a5ad469ca5` / `""` | Sell Market, Filled, qty/cum `0.01`, reduceOnly `true`, `CreateByUser` | execution `45bb3b03-a223-4fc7-a9e2-ef558fb2db72`, closedSize `0.01`; closed-PnL says entry `1900.66`, exit `1902.76` |
+| ETH | `2026-08-17T14:03:02.847Z` fill | `282751e0-9bd9-41d3-8ce7-a77e12cd2190` / `abi-ep-d067a05d0c19c9fdb7fc` | Buy conditional Market, Filled, qty/cum `0.01`, trigger `1900.68`, reduceOnly `false`, `stopOrderType=Stop`, `CreateByStopOrder`, `tpslMode=Full` | opened the same `0.01` later fully closed above |
+| BTC | `2026-08-18T00:56:38.798Z` | `546354ed-266c-46ec-91ff-eac05ab21a15` / `""` | Sell Market, Filled, qty/cum `0.001`, reduceOnly `true`, `CreateByUser` | execution `d3bbdfd3-4201-4077-abbd-04bf9516029e`, closedSize `0.001`; closed-PnL says entry `64361`, exit `64331.2` |
+| BTC | `2026-08-18T00:41:47.710Z` fill | `b07bd422-8555-4e13-a780-9f1d37e9d37b` / `abi-ep-3b57b32be6645d1793a0` | Buy conditional Market, Filled, qty/cum `0.001`, trigger `64361`, reduceOnly `false`, `stopOrderType=Stop`, `CreateByStopOrder`, `tpslMode=Full` | opened the same `0.001` later fully closed above |
+
+Thus ETH's preceding physical exposure was fully closed about 20 minutes before the stuck CREATE; BTC's
+was fully closed about 3h45m before it. There are no intervening executions through either target
+timestamp. Bybit does not provide a point-in-time position snapshot through these queried endpoints, so
+the historical position statement is a reconstruction, not a direct timestamped position row. The
+matched full-size reduce-only closes, closed-PnL evidence, absence of later executions, and absence of an
+order lifecycle crossing T all support flat state at T. Current read-back is also flat (`size:"0"`) with
+no realtime orders for both symbols.
+
+The nearest later ETH records are explicitly named spikes, but occurred the following day, not in the
+incident window: `abi-spike-p-msyq43szb39725` at `2026-08-18T13:53:58.968Z` and
+`abi-amend-p-msyu520u6f9f62` at `2026-08-18T15:46:32.939Z`. They cannot have triggered the ETH failure.
+No later BTC order is present in the retained broader result.
+
+### A.5 Direct answers
+
+| Question | ETH | BTC |
+|---|---|---|
+| A. Foreign/manual/spike order active at T? | **No evidence; reconstructed no.** Empty complete order window and no lifecycle crossing T. | **No evidence; reconstructed no.** Same evidence. |
+| B. Physical position already open at T? | **No evidence; reconstructed flat.** Prior `0.01` exposure fully closed 20m before. | **No evidence; reconstructed flat.** Prior `0.001` exposure fully closed 3h45m before. |
+| C. Position side versus desired entry? | Not applicable; reconstructed flat. Desired side was long. | Not applicable; reconstructed flat. Desired side was short. |
+| D. Rate-limit / timeout / transport instability? | No raw evidence. Immediate create-path exception class is unknown. | No raw evidence. Immediate create-path exception class is unknown. |
+| E. Stored orderLinkId in Bybit history now? | Clean `not_found` (`[]`) for `abi-ep-2ece167a9819694a6130`; no final exchange status exists to report. | Clean `not_found` (`[]`) for `abi-ep-6b7261720b19351d3ebb`; no final exchange status exists to report. |
+
+The exact-link lookup materially reduces the ambiguous-write possibilities: there is now no retained
+Bybit order record for either id. It still cannot reconstruct whether Bybit briefly received and rejected
+or lost an order before durable history was formed, so it must not be rewritten as proof that dispatch
+never crossed the network boundary.
+
+### A.6 Separate trigger and liveness conclusions
+
+**TRIGGER.** Proven: after the provisional identity was durably saved, `bybit.createOrder()` (including
+its HTTP/Bybit response-reading path) threw within 236–239 ms, before ABI persisted an `orderId` or ran
+confirmation. The specific cause — Bybit rejection, HTTP failure, or transport failure — is **NOT
+PROVEN** because the exception/response was not logged. Parallel/manual/spike orders and pre-existing
+same-symbol positions are not supported as the trigger: the exchange reconstruction shows neither at
+either timestamp.
+
+**LIVENESS.** Runtime had already durably saved `pending_entry_recovery`; the ABI 500 left that marker in
+place, and Runtime's orchestrator deliberately gives recovery precedence over new genuine-bar cycles.
+Each recovery attempt queries the exact entry identity in realtime and history three times. For a clean
+absence both queries classify the order as `not_found`; `resolveRecoveryState()` intentionally has no
+terminal result for `not_found`, retries three times with 300 ms gaps, then returns `internal_error`.
+Consequently Runtime never receives one of the four terminal/recoverable states needed to clear the
+marker, so the loop is self-sustaining. This is a fail-closed ambiguity policy, not an exception caused
+merely by `record.status:"unknown"`; the earlier report's unhandled-`unknown` hypothesis is superseded by
+this code-path and exchange evidence.
+
+### A.7 Forensic scope and repository integrity
+
+No production source, OpenSpec artifact, master plan, Runtime state, ABI correlation data, or exchange
+state was modified. The only repository change is this report appendix and the correction of its earlier
+invalid `order_id:null` inference.
