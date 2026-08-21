@@ -20,6 +20,8 @@ import {
   classifyScopeAdmission,
   EntryPackageApplicationService,
 } from "../../src/services/entryPackage/entryPackageApplicationService.js";
+import { BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS } from "../../src/services/entryPackage/ambiguousCreateAbsence.js";
+import { EntryCycleRecoveryResolutionService } from "../../src/services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
 import { makeTestConfig } from "../fixtures/config.js";
@@ -452,6 +454,131 @@ test("create accepted but confirmation ambiguous returns a safe error", async ()
     assertInternalError(result);
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
   });
+});
+
+test("corrective CANCEL turns a fresh full-budget ambiguous CREATE absence into durable EntryPackageAbsent", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    const applyResult = await service.apply(makeCommand());
+    assertInternalError(applyResult);
+
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.equal(ambiguous?.status, "unknown");
+    assert.equal(ambiguous?.pending_action, "create");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+    const orderReadsBefore = bybit.getOrderByLinkIdCalls.length;
+    const executionReadsBefore = bybit.getExecutionListCalls.length;
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(bybit.getOrderByLinkIdCalls.length - orderReadsBefore, 3);
+    assert.equal(bybit.getExecutionListCalls.length - executionReadsBefore, 3);
+    const absent = repo.get("instance-1", "cycle-1");
+    assert.equal(absent?.status, "absent");
+    assert.equal(absent?.pending_action, null);
+    assert.equal(absent?.order_link_id, null);
+    assert.equal(absent?.binding_history.length, 1);
+  });
+});
+
+test("same-side sibling aggregate exposure does not block corrective ambiguous-CREATE absence", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = openPositionResponse("Buy");
+    bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  });
+});
+
+test("corrective ambiguous-CREATE CANCEL fails closed when the completed evidence is aged out", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    const boundaryMs = Date.parse(ambiguous.current_binding_started_at) + BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS;
+    bybit.serverTimeResponse = serverTimeAfter(0, Math.ceil(boundaryMs / 1000) * 1000);
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    const stillAmbiguous = repo.get("instance-1", "cycle-1");
+    assert.equal(stillAmbiguous?.status, "unknown");
+    assert.equal(stillAmbiguous?.pending_action, "create");
+    assert.notEqual(stillAmbiguous?.order_link_id, null);
+  });
+});
+
+test("a pre-expiry fifth-state read cannot authorize absence when corrective CANCEL finishes at the boundary", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    const startedAtMs = Date.parse(ambiguous.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    bybit.serverTimeResponse = serverTimeAfter(startedAtMs, 2000);
+    const recovery = new EntryCycleRecoveryResolutionService({
+      correlationRepository: repo,
+      bybit,
+      mutex: new KeyedMutex(),
+    });
+
+    const observation = await recovery.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+    assert.equal((observation.body as { recovery_state?: string }).recovery_state, "entry_order_not_found");
+
+    const boundaryMs = startedAtMs + BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS;
+    bybit.serverTimeResponse = serverTimeAfter(0, Math.ceil(boundaryMs / 1000) * 1000);
+    const cancelResult = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(cancelResult);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+    assert.notEqual(repo.get("instance-1", "cycle-1")?.order_link_id, null);
+  });
+});
+
+test("positive own fill execution and opposite-side aggregate evidence each block corrective absence", async () => {
+  for (const setup of [
+    (bybit: FakeBybitAdapter) => {
+      bybit.executionListResponse = executionListResponse(Date.now());
+      bybit.openPositionsResponse = flatPositionResponse();
+    },
+    (bybit: FakeBybitAdapter) => {
+      bybit.openPositionsResponse = openPositionResponse("Sell");
+    },
+  ]) {
+    await withService(async ({ service, bybit, repo }) => {
+      bybit.orderByLinkIdResponse = orderList([]);
+      bybit.orderHistoryResponse = orderList([]);
+      await service.apply(makeCommand());
+      const ambiguous = repo.get("instance-1", "cycle-1");
+      assert.ok(ambiguous?.current_binding_started_at);
+      setup(bybit);
+      bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+      const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+      assertInternalError(result);
+      assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+    });
+  }
 });
 
 test("create accepted but confirmation malformed never fabricates success: internal_error, status unknown, pending_action preserved", async () => {
@@ -1247,6 +1374,41 @@ function liveOrder(
 
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
+}
+
+function flatPositionResponse(): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }],
+    },
+  };
+}
+
+function openPositionResponse(side: "Buy" | "Sell"): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", side, size: "0.001", positionIdx: 0, avgPrice: "100000", openTime: 1 }],
+    },
+  };
+}
+
+function executionListResponse(execTimeMs: number): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", execType: "Trade", execTime: String(execTimeMs) }],
+      nextPageCursor: "",
+    },
+  };
+}
+
+function serverTimeAfter(baseMs: number, deltaMs: number): unknown {
+  return { retCode: 0, result: { timeSecond: String(Math.ceil((baseMs + deltaMs) / 1000)) } };
 }
 
 // The preflight query before a resent cancel (and the cancel-only replace

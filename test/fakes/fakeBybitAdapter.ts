@@ -37,18 +37,22 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly getOrderPriceLimitCalls: Array<{ category: string; symbol: string }> = [];
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
+  readonly getServerTimeCalls: number[] = [];
   readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
   readonly setTradingStopCalls: SetTradingStopInput[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponse: unknown = { retCode: 0, result: { list: [] } };
+  openPositionsResponses: unknown[] = [];
   // When set, getOpenPositions (and therefore queryPositionForInstrument)
   // throws this instead of returning openPositionsResponse, simulating a
   // transport failure or timeout.
   openPositionsError: Error | null = null;
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
   orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
+  orderByLinkIdResponses: unknown[] = [];
+  orderHistoryResponses: unknown[] = [];
   orderHistoryForSymbolResponse: unknown = { retCode: 0, result: { list: [] } };
   instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
   orderPriceLimitResponse: unknown = {
@@ -80,9 +84,19 @@ export class FakeBybitAdapter implements BybitAdapter {
   executionListResponses: unknown[] = [];
   executionListResponse: unknown = { retCode: 0, result: { category: "linear", list: [], nextPageCursor: "" } };
   executionListError: Error | null = null;
+  serverTimeResponse: unknown = { retCode: 0, result: { timeSecond: "1767312000" } };
+  serverTimeResponses: unknown[] = [];
+  serverTimeError: Error | null = null;
 
   async getServerTime(): Promise<unknown> {
-    return { retCode: 0, result: { timeSecond: "0" } };
+    this.getServerTimeCalls.push(Date.now());
+    if (this.serverTimeError !== null) {
+      throw this.serverTimeError;
+    }
+    if (this.serverTimeResponses.length > 0) {
+      return this.serverTimeResponses.shift();
+    }
+    return this.serverTimeResponse;
   }
 
   async getWalletBalance(input: GetWalletBalanceInput = {}): Promise<unknown> {
@@ -100,7 +114,7 @@ export class FakeBybitAdapter implements BybitAdapter {
     if (this.openPositionsError !== null) {
       throw this.openPositionsError;
     }
-    return this.openPositionsResponse;
+    return this.openPositionsResponses.length > 0 ? this.openPositionsResponses.shift() : this.openPositionsResponse;
   }
 
   async queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult> {
@@ -138,13 +152,17 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown> {
     this.getOrderByLinkIdCalls.push(payload);
-    const response = this.orderByLinkIdResponseByLinkId.get(payload.orderLinkId) ?? this.orderByLinkIdResponse;
+    const response =
+      this.orderByLinkIdResponseByLinkId.get(payload.orderLinkId) ??
+      (this.orderByLinkIdResponses.length > 0 ? this.orderByLinkIdResponses.shift() : this.orderByLinkIdResponse);
     return withDefaultOrderIdentity(response, payload);
   }
 
   async getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown> {
     this.getOrderHistoryCalls.push(payload);
-    const response = this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
+    const response =
+      this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ??
+      (this.orderHistoryResponses.length > 0 ? this.orderHistoryResponses.shift() : this.orderHistoryResponse);
     return withDefaultOrderIdentity(response, payload);
   }
 

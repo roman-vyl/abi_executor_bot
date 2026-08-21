@@ -234,15 +234,20 @@ function validateOpenPositionDocument(document) {
 function validateEntryCycleRecoveryDocument(document) {
   const schemas = document.components.schemas;
 
-  assert.equal(schemas.RecoveryStateResponse.oneOf.length, 4);
+  assert.equal(schemas.RecoveryStateResponse.oneOf.length, 5);
   assert.equal(schemas.RecoveryStateBusinessError.oneOf.length, 2);
   assert.equal(schemas.InternalError.properties.error.properties.code.const, "internal_error");
 
-  const stateConsts = ["EntryOrderLiveResponse", "PositionOpenResponse", "TerminalWithoutFillResponse", "TerminalAfterFillResponse"].map(
-    (name) => schemas[name].properties.recovery_state.const,
-  );
+  const stateConsts = [
+    "EntryOrderLiveResponse",
+    "EntryOrderNotFoundResponse",
+    "PositionOpenResponse",
+    "TerminalWithoutFillResponse",
+    "TerminalAfterFillResponse",
+  ].map((name) => schemas[name].properties.recovery_state.const);
   assert.deepEqual(stateConsts, [
     "entry_order_live",
+    "entry_order_not_found",
     "position_open",
     "terminal_without_fill",
     "terminal_after_fill",
@@ -253,13 +258,15 @@ function validateEntryCycleRecoveryDocument(document) {
       $ref: "#/components/schemas/AppliedEntryPackage",
     });
   }
-  for (const name of ["TerminalWithoutFillResponse", "TerminalAfterFillResponse"]) {
+  for (const name of ["EntryOrderNotFoundResponse", "TerminalWithoutFillResponse", "TerminalAfterFillResponse"]) {
     assert.equal(schemas[name].properties.applied_entry_package.type, "null");
   }
 
   assert.equal(schemas.PositionOpenResponse.properties.first_fill_at_ms.type, "integer");
   assert.equal(schemas.PositionOpenResponse.properties.average_entry_price.format, "positive-exact-decimal");
   assert.equal(schemas.EntryOrderLiveResponse.properties.first_fill_at_ms.type, "null");
+  assert.equal(schemas.EntryOrderNotFoundResponse.properties.first_fill_at_ms.type, "null");
+  assert.equal(schemas.EntryOrderNotFoundResponse.properties.average_entry_price.type, "null");
 
   assertForbiddenText(document, [
     "pending_create",

@@ -1,7 +1,12 @@
 import type { DesiredEntryDto, EntryPackageValidationDetail } from "./entryPackageApi.js";
 import { isExactDecimalText, isPositiveExactDecimalText } from "./entryPackageApi.js";
 
-export type RecoveryState = "entry_order_live" | "position_open" | "terminal_without_fill" | "terminal_after_fill";
+export type RecoveryState =
+  | "entry_order_live"
+  | "entry_order_not_found"
+  | "position_open"
+  | "terminal_without_fill"
+  | "terminal_after_fill";
 
 export type AppliedEntryPackage = {
   applied_desired_entry: DesiredEntryDto;
@@ -51,6 +56,18 @@ export function entryOrderLiveResult(input: {
         applied_desired_entry: input.appliedDesiredEntry,
         calculated_quantity: input.calculatedQuantity,
       },
+      first_fill_at_ms: null,
+      average_entry_price: null,
+    },
+  };
+}
+
+export function entryOrderNotFoundResult(): RecoveryStateHttpResult {
+  return {
+    statusCode: 200,
+    body: {
+      recovery_state: "entry_order_not_found",
+      applied_entry_package: null,
       first_fill_at_ms: null,
       average_entry_price: null,
     },

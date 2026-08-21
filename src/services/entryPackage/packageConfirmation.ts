@@ -236,6 +236,14 @@ export async function confirmEntryPackageCancelled(input: {
 // confirmEntryPackageCancelled or its callers.
 export type EntryOrderTerminality = { kind: "terminal" } | { kind: "live" } | { kind: "ambiguous" };
 
+export type RecoveryEntryOrderSignal =
+  | { kind: "live_unfilled" }
+  | { kind: "live_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
+  | { kind: "terminal_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
+  | { kind: "terminal_without_fill" }
+  | { kind: "not_found" }
+  | { kind: "inconclusive" };
+
 function isTerminalOrderStatus(orderStatus: string): boolean {
   return FILLED_STATUSES.has(orderStatus) || TERMINAL_WITHOUT_FILL_STATUSES.has(orderStatus);
 }
@@ -313,6 +321,80 @@ export async function classifyEntryOrderTerminality(input: {
   // history cleanly reports it absent: a positively found order must never
   // be discarded as terminal solely because history is clean-empty.
   return { kind: "ambiguous" };
+}
+
+// Single-pass recovery classification of the exact entry identity. Kept
+// beside the shared order decoders/status sets so recovery GET and the
+// ambiguous-CREATE corrective CANCEL cannot drift into different notions
+// of live, terminal, filled, or cleanly absent.
+export async function classifyEntryOrderForRecovery(input: {
+  bybit: BybitAdapter;
+  getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
+  getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+}): Promise<RecoveryEntryOrderSignal> {
+  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const realtime = await queryOrderView(
+    () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
+    realtimeIdentity,
+  );
+
+  if (realtime.status === "query_failed") {
+    return { kind: "inconclusive" };
+  }
+
+  if (realtime.status === "found") {
+    if (FILLED_STATUSES.has(realtime.item.orderStatus)) {
+      return fillRecoverySignal("terminal_with_fill", realtime.item);
+    }
+    if (PARTIAL_FILL_STATUSES.has(realtime.item.orderStatus)) {
+      return fillRecoverySignal("live_with_fill", realtime.item);
+    }
+    if (LIVE_UNFILLED_STATUSES.has(realtime.item.orderStatus)) {
+      return { kind: "live_unfilled" };
+    }
+  }
+
+  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const history = await queryOrderView(
+    () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
+    historyIdentity,
+  );
+
+  if (history.status === "query_failed") {
+    return { kind: "inconclusive" };
+  }
+
+  if (history.status === "found") {
+    const cumulativeFilledQty = normalizedCumulativeFilledQty(history.item);
+    if (compareDecimal(cumulativeFilledQty, "0") > 0) {
+      return {
+        kind: "terminal_with_fill",
+        averageEntryPrice: history.item.avgPrice,
+        cumulativeFilledQty,
+      };
+    }
+    if (TERMINAL_WITHOUT_FILL_STATUSES.has(history.item.orderStatus)) {
+      return { kind: "terminal_without_fill" };
+    }
+    return { kind: "inconclusive" };
+  }
+
+  return realtime.status === "not_found" ? { kind: "not_found" } : { kind: "inconclusive" };
+}
+
+function fillRecoverySignal(
+  kind: "live_with_fill" | "terminal_with_fill",
+  item: BybitOrderView,
+): RecoveryEntryOrderSignal {
+  return {
+    kind,
+    averageEntryPrice: item.avgPrice,
+    cumulativeFilledQty: normalizedCumulativeFilledQty(item),
+  };
+}
+
+function normalizedCumulativeFilledQty(item: BybitOrderView): string {
+  return item.cumExecQty !== "" ? item.cumExecQty : "0";
 }
 
 // Bounded re-classification after a cancel has already been sent for a

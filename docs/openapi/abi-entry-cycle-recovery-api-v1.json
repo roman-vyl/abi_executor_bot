@@ -9,7 +9,7 @@
       "get": {
         "operationId": "getEntryCycleRecoveryState",
         "summary": "Read the exchange ground truth for one trade cycle whose last mutation outcome was ambiguous",
-        "description": "Resolves one of four recovery states — entry_order_live, position_open, terminal_without_fill, terminal_after_fill — from a bounded, read-only order-plus-position query. Never returns a terminal state except from positive evidence: a clean-but-empty result everywhere is treated the same as a genuine query failure, not as proof the entry never filled. This endpoint never causes an exchange side effect, including when it resolves entry_order_live.",
+        "description": "Resolves one of five recovery states — entry_order_live, entry_order_not_found, position_open, terminal_without_fill, terminal_after_fill — from bounded read-only exact-own evidence. entry_order_not_found is a fresh non-terminal observation available only for an eligible ambiguous CREATE after the complete three-attempt order/execution/aggregate gate and strict seven-day Bybit-time check. This endpoint never causes an exchange side effect.",
         "parameters": [
           {
             "name": "strategy_instance_id",
@@ -32,7 +32,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One of the four recovery states was positively resolved",
+            "description": "One of the five recovery states was resolved",
             "content": {
               "application/json": {
                 "schema": {
@@ -53,6 +53,14 @@
                         },
                         "calculated_quantity": "0.001"
                       },
+                      "first_fill_at_ms": null,
+                      "average_entry_price": null
+                    }
+                  },
+                  "entry_order_not_found": {
+                    "value": {
+                      "recovery_state": "entry_order_not_found",
+                      "applied_entry_package": null,
                       "first_fill_at_ms": null,
                       "average_entry_price": null
                     }
@@ -130,7 +138,7 @@
             }
           },
           "500": {
-            "description": "None of the four recovery states could be positively established — a query failed or was malformed, or every query consulted completed cleanly but found nothing",
+            "description": "No recovery state could be safely established — required evidence was incomplete, malformed, contradictory, tainted, or outside the trustworthy window",
             "content": {
               "application/json": {
                 "schema": {
@@ -210,6 +218,9 @@
             "$ref": "#/components/schemas/EntryOrderLiveResponse"
           },
           {
+            "$ref": "#/components/schemas/EntryOrderNotFoundResponse"
+          },
+          {
             "$ref": "#/components/schemas/PositionOpenResponse"
           },
           {
@@ -235,6 +246,30 @@
           },
           "applied_entry_package": {
             "$ref": "#/components/schemas/AppliedEntryPackage"
+          },
+          "first_fill_at_ms": {
+            "type": "null"
+          },
+          "average_entry_price": {
+            "type": "null"
+          }
+        }
+      },
+      "EntryOrderNotFoundResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recovery_state",
+          "applied_entry_package",
+          "first_fill_at_ms",
+          "average_entry_price"
+        ],
+        "properties": {
+          "recovery_state": {
+            "const": "entry_order_not_found"
+          },
+          "applied_entry_package": {
+            "type": "null"
           },
           "first_fill_at_ms": {
             "type": "null"

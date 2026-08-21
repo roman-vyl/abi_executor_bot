@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type {
@@ -22,7 +24,19 @@ import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
-import { classifyEntryOrderTerminality, confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
+import {
+  classifyEntryOrderForRecovery,
+  classifyEntryOrderTerminality,
+  confirmEntryPackage,
+  confirmEntryPackageCancelled,
+} from "./packageConfirmation.js";
+import {
+  AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS,
+  AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS,
+  ambiguousCreateAbsenceCandidate,
+  completedObservationIsFresh,
+  observeAmbiguousCreateAbsenceAttempt,
+} from "./ambiguousCreateAbsence.js";
 
 export type EntryPackageApplicationServiceDeps = {
   config: AbiConfig;
@@ -109,12 +123,90 @@ export class EntryPackageApplicationService {
       return this.absentResult(command);
     }
 
+    const ambiguousCreateCandidate = ambiguousCreateAbsenceCandidate(record);
+    if (ambiguousCreateCandidate !== undefined) {
+      return this.revalidateAmbiguousCreateBeforeCancel(command, record, ambiguousCreateCandidate);
+    }
+
     if (record.status === "terminal_unfilled" || record.order_link_id === null) {
       await this.persistTransitionToAbsent(record);
       return this.absentResult(command);
     }
 
     return this.revalidateBeforeCancel(command, record);
+  }
+
+  private async revalidateAmbiguousCreateBeforeCancel(
+    command: EntryPackageCommand,
+    record: EntryPackageExecutionRecord,
+    candidate: NonNullable<ReturnType<typeof ambiguousCreateAbsenceCandidate>>,
+  ): Promise<EntryPackageHttpResult> {
+    const orderLinkId = record.order_link_id;
+    if (orderLinkId === null) {
+      return internalErrorResult();
+    }
+
+    const symbol = record.exchange_symbol;
+    const category = requireCategory(record.exchange_category);
+    const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    let cleanAbsenceAttempts = 0;
+    let absenceTainted = false;
+
+    for (let attempt = 0; attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS; attempt += 1) {
+      const orderSignal = await classifyEntryOrderForRecovery({
+        bybit: this.deps.bybit,
+        getEntryOrderPayload,
+        getEntryOrderHistoryPayload,
+      });
+
+      if (orderSignal.kind === "live_unfilled") {
+        return this.cancelLiveOrder(command, record);
+      }
+      if (orderSignal.kind === "terminal_without_fill") {
+        return this.confirmCancelOutcomeAndPersist(command, record);
+      }
+      if (orderSignal.kind === "live_with_fill" || orderSignal.kind === "terminal_with_fill") {
+        // The positive fill observation permanently supersedes absence for
+        // this request. A follow-up query may confirm and persist the fill,
+        // but may never turn a vanished row into EntryPackageAbsent.
+        return this.confirmCancelOutcomeAndPersist(command, record, false);
+      }
+      if (orderSignal.kind === "not_found") {
+        const attemptEvidence = await observeAmbiguousCreateAbsenceAttempt({
+          bybit: this.deps.bybit,
+          category,
+          symbol,
+          orderLinkId,
+          desiredSide: candidate.desiredSide,
+        });
+        if (attemptEvidence === "clean_absent") {
+          cleanAbsenceAttempts += 1;
+        } else {
+          absenceTainted = true;
+        }
+      } else {
+        absenceTainted = true;
+      }
+
+      if (attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS - 1) {
+        await sleep(AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS);
+      }
+    }
+
+    if (
+      absenceTainted ||
+      cleanAbsenceAttempts !== AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS ||
+      !(await completedObservationIsFresh({
+        bybit: this.deps.bybit,
+        bindingStartedAtMs: candidate.bindingStartedAtMs,
+      }))
+    ) {
+      return internalErrorResult();
+    }
+
+    await this.persistAmbiguousCreateAbsence(record);
+    return this.absentResult(command);
   }
 
   // Preflight for a null-desired-entry (cancel-intent) PUT against a binding
@@ -533,6 +625,7 @@ export class EntryPackageApplicationService {
   private async confirmCancelOutcomeAndPersist(
     command: EntryPackageCommand,
     record: EntryPackageExecutionRecord,
+    allowCleanAbsence = true,
   ): Promise<EntryPackageHttpResult> {
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
@@ -553,6 +646,10 @@ export class EntryPackageApplicationService {
     const now = new Date().toISOString();
 
     if (confirmation.kind === "cancelled_confirmed") {
+      if (!allowCleanAbsence) {
+        await this.deps.correlationRepository.save({ ...record, status: "unknown", updated_at: now });
+        return internalErrorResult();
+      }
       await this.deps.correlationRepository.save({
         ...record,
         desired_entry: null,
@@ -698,6 +795,21 @@ export class EntryPackageApplicationService {
     });
   }
 
+  private async persistAmbiguousCreateAbsence(record: EntryPackageExecutionRecord): Promise<void> {
+    const now = new Date().toISOString();
+    await this.deps.correlationRepository.save({
+      ...record,
+      desired_entry: null,
+      order_link_id: null,
+      order_id: null,
+      status: "absent",
+      pending_action: null,
+      current_binding_started_at: null,
+      updated_at: now,
+      binding_history: [...record.binding_history, closeBindingFrom(record, "cancelled", now)],
+    });
+  }
+
   private absentResult(command: EntryPackageCommand): EntryPackageHttpResult {
     return serializeAbsentEntryPackage({
       strategyInstanceId: command.strategyInstanceId,
@@ -815,4 +927,3 @@ function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstru
 
   throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
 }
-

@@ -65,6 +65,7 @@ export type CloseOperationOutcome =
 
 export type RecoveryStateOperationOutcome =
   | "entry_order_live"
+  | "entry_order_not_found"
   | "position_open"
   | "terminal_without_fill"
   | "terminal_after_fill"

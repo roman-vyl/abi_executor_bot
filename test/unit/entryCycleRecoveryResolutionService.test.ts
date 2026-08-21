@@ -710,6 +710,157 @@ test("a legacy amend-pending binding still resolves terminal_after_fill when pos
   });
 });
 
+test("fresh ambiguous CREATE absence across the full budget resolves entry_order_not_found without writes", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.executionListResponse = executionList([]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        recovery_state: "entry_order_not_found",
+        applied_entry_package: null,
+        first_fill_at_ms: null,
+        average_entry_price: null,
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 3);
+    assert.equal(bybit.getOrderHistoryCalls.length, 3);
+    assert.equal(bybit.getExecutionListCalls.length, 3);
+    assert.equal(bybit.getOpenPositionsCalls.length, 3);
+    assert.equal(bybit.getServerTimeCalls.length, 1);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+test("same-side sibling aggregate exposure remains compatible with entry_order_not_found", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create", side: "long" }));
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 1 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_not_found");
+  });
+});
+
+test("opposite-side or failed aggregate evidence taints ambiguous CREATE absence", async () => {
+  for (const setup of [
+    (bybit: FakeBybitAdapter) => {
+      bybit.openPositionsResponse = openPosition({ side: "Sell", avgPrice: "100000", openTime: 1 });
+    },
+    (bybit: FakeBybitAdapter) => {
+      bybit.openPositionsError = new Error("position unavailable");
+    },
+  ]) {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord({ pendingAction: "create", side: "long" }));
+      setup(bybit);
+
+      const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+      assert.equal(result.statusCode, 500);
+      assert.equal(bybit.getServerTimeCalls.length, 0);
+    });
+  }
+});
+
+test("an attributable execution blocks absence even when every order read is empty", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.openPositionsResponse = flatPosition();
+    bybit.executionListResponse = executionList([Date.parse("2026-01-01T00:00:01.000Z")]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.getServerTimeCalls.length, 0);
+  });
+});
+
+test("incomplete exact-own execution pagination blocks absence", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.openPositionsResponse = flatPosition();
+    bybit.executionListResponse = {
+      retCode: 0,
+      result: { category: "linear", list: [], nextPageCursor: "never-completes" },
+    };
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.getExecutionListCalls.length, 30);
+    assert.equal(bybit.getServerTimeCalls.length, 0);
+  });
+});
+
+test("a later live own order supersedes an earlier clean absence attempt", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.openPositionsResponse = flatPosition();
+    bybit.orderByLinkIdResponses = [orderList([]), orderList([liveOrder()])];
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 2);
+    assert.equal(bybit.getServerTimeCalls.length, 0);
+  });
+});
+
+test("a later filled own order supersedes an earlier clean absence attempt", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    const fillAt = Date.parse("2026-01-01T00:00:01.000Z");
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 1 });
+    bybit.orderByLinkIdResponses = [
+      orderList([]),
+      orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000" })]),
+    ];
+    bybit.executionListResponses = [executionList([]), executionList([fillAt])];
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "position_open");
+    assert.equal((result.body as { first_fill_at_ms?: number }).first_fill_at_ms, fillAt);
+    assert.equal(bybit.getServerTimeCalls.length, 0);
+  });
+});
+
+test("one tainted attempt cannot be erased by later clean-empty attempts", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.openPositionsResponses = [malformedResponse(), flatPosition(), flatPosition()];
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.getServerTimeCalls.length, 0);
+  });
+});
+
+test("the strict seven-day boundary and future binding time never emit the fifth state", async () => {
+  for (const serverSecond of ["1767830400", "1767830401", "1767225599"]) {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord({ pendingAction: "create" }));
+      bybit.openPositionsResponse = flatPosition();
+      bybit.serverTimeResponse = { retCode: 0, result: { timeSecond: serverSecond } };
+
+      const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+      assert.equal(result.statusCode, 500);
+    });
+  }
+});
+
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
 }
@@ -783,6 +934,7 @@ function makeRecord(
     orderLinkId: string | null;
     closeOrderLinkId: string | null;
     firstFillAtMs: number | null;
+    currentBindingStartedAt: string | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -813,7 +965,10 @@ function makeRecord(
     early_execution_observation: null,
     binding_history: [],
     pending_action: overrides.pendingAction === undefined ? "cancel" : overrides.pendingAction,
-    current_binding_started_at: "2026-01-01T00:00:00.000Z",
+    current_binding_started_at:
+      overrides.currentBindingStartedAt === undefined
+        ? "2026-01-01T00:00:00.000Z"
+        : overrides.currentBindingStartedAt,
   };
 }
 
