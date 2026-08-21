@@ -135,6 +135,59 @@ test("active native pair is cancelled by exact child orderId and freshly re-read
   });
 });
 
+test("clean absence after an accepted exact child cancel bridges Bybit terminal-history propagation lag", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+    installFilledCloseAfterCreate(bybit, closeId(), "0.003");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-1") {
+        // Real Demo behavior: both children leave realtime immediately,
+        // while terminal history can remain empty for a propagation gap.
+        installNoProtection(bybit);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.cancelOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+  });
+});
+
+test("child identity drift after cancel fails closed and never dispatches market close", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-1") {
+        bybit.activeOrdersResponse = childList([
+          stopRow("link-1", "0.003", { orderId: "replacement-stop", orderStatus: "Deactivated", leavesQty: "0" }),
+          takeRow("link-1", "0.003", { orderId: "replacement-take", orderStatus: "Deactivated", leavesQty: "0" }),
+        ]);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+  });
+});
+
 test("protection is always neutralized before a market-close write", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
