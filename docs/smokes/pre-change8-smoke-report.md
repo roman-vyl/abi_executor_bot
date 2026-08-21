@@ -551,3 +551,156 @@ reads showed no experimental live SOL order and SOL position size `0`. The unrel
 described above remains intentionally untouched; it is not experimental cleanup scope. The temporary
 smoke script was kept outside the repository and removed after evidence collection. No credentials or
 signatures were written to the repository or report.
+
+## Appendix D — organic ETH `open-position` 500 forensic
+
+This bounded pass was read-only. It did not create, amend, cancel, or close any Bybit entity and did not
+modify ABI/Runtime durable state. Change 8 remained deployed, unarchived, and rollout remained stopped.
+
+### D.1 Exact identity and durable ABI record
+
+The affected pair is:
+
+```json
+{
+  "strategy_instance_id":"ema_pullback:243bcad65efa36d995d0830c",
+  "trade_cycle_id":"43bd622a-e3eb-4e8e-83b3-3fa6f06d9f1e",
+  "exchange_symbol":"ETHUSDT",
+  "exchange_category":"linear"
+}
+```
+
+ABI durably wrote `pending_create` at `2026-08-21T16:23:13.298Z`, then the following applied record after
+successful create confirmation:
+
+```json
+{
+  "order_link_id":"abi-ep-83f3dd5c1eb76f488e21",
+  "order_id":"0a711b1d-1fe0-43c5-a19f-899a4985c3cf",
+  "status":"applied",
+  "pending_action":null,
+  "calculated_quantity":"0.01",
+  "desired_entry":{"side":"long","planned_entry_price":"2390.1192749442794"},
+  "early_execution_observation":null,
+  "first_fill_at_ms":null,
+  "binding_history":[],
+  "created_at":"2026-08-21T16:23:13.298Z",
+  "updated_at":"2026-08-21T16:23:14.112Z"
+}
+```
+
+There is no later ABI correlation row for this pair. A read-only recovery GET independently resolved the
+same binding as HTTP 200 `entry_order_live`, with the same applied package and null fill fields. Pair
+binding is therefore not the failing boundary.
+
+### D.2 Exact public reproduction
+
+The same request Runtime uses was manually repeated against the deployed ABI:
+
+```text
+GET /v1/strategy-instances/ema_pullback%3A243bcad65efa36d995d0830c/
+    trade-cycles/43bd622a-e3eb-4e8e-83b3-3fa6f06d9f1e/open-position
+```
+
+It returned:
+
+```json
+HTTP/1.1 500 Internal Server Error
+{"error":{"code":"internal_error","message":"internal error"}}
+```
+
+ABI operation evidence at `2026-08-21T16:35:58.511Z` records the same exact pair and
+`outcome:"internal_error"` after `682.899417 ms`. Earlier automatic calls at `16:25`, `16:30`, and
+`16:35` failed identically. No exception payload was emitted because this is a normal typed error return,
+not a thrown transport exception.
+
+### D.3 Read-only Bybit Demo state
+
+Signed GET-only reads against `https://api-demo.bybit.com` returned valid envelopes (`retCode:0`,
+`retMsg:"OK"`). Sanitised exact evidence:
+
+```json
+{
+  "realtime": [{
+    "symbol":"ETHUSDT",
+    "orderId":"0a711b1d-1fe0-43c5-a19f-899a4985c3cf",
+    "orderLinkId":"abi-ep-83f3dd5c1eb76f488e21",
+    "orderStatus":"Untriggered",
+    "orderType":"Market",
+    "stopOrderType":"Stop",
+    "createType":"CreateByStopOrder",
+    "side":"Buy",
+    "qty":"0.01",
+    "leavesQty":"0.01",
+    "cumExecQty":"0",
+    "avgPrice":"",
+    "triggerPrice":"2390.11",
+    "tpslMode":"Partial",
+    "takeProfit":"2472.05",
+    "stopLoss":"2308.18",
+    "reduceOnly":false,
+    "parentOrderLinkId":""
+  }],
+  "history":[],
+  "executions":[],
+  "position":{"symbol":"ETHUSDT","side":"","size":"0","avgPrice":"0","openTime":0},
+  "decodedPosition":{"kind":"no_position"}
+}
+```
+
+The symbol-scoped realtime list contained only this parent. No native Partial child exists yet because
+the parent has not filled. Running the exact production `confirmEntryPackage()` decoder against the same
+realtime/history reads and expected quantity `0.01` returned:
+
+```json
+{"kind":"pending_confirmed"}
+```
+
+Thus the exchange state, identity decoder, status decoder, and quantity comparison all succeeded. Empty
+history is not contradictory while the live conditional order remains visible in realtime; empty exact
+execution history agrees with `cumExecQty:"0"` and the flat aggregate position.
+
+### D.4 Exact 500 boundary
+
+The failure is deterministic inside own-fill resolution:
+
+1. `status:"applied"` is classified `live_query_admissible`, so the pair is accepted and locked.
+2. `early_execution_observation` is null, so `resolveOwnFillFacts()` invokes `confirmEntryPackage()` for
+   the exact `orderLinkId` and expected qty.
+3. Realtime returns the exact `Untriggered` order with matching qty; confirmation correctly returns
+   `pending_confirmed`.
+4. `resolveOwnFillFacts()` handles only `full_fill`, `partial_fill`, and `terminal_without_fill`.
+   `pending_confirmed` falls through to `undefined`, despite being a legitimate state for an applied
+   conditional entry.
+5. `determine()` maps undefined own facts to `{kind:"error"}`; the HTTP builder maps that to the generic
+   500 `internal_error`.
+
+The failing statement is therefore the `pending_confirmed` fall-through in
+`OpenPositionResolutionService.resolveOwnFillFacts()`, not an exchange failure.
+
+Candidate classification:
+
+| Candidate boundary | Finding |
+|---|---|
+| Pair binding | **Not failing** — durable exact record found; recovery GET returns `entry_order_live`. |
+| Own fill resolution | **ROOT CAUSE** — legitimate `pending_confirmed` is converted to undefined/error. |
+| Execution-list | **Not reached by open-position** — first-fill capture runs only after own fill is proven; independent exact GET is clean empty. |
+| Native Partial child attribution | **Not part of this service/path**; no children exist before fill. |
+| Aggregate sanity | **Not reached** — return occurs before `queryPositionForInstrument()`; independent decoder reports `no_position`. |
+| Decoder/protocol | **Not failing** — exact production confirmation decoder returns `pending_confirmed`; all raw envelopes are valid. |
+| OCO-after-amend | **Unrelated** — no fill, children, amend, or OCO state exists in this path. |
+
+The focused test gap matches the incident: existing no-fill tests use an already durable final zero-fill
+observation or terminal-without-fill order. They do not cover `status:"applied"` plus null durable
+observation plus a freshly queried live `New`/`Untriggered` entry.
+
+### D.5 Forensic verdict and integrity
+
+**ROOT CAUSE PROVEN:** `OpenPositionResolutionService` incorrectly treats the valid
+`confirmEntryPackage.kind === "pending_confirmed"` outcome as an impossible/unresolved own-fill state.
+That produces the public 500 for every applied-but-not-yet-filled entry order. It is a deterministic
+domain-branch defect, not rate limiting, timeout, Bybit transport instability, identity ambiguity,
+native-protection attribution, aggregate-position contradiction, or OCO behavior.
+
+No production fix was made in this pass. The organic ETH order and all exchange/account state were left
+untouched. The only repository change is this forensic appendix.
