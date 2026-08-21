@@ -349,3 +349,85 @@ This means the intended six-instance LONG-only soak was not actually armed in Ru
 No new ABI correlation record was appended after the cleanup entries at `2026-08-21T18:09:12.976Z`. Fresh Runtime journal after start contains only the orchestration start above, without a corresponding completion or ABI write. No exchange mutation was performed by this aborted start beyond starting/stopping Runtime itself.
 
 Result: `ABORTED_BEFORE_VALID_SOAK`. The next attempt needs Runtime durable registrations to be aligned with the LONG-only catalog instance IDs before Runtime is started again.
+
+## LONG-only catalog preflight correction
+
+Preflight date: `2026-08-21`.
+
+Runtime remained stopped throughout this correction. No ABI, Runtime, Engine, or MDS production code was changed. No exchange create/cancel/amend/close operation was sent.
+
+### Before correction
+
+The live catalog contained ten valid accepted deployment files. Eight were enabled:
+
+```text
+btc-ema50-smoke.json enabled=true  ema_pullback:53a32ecec5d565b3ac58eec0 BTCUSDT.P 5m trade_sides=["long","short"]
+eth-ema50-smoke.json enabled=true  ema_pullback:243bcad65efa36d995d0830c ETHUSDT.P 5m trade_sides=["long","short"]
+soak-ema2.json       enabled=true  ema_pullback:fe2d8446d4b917803a3f1115 ETHUSDT.P 5m trade_sides=["long"]
+soak-ema3.json       enabled=true  ema_pullback:9b45068fd5d1f833a82ba5a5 ETHUSDT.P 5m trade_sides=["long"]
+soak-ema5.json       enabled=true  ema_pullback:1a4edf9e70cbaa92620a6ff6 ETHUSDT.P 5m trade_sides=["long"]
+soak-ema10.json      enabled=true  ema_pullback:2a008f42491af59f78220d62 ETHUSDT.P 5m trade_sides=["long"]
+soak-ema20.json      enabled=true  ema_pullback:75a7a31b44c1d79f560cd753 ETHUSDT.P 5m trade_sides=["long"]
+soak-ema50.json      enabled=true  ema_pullback:54695e606ce7f06cb43b39a4 ETHUSDT.P 5m trade_sides=["long"]
+```
+
+`btc-ema200-live.json` and `eth-ema200-live.json` were already disabled. Durable Runtime state still contained old dormant append-only rows for prior dual-side soak IDs. Those rows had `current_trade_cycle=null` and `pending_entry_recovery=null`, so they were left untouched.
+
+One BTC state row still had a `current_trade_cycle`:
+
+```text
+btc-ema50-smoke.json ema_pullback:53a32ecec5d565b3ac58eec0 current=64d42d48-aae7-476f-8468-68ead37a3e16 marker=null
+```
+
+The Runtime deployment selector selects only accepted deployments where `deployment.enabled` is true and the committed bar matches instrument/timeframe. Therefore, after disabling `btc-ema50-smoke.json`, that BTC cycle is not selected by committed-bar orchestration. Because it has no `pending_entry_recovery`, it also has no recovery marker for startup recovery work. It was left as durable history; no BTC cleanup was attempted.
+
+### Catalog mutation
+
+Only the existing top-level `enabled` field was changed:
+
+```text
+btc-ema50-smoke.json enabled=false
+eth-ema50-smoke.json enabled=false
+```
+
+Files were not deleted. Schema and identity derivation code were not changed.
+
+### After correction
+
+The catalog still has ten accepted files, but exactly six enabled deployments. The enabled/selected ETH 5m set is exactly:
+
+```text
+ema_pullback:1a4edf9e70cbaa92620a6ff6 soak-ema5.json  ETHUSDT.P 5m trade_sides=["long"]
+ema_pullback:2a008f42491af59f78220d62 soak-ema10.json ETHUSDT.P 5m trade_sides=["long"]
+ema_pullback:54695e606ce7f06cb43b39a4 soak-ema50.json ETHUSDT.P 5m trade_sides=["long"]
+ema_pullback:75a7a31b44c1d79f560cd753 soak-ema20.json ETHUSDT.P 5m trade_sides=["long"]
+ema_pullback:9b45068fd5d1f833a82ba5a5 soak-ema3.json  ETHUSDT.P 5m trade_sides=["long"]
+ema_pullback:fe2d8446d4b917803a3f1115 soak-ema2.json  ETHUSDT.P 5m trade_sides=["long"]
+```
+
+No old soak ID and no non-soak ID remains enabled/selected.
+
+Only one of the six new canonical IDs already had a durable Runtime snapshot:
+
+```text
+ema_pullback:1a4edf9e70cbaa92620a6ff6 current=null marker=null trade_sides=["long"]
+```
+
+The other five canonical IDs had no durable snapshot yet. Manual append-only bootstrap was not performed: the repository `get_or_create(...)` path is the correct Runtime creation mechanism, but performing it outside Runtime would be an operational state mutation not needed for catalog selection. Runtime will create those initial snapshots when it actually processes the selected deployments.
+
+### Exchange baseline
+
+Read-only ABI account routes against Bybit Demo returned:
+
+```text
+ETHUSDT active orders: []
+ETHUSDT position: size="0", side="", avgPrice="0"
+BTCUSDT active orders: []
+BTCUSDT position: size="0", side="", avgPrice="0"
+```
+
+### Controlled startup precheck
+
+The controlled Runtime startup precheck was not executed in this pass. The task simultaneously required a genuine Runtime closed-bar precheck and no Bybit mutations. Current Runtime logs expose the exact selected IDs only as part of committed-bar orchestration; allowing that orchestration to run can proceed into Engine and ABI writes before the selected set is fully confirmed. Since the exchange baseline is clean and the instruction forbids exchange mutations in this task, Runtime was left stopped.
+
+Result: `CATALOG_READY_FOR_6_LONG_ONLY`; `STARTUP_PRECHECK_BLOCKED_BY_NO_EXCHANGE_MUTATION_CONSTRAINT`.
