@@ -854,3 +854,77 @@ Final verdict:
 Manual exchange mutations in this acceptance: **none**. The only exchange mutation was the exact ETH
 cancel requested by the genuine Runtime→Engine decision; no create, amend, close, cancel-all, or manual
 cleanup action was issued by the acceptance tooling.
+
+## Appendix F — pre-archive Runtime-main gate (stopped by operator)
+
+This gate began on `2026-08-21` and was stopped immediately on the operator's explicit instruction before
+the awaited BTC close evaluation completed. No further live reads, waits, or exchange actions were
+performed after the stop request.
+
+### F.1 Runtime deployment provenance — PASS
+
+Runtime was manually rebuilt from current `main` at exact SHA
+`35fdb4ffa9f2100fecc29f32fc5f2a066ae00ab6` and Runtime alone was recreated with durable volumes and the
+existing 180-second Engine timeout override preserved. The built image manifest was
+`sha256:9eadf2cd40d546806d4bd7b57303a2ef3d82968300e0b81ba701d683a462cde1`.
+
+The deployed close-client artifact hash exactly matched the `main` checkout:
+
+```text
+c28f633677d593aeefe2a19b7f40674424fa358c17eb037f4fd7ed81e9e37e2d
+```
+
+Runtime, ABI, Engine, and MDS were healthy after recreate. Existing untracked Runtime files were neither
+included in the image nor modified.
+
+### F.2 Pre-close BTC ownership snapshot
+
+The candidate genuine cycle was BTC long cycle `64d42d48-aae7-476f-8468-68ead37a3e16`, parent
+`abi-ep-8bf922cb4bf660b26dd3`, exact parent `orderId`
+`10a1b9e2-8f16-4fb8-9dfd-a0ae5de99d8e`. Exact execution evidence showed one fill of `0.001` at
+`77224.9`; aggregate BTC position was long `0.001`.
+
+The active attributable native pair was:
+
+```json
+[
+  {"orderId":"8cbc1b07-9075-4e3a-8c54-2ea34151c095","parentOrderLinkId":"abi-ep-8bf922cb4bf660b26dd3","stopOrderType":"PartialStopLoss","qty":"0.001","orderStatus":"Untriggered"},
+  {"orderId":"6f5bf840-d78b-4129-8f3f-5907e16c7f56","parentOrderLinkId":"abi-ep-8bf922cb4bf660b26dd3","stopOrderType":"PartialTakeProfit","qty":"0.001","orderStatus":"Untriggered"}
+]
+```
+
+ABI durable-state reconstruction found exactly one active owner in BTC scope. Therefore this live gate
+could not prove same-symbol sibling isolation without creating an artificial second owner; none was
+created.
+
+### F.3 Genuine flow observed before stop
+
+MDS delivered the `17:15` genuine bars. Before the stop request:
+
+- Runtime main accepted the genuine webhooks;
+- the ETH strategy created a new organic cycle `e013f5af-ab72-4c8b-a23b-084de484cb9b` through the normal
+  Engine→ABI path, receiving `entry_package_applied`;
+- Runtime queried the existing BTC cycle through ABI `GET .../open-position` and received HTTP 200
+  `position_open`;
+- BTC then entered the long-running Engine `open-trade` evaluation;
+- no outbound close request had yet occurred when the operator stopped the test.
+
+The new ETH entry was an organic Runtime action, not a manual smoke order, and was not cancelled or
+otherwise altered after the stop instruction.
+
+### F.4 Gate result at stop
+
+| Required check | Result |
+|---|---|
+| Exact deployed Runtime SHA | **PASS** — `35fdb4ffa9f2100fecc29f32fc5f2a066ae00ab6` |
+| Outbound close is live-observed `POST .../close` | **NOT OBSERVED** — deployed main contains the client, but no close dispatch occurred before stop |
+| One genuine cycle reaches real close | **NOT REACHED** |
+| Own protection neutralized before close | **NOT OBSERVED**; pair was active in the pre-close snapshot |
+| Exact own close executed | **NOT REACHED** |
+| Sibling exposure unaffected | **NOT PROVEN**; no BTC sibling owner existed |
+| Durable `terminal_closed` | **NOT REACHED** |
+
+No manual Bybit mutation was made by the gate tooling. Deployment of Runtime was the only manual
+operational mutation. Genuine Runtime flow created the new organic ETH entry; the awaited BTC close had
+not begun. The pre-archive gate is therefore **INCOMPLETE / STOPPED**, not a PASS and not evidence that
+Change 8 is ready to archive.
