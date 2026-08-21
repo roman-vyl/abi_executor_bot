@@ -1,114 +1,183 @@
 ## Context
 
-The recovery resolver already queries one correlation record's exact `order_link_id` in
-realtime and history and reduces the result to `OrderRecoverySignal`. Its internal union
-already contains `not_found`, but `resolveRecoveryState()` currently maps neither
-`not_found` nor `inconclusive` to a public outcome; both exhaust the bounded retry loop
-and become `internal_error`. The public codec is a closed four-state union.
+The recovery resolver already performs three attempts separated by 300 ms. Each attempt
+classifies the exact `order_link_id` through realtime then order history. Its internal
+union contains `not_found`, but today a request whose attempts stay absent ends as
+`internal_error`.
 
-The entry-package CANCEL path already provides the safe write boundary needed after the
-new observation: for `desired_entry:null` it revalidates the same exact identity, cancels
-only if live, confirms terminal/absent state, and refuses to report absence when fill or
-ambiguous evidence is found. The coordinated Runtime proposal will invoke that existing
-contract explicitly.
+Two official Bybit constraints shape the safe boundary:
+
+- official [Get Order History](https://bybit-exchange.github.io/docs/v5/order/order-list)
+  and [Get Trade History](https://bybit-exchange.github.io/docs/v5/order/execution)
+  contracts return the most recent seven days when `startTime`/`endTime` are omitted, as
+  the current adapter does;
+- the official [Demo Trading Service](https://bybit-exchange.github.io/docs/v5/demo)
+  contract states that generated Demo orders are kept for seven days.
+
+Beyond that boundary, clean empty reads cannot distinguish “never materialized” from
+“evidence aged out”. A second order read in the subsequent CANCEL closes the GET→CANCEL
+race but does not repair aged-out evidence. Therefore both the fifth-state GET and the
+ambiguous-CREATE CANCEL confirmation need the same freshness and execution-evidence gate.
+
+ABI already has everything needed without a new durable field: immutable
+`current_binding_started_at`, the public `getServerTime()` transport primitive, and the
+paginated exact-own execution resolver keyed by `orderLinkId`. Runtime requires no clock
+or marker-schema change.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Preserve `not_found` as a typed recovery outcome distinct from query failure and from
-  terminal evidence.
-- Extend the public closed union and conditional-field validation without weakening exact
-  identity checks.
-- Keep every recovery GET exchange-read-only and correlation-write-free for this outcome.
-- Make the two existing stuck bindings naturally recoverable after coordinated rollout,
-  without editing their durable records.
+- Expose `entry_order_not_found` only for a fresh unresolved ambiguous CREATE binding.
+- Require the entire existing recovery retry budget to remain strictly clean-empty.
+- Consult exact-own execution evidence so an attributable fill always blocks absence.
+- Prevent the corrective CANCEL from persisting `absent` when its evidence is aged out.
+- Preserve the GET as exchange-read-only and keep all positive existing states dominant.
 
 **Non-Goals:**
 
-- Resending CREATE or reconstructing an expired desired entry.
-- Treating elapsed time or aggregate flatness as terminal proof.
-- Calling CANCEL from the recovery GET.
-- Changing entry-package CANCEL semantics, correlation schema, protection, Runtime state,
-  or safety gates.
-- Logging `createOrder()` exceptions; that is a separate observability micro-change.
+- Generalizing clean not-found for applied, pending-cancel, legacy amend/replace, or other
+  non-terminal records.
+- Treating age, aggregate flatness, or absence alone as terminal proof.
+- Resending/reconstructing CREATE or changing Runtime durable state.
+- Changing existing behavior when a live, terminal, or filled own order is positively
+  found.
+- Logging `createOrder()` exceptions; that remains a separate observability micro-change.
 
 ## Decisions
 
-### 1. Promote only the existing strict `not_found` classification
+### 1. Exact ambiguous-CREATE eligibility is structural and narrow
 
-`classifyOrderForRecovery()` remains the authority for the observation. It yields
-`not_found` only after both the realtime exact-identity query and the history
-exact-identity query decode successfully and return no matching order. `query_failed`,
-malformed envelopes, identity mismatches, and unrecognized positive rows remain
-`inconclusive` and continue to fail closed.
+The fifth-state candidate is enabled only when all of these durable conditions hold:
 
-This is preferred over deriving the outcome from aggregate position state: aggregate
-state can contain sibling exposure and cannot prove the fate of this exact order.
+1. `status` is `pending_create` or `unknown`;
+2. `pending_action` is exactly `create`;
+3. `order_link_id` is a non-empty string;
+4. `current_binding_started_at` is a valid ISO timestamp;
+5. `desired_entry` remains non-null;
+6. `first_fill_at_ms`, `close_order_link_id`, and `close_order_id` are null;
+7. `early_execution_observation` is null, so no durable order/fill observation already
+   supersedes the candidate.
 
-### 2. Resolve `entry_order_not_found` before aggregate position interpretation
+Any applied, pending-cancel, create-failed, legacy amend/cancel-and-create, durably
+terminal, or structurally incomplete record retains existing behavior and can never emit
+the fifth state. This intentionally favors false-negative recovery over broad absence
+inference.
 
-Once the exact order signal is `not_found`, `resolveRecoveryState()` returns the new
-outcome independent of the aggregate position query. The outcome says only what the two
-exact-order reads observed. A position row cannot attribute a fill to this order, and it
-must not turn exact absence into `position_open`; conversely it must not prevent Runtime
-from invoking the revalidating neutralization contract.
+### 2. The existing full retry budget becomes one cumulative absence observation
 
-The implementation may avoid the position query for this branch, or retain it for a
-minimal-diff control flow, but its result has no bearing on the outcome. Tests must assert
-the semantic independence rather than incidental call count unless the implementation
-chooses the early return explicitly.
+The resolver does not return on the first `not_found`. For each of the three existing
+attempts it performs:
 
-### 3. Keep observation and durable terminal fact separate
+1. strict exact-own realtime/history order classification;
+2. when order classification is clean `not_found`, complete paginated exact-own execution
+   resolution using the same `orderLinkId`;
+3. the existing aggregate position sanity read.
 
-`entry_order_not_found` is returned with `applied_entry_package:null`,
-`first_fill_at_ms:null`, and `average_entry_price:null`. The resolver does not change the
-correlation record. Only the subsequent entry-package CANCEL can produce the existing
-formal `EntryPackageAbsent` result and durable `absent` status after fresh revalidation.
+An order or fill found on any attempt immediately follows the existing positive-state
+logic and supersedes earlier absence. An attributable execution prevents the fifth state
+even if an order row is absent; if existing response fields are insufficient to construct
+`position_open`, the request fails closed rather than misreporting absence. Any query
+failure, malformed envelope/item, identity/category/symbol mismatch, incomplete execution
+pagination, unrecognized result, or non-flat aggregate position taints the cumulative
+absence candidate. Later empty reads cannot erase that taint, although a later positive
+finding is still honored.
 
-This is preferred over mapping clean absence to `terminal_without_fill`, which would
-overstate what bounded history proves and would bypass the safety value of the second
-identity check at the write boundary.
+Only three clean order-absent + complete no-execution + clean-flat attempts can proceed
+to freshness validation. The retry count and delay do not change.
 
-### 4. Extend the existing result/HTTP union; introduce no endpoint
+### 3. Freshness is measured by Bybit time and checked after observation
 
-Add one result variant and one codec branch to the existing recovery service and GET
-route. No new HTTP route, command, repository method, or exchange adapter primitive is
-needed. The GET remains side-effect-free; Runtime owns whether to act on the observation.
+After the third clean attempt, ABI reads the official
+[Server Time](https://bybit-exchange.github.io/docs/v5/market/time) endpoint and strictly
+decodes a Bybit server timestamp. The binding is eligible only when:
 
-### 5. Coordinate deployment with Runtime decoder support
+`0 <= serverNowMs - Date.parse(current_binding_started_at) < 604800000`.
 
-An old Runtime decoder rejects the new closed-union member as a protocol error and leaves
-the marker intact, which is safe but does not restore liveness. Deploy ABI and the paired
-Runtime change as one coordinated rollout (Runtime-first or atomically is preferred).
-Runtime-first is backward compatible because it continues to handle the existing four
-states until ABI begins emitting the fifth.
+Seven days is not an invented policy value: it is the documented default window for both
+queried history endpoints and the documented Demo order-retention duration. Strict `<`
+avoids claiming coverage at the retention boundary. Checking after the full observation
+ensures the entire completed decision still lies inside the window. Invalid/future
+binding time, server-time failure, or age at/above seven days yields existing
+`internal_error`, never the fifth state.
+
+The current order/execution adapter requests need no `startTime`/`endTime`: while the
+binding is strictly inside the current seven-day window, their documented default window
+covers its entire possible lifetime. This avoids implying support for historical slicing
+that the existing primitives do not expose.
+
+### 4. Execution evidence reuses the existing exact-own paginated primitive
+
+Reuse `resolveFirstAttributableFillAtMs()` or extract its complete-page exact-own core so
+the fifth-state path gets the same properties: server-side `orderLinkId` filtering,
+category/symbol decoding, Trade-only items, cursor-to-completion, and ambiguous result on
+transport/protocol failure or page-cap exhaustion.
+
+For this capability the result is interpreted as:
+
+- `found` → never `entry_order_not_found`;
+- `ambiguous` → fail closed;
+- `no_executions_found` → one necessary, not sufficient, absence signal.
+
+No aggregate execution, inferred fill, or order-id lookup is introduced.
+
+### 5. Corrective CANCEL must repeat the same proof before durable absence
+
+When `desired_entry:null` targets a record that still has the ambiguous-CREATE structural
+shape, clean order absence may reach `EntryPackageAbsent` only after the CANCEL request
+itself completes the same three-attempt order/no-execution observation and passes the same
+post-observation Bybit-time freshness gate.
+
+If a live order appears, existing exact cancel behavior applies. If terminal/fill evidence
+appears, existing positive handling applies and absence is not fabricated. If evidence is
+ambiguous or the binding is no longer strictly within seven days, ABI returns safe error,
+does not persist `status:"absent"`, and leaves Runtime's marker intact.
+
+This additional gate is scoped only to clean-absence confirmation for the ambiguous
+CREATE shape. Other already-durable absence, positively terminal orders, and ordinary
+cancellation confirmation retain their existing contracts.
+
+### 6. Public semantics remain observation then explicit action
+
+`entry_order_not_found` carries null applied package and fill facts and is not persisted
+as a terminal ABI fact. Recovery GET never writes to the exchange. Runtime may use the
+observation to invoke one explicit existing CANCEL, but only that second request's fresh
+formal `EntryPackageAbsent` can clear Runtime state.
+
+### 7. Deploy Runtime decoder before ABI emission
+
+Runtime-first is backward compatible: it recognizes the fifth state but sees only the
+existing four until ABI is upgraded. ABI-first is safe but leaves old Runtime treating
+the new member as a protocol error, so coordinated rollout should be Runtime-first.
 
 ## Risks / Trade-offs
 
-- [Bounded history can age out a real prior order] → The outcome is deliberately
-  non-terminal and triggers a separate CANCEL that revalidates the exact identity and
-  fails closed on fill/ambiguity.
-- [Order appears between GET and CANCEL] → The CANCEL path performs fresh exact-identity
-  reads and cancels it if live; no decision relies on the earlier snapshot staying true.
-- [A fill becomes visible between GET and CANCEL] → The CANCEL path does not return
-  `EntryPackageAbsent`; Runtime retains the marker and a later recovery GET can resolve
-  `position_open` when evidence is sufficient.
-- [ABI deploys before Runtime] → Old Runtime treats the fifth state as protocol failure
-  and leaves state unchanged; coordinated rollout avoids prolonged non-recovery.
-- [Repeated observations cause repeated CANCEL attempts] → Each Runtime polling attempt
-  performs at most one existing idempotent corrective CANCEL, and only exact
-  `EntryPackageAbsent` clears the marker.
+- [A genuine absence reaches the seven-day boundary before confirmation] → Fail closed;
+  no marker is cleared. Safety takes precedence over eventual automatic recovery.
+- [A query transiently fails, then later reads empty] → The cumulative observation stays
+  tainted and cannot emit the fifth state in that request; a later request starts a fresh
+  bounded budget.
+- [An order/fill appears after an earlier empty attempt] → Positive evidence supersedes
+  absence immediately.
+- [GET succeeds just before expiry but CANCEL runs after expiry] → CANCEL repeats the
+  post-observation freshness check and refuses durable absence.
+- [Execution exists but order history is empty] → Exact execution evidence blocks the
+  fifth state; ABI fails closed unless existing facts can positively resolve another
+  state.
+- [The two incident markers are not processed before expiry] → They remain stuck and
+  require a separately authorized resolution path; this change never weakens the evidence
+  rule to recover them.
 
 ## Migration Plan
 
-1. Deploy the paired Runtime decoder/resolver change.
-2. Deploy this ABI change without modifying existing correlation records.
-3. Observe both incident bindings resolve through
-   `entry_order_not_found → corrective CANCEL → EntryPackageAbsent`.
-4. Confirm each Runtime marker clears and the next genuine bar follows normal fresh
+1. Deploy the paired Runtime decoder/resolver change first.
+2. Deploy ABI without modifying existing correlation records.
+3. While each incident binding is still strictly inside the seven-day window, observe the
+   complete three-attempt order/execution absence, fifth state, corrective CANCEL's
+   repeated gate, exact `EntryPackageAbsent`, and marker clearing.
+4. Confirm no old CREATE was resent and only a later genuine bar performs fresh ordinary
    reconciliation.
 
-Rollback is code-only. If either side is rolled back before a marker clears, the marker
-remains durable and no CREATE is resent. Already-confirmed `absent` records remain valid
-under the pre-change four-state contract as `terminal_without_fill`.
+Rollback is code-only. Any marker not formally cleared remains durable. A marker already
+cleared has an ABI `absent` record produced inside the trustworthy window. No schema
+migration or manual incident-record edit is needed.

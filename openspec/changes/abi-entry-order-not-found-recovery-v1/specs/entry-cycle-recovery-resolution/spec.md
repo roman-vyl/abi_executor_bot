@@ -14,17 +14,37 @@ and, when that order proves a fill, its own close order (identified by its own
 physical position query as a required, co-equal signal. The aggregate physical position
 query SHALL be retained only as a narrow, state-appropriate sanity check that can block a
 resolution this cycle's own positive evidence would otherwise support. It SHALL NEVER be
-required to positively confirm a specific state as a precondition for
-`entry_order_live`, `entry_order_not_found`, or `terminal_without_fill`, and SHALL NEVER
-be consulted when resolving `terminal_after_fill`.
+required to positively confirm `entry_order_live` or `terminal_without_fill`, and SHALL
+NEVER be consulted when resolving `terminal_after_fill`. The fifth state is the sole
+exception: its conservative non-positive observation requires a clean flat aggregate
+result on every attempt so a physical contradiction cannot be converted into actionable
+absence.
 
-`entry_order_not_found` is the sole non-positive observation in the union. It SHALL
-resolve only when bounded realtime and history queries for this correlation record's
-exact own `order_link_id` both complete cleanly and report no matching order. It states
-only that the exact identity is not visible in those bounded reads now; it SHALL NOT be
-represented as a terminal fact, proof that CREATE never existed or reached Bybit, or
-proof that no fill occurred. Aggregate position evidence SHALL neither manufacture nor
-suppress this exact-order observation.
+`entry_order_not_found` is the sole non-positive observation in the union and SHALL be
+eligible only for an ambiguous CREATE record with `status` `pending_create` or `unknown`,
+`pending_action` exactly `create`, non-null `desired_entry`, a non-empty exact
+`order_link_id`, valid `current_binding_started_at`, and no durable
+`early_execution_observation`, `first_fill_at_ms`, or close-order identity. Every other
+record shape SHALL retain the existing four-state/fail-safe behavior.
+
+For an eligible record ABI SHALL preserve the existing three-attempt/300-ms recovery
+budget and SHALL NOT resolve on the first clean absence. All three attempts SHALL each
+produce: clean exact-own realtime/history `not_found`, complete paginated exact-own
+execution evidence containing no execution, and a clean flat aggregate position result.
+Any failed, malformed, mismatched, incomplete, or contradictory result taints the
+absence candidate for the rest of that request. A later positive order or fill finding
+SHALL supersede any earlier clean absence and follow the existing positive-state rules.
+
+After the full clean budget, ABI SHALL validate Bybit server time and require
+`0 <= serverNowMs - current_binding_started_at < 604800000`. The seven-day bound is the
+documented default window of the order-history and execution-list queries used here and
+the documented Demo order-retention duration. At or beyond the boundary, or when either
+timestamp is invalid/unavailable, ABI SHALL fail safe and SHALL NOT resolve the fifth
+state.
+
+The outcome states only that this fresh ambiguous CREATE identity remained absent from
+the complete trustworthy bounded evidence. It SHALL NOT be represented as a terminal
+fact or proof that CREATE never existed or reached Bybit.
 
 `entry_order_live` and `terminal_without_fill` each resolve from a positive own-order
 finding (live and unfilled, or terminal with zero cumulative fill). Each fails safe if
@@ -60,13 +80,33 @@ close order's fate is never sufficient to resolve `position_open` or
 - **AND** the sibling does not block, delay, or alter the resolution
 
 #### Scenario: Clean exact-own-order absence resolves to entry_order_not_found
-- **WHEN** both bounded order queries for the record's exact `order_link_id` complete
-  successfully and neither realtime nor history contains that exact order
+- **WHEN** an eligible ambiguous CREATE record remains cleanly order-absent,
+  execution-absent, and aggregate-flat across all three attempts, and its validated Bybit
+  server-time age at completion is non-negative and strictly below seven days
 - **THEN** ABI resolves `entry_order_not_found`
 - **AND** ABI makes no claim that the order never existed, never reached Bybit, or never
   filled
-- **AND** an aggregate position result does not convert this observation into another
-  state or suppress the exact-order observation
+
+#### Scenario: A later attempt supersedes earlier clean absence
+- **WHEN** an earlier attempt is cleanly absent but a later attempt positively finds the
+  exact order live, terminal, or filled, or finds an attributable execution
+- **THEN** ABI does not resolve `entry_order_not_found`
+- **AND** follows the existing positive-state rules where sufficient evidence exists,
+  otherwise failing closed
+
+#### Scenario: One tainted attempt prevents actionable absence
+- **WHEN** any attempt contains a failed/malformed query, identity/category/symbol
+  mismatch, incomplete execution pagination, ambiguous execution result, or non-flat
+  aggregate position, and no later positive evidence resolves another state
+- **THEN** ABI returns the existing safe error after the bounded budget
+- **AND** later clean-empty attempts in the same request do not erase the taint
+
+#### Scenario: Attributable execution blocks entry_order_not_found
+- **WHEN** order reads are empty but the exact-own execution query finds at least one
+  attributable Trade execution
+- **THEN** ABI never resolves `entry_order_not_found`
+- **AND** resolves from positive evidence only if all required facts exist, otherwise
+  failing closed
 
 #### Scenario: A terminal zero-fill order resolves despite a same-side sibling
 - **WHEN** the own-order query positively finds this cycle's entry terminal with zero
@@ -135,22 +175,25 @@ close order's fate is never sufficient to resolve `position_open` or
 - **THEN** ABI does not resolve `entry_order_not_found` or any other recovery state
 - **AND** ABI fails safe
 
-### Requirement: Clean exact-own-order absence is an actionable observation, not terminal evidence
-ABI SHALL distinguish clean absence of its exact own order identity from both a query
-failure and `terminal_without_fill`. The observation SHALL have no wall-clock threshold
-and SHALL NOT depend on the age of the binding. It exists so the caller can explicitly
-invoke the existing idempotent neutralization contract, which revalidates the same exact
-identity before any write; the observation itself SHALL NOT authorize ABI's GET path to
+### Requirement: Only fresh full-budget ambiguous-CREATE absence is an actionable observation
+ABI SHALL continue to treat arbitrary clean-empty evidence as inconclusive. It SHALL
+distinguish `entry_order_not_found` from query failure and `terminal_without_fill` only
+for the structurally eligible ambiguous CREATE record, only after the full clean bounded
+order/execution/position observation, and only while the entire completed decision is
+strictly inside the documented seven-day evidence window. The observation exists only so
+the caller can explicitly invoke the revalidating neutralization contract; GET SHALL NOT
 infer or persist a terminal state.
 
-#### Scenario: Clean realtime and history absence produces the observation
-- **WHEN** the realtime and history queries both successfully return valid envelopes and
-  cleanly contain no order matching the exact category, symbol, and `order_link_id`
+#### Scenario: Fresh full-budget ambiguous CREATE produces the observation
+- **WHEN** the record meets every ambiguous-CREATE structural condition, all three
+  attempts are clean order/execution absence with clean flat aggregate results, and the
+  post-observation Bybit-time age is strictly below seven days
 - **THEN** ABI resolves `entry_order_not_found`
 - **AND** does not resolve `terminal_without_fill`
 
-#### Scenario: One failed order query is not clean absence
-- **WHEN** either the realtime or history query fails, times out, or is malformed
+#### Scenario: One failed required query is not clean absence
+- **WHEN** any required order, execution, position, or server-time query fails, times out,
+  is malformed, or cannot be completely paged
 - **THEN** ABI does not resolve `entry_order_not_found`
 - **AND** fails safe so the caller retries later
 
@@ -160,10 +203,19 @@ infer or persist a terminal state.
 - **THEN** ABI treats the read as inconclusive rather than cleanly absent
 - **AND** does not resolve `entry_order_not_found`
 
-#### Scenario: Age never upgrades absence to a terminal claim
-- **WHEN** the exact identity is cleanly absent regardless of how old the binding is
-- **THEN** ABI may report `entry_order_not_found`
-- **AND** does not reinterpret elapsed time as proof of `terminal_without_fill`
+#### Scenario: Aged-out evidence preserves the canonical fail-safe
+- **WHEN** the post-observation binding age is negative, exactly seven days, or older than
+  seven days, or either timestamp cannot be strictly decoded
+- **THEN** ABI does not resolve `entry_order_not_found` or
+  `terminal_without_fill` from clean-empty reads
+- **AND** returns the existing safe error without changing durable state
+
+#### Scenario: Other record shapes never receive the fifth state
+- **WHEN** a record is applied, pending-cancel, create-failed, durably terminal, carries a
+  legacy pending action, has no exact identity, or contains a durable observation/fill/
+  close identity
+- **THEN** clean-empty exchange reads do not resolve `entry_order_not_found`
+- **AND** existing recovery semantics remain unchanged
 
 #### Scenario: A later positive finding supersedes an earlier absence observation
 - **WHEN** a later recovery query positively finds the same exact order live, terminal,
@@ -214,4 +266,4 @@ including `entry_order_not_found`.
 - FROM: `### Requirement: Recovery resolution classifies the trade cycle into exactly one of four states, or fails safe on contradictory or incomplete evidence`
 - TO: `### Requirement: Recovery resolution classifies the trade cycle into exactly one of five states, or fails safe on contradictory or incomplete evidence`
 - FROM: `### Requirement: Absence of evidence is never treated as evidence of absence`
-- TO: `### Requirement: Clean exact-own-order absence is an actionable observation, not terminal evidence`
+- TO: `### Requirement: Only fresh full-budget ambiguous-CREATE absence is an actionable observation`
