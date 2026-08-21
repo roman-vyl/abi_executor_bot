@@ -218,8 +218,17 @@ export class OpenPositionResolutionService {
     if (confirmation.kind === "terminal_without_fill") {
       return { cumulativeFilledQty: "0", avgExecutionPrice: undefined };
     }
-    // "not_found" / "ambiguous" / "pending_confirmed": unreachable in
-    // practice for a live-query-admissible record, but not assumed away.
+    if (confirmation.kind === "pending_confirmed") {
+      // Entry order live but zero own cumulative fill so far — a normal,
+      // expected state for a conditional/unfilled entry (e.g. Untriggered),
+      // not an error. Reported the same as terminal_without_fill here:
+      // zero fill facts, which determine() correctly turns into "closed"
+      // (position_open=false), never "open" and never fabricated.
+      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined };
+    }
+    // "not_found" / "ambiguous": still treated as unresolved/error — no
+    // fill evidence obtainable at all, as opposed to pending_confirmed's
+    // definite zero-fill live order.
     return undefined;
   }
 

@@ -91,6 +91,24 @@ for (const status of LIVE_QUERY_ADMISSIBLE) {
   });
 }
 
+for (const status of LIVE_QUERY_ADMISSIBLE) {
+  test(`status '${status}': a live entry order with zero own cumulative fill (e.g. Untriggered) reports closed, not internal_error`, async () => {
+    await withResolutionService(async ({ service, bybit, repo }) => {
+      setOwnOrderStatus(bybit, "link-1", { orderStatus: "Untriggered", cumExecQty: "0" });
+      await repo.save(makeRecord({ status }));
+
+      const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+      assert.deepEqual(result, {
+        statusCode: 200,
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null },
+      });
+      assert.equal(bybit.getOpenPositionsCalls.length, 0);
+      assert.equal(bybit.getExecutionListCalls.length, 0);
+    });
+  });
+}
+
 test("a live, still-partial own fill is reported open, sourced from own evidence, even while the entry order is not yet terminal", async () => {
   await withResolutionService(async ({ service, bybit, repo }) => {
     setOwnOrderStatus(bybit, "link-1", { orderStatus: "PartiallyFilled", cumExecQty: "0.0003", avgPrice: "99900" });
