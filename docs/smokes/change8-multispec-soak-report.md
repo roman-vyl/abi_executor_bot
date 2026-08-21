@@ -478,3 +478,79 @@ ETHUSDT position: size="0", side="", avgPrice="0"
 ```
 
 Result: `CATALOG_READY_FOR_HIGH_EMA_LONG_ONLY`; Runtime is stopped and ready for the next controlled startup on the high-EMA set.
+
+## High-EMA LONG-only soak launch attempt
+
+Launch date: `2026-08-21`.
+
+Runtime was started from current Runtime `main`:
+
+```text
+strategy_runtime HEAD = 35fdb4ffa9f2100fecc29f32fc5f2a066ae00ab6
+RUNTIME_STRATEGY_ENGINE_TIMEOUT_SECONDS=180
+```
+
+The effective enabled catalog remained exactly the six high-EMA ETH 5m LONG-only soak deployments:
+
+```text
+soak-ema200.json  ema_pullback:eb191ae3ba1b9abaff3ad00a  ETHUSDT.P 5m trade_sides=["long"]
+soak-ema300.json  ema_pullback:48d34a18e84844800cb49467  ETHUSDT.P 5m trade_sides=["long"]
+soak-ema400.json  ema_pullback:99538f0ce9ed9fd8a8d11690  ETHUSDT.P 5m trade_sides=["long"]
+soak-ema500.json  ema_pullback:fa62ee54f82eed80140ce4fb  ETHUSDT.P 5m trade_sides=["long"]
+soak-ema700.json  ema_pullback:7599240ad538e3de481b306c  ETHUSDT.P 5m trade_sides=["long"]
+soak-ema1000.json ema_pullback:79bfce3abfd7794d30063d50  ETHUSDT.P 5m trade_sides=["long"]
+```
+
+The first observed boundary was infrastructure-level, before any useful high-EMA lifecycle evidence could be collected. At `2026-08-21 19:10:00Z`, Market Data Service attempted to deliver the ETH and BTC 5m committed-bar notifications while the Runtime container name was not yet resolvable inside the compose network:
+
+```text
+2026-08-21 19:10:00,435 committed-bar notification delivery failed instrument=ETHUSDT.P timeframe=5m open_time_ms=1787339100000 error=POST http://strategy-runtime:8093/v1/webhooks/closed-bar failed: <urlopen error [Errno -2] Name or service not known>
+2026-08-21 19:10:00,440 committed-bar notification delivery failed instrument=BTCUSDT.P timeframe=5m open_time_ms=1787339100000 error=POST http://strategy-runtime:8093/v1/webhooks/closed-bar failed: <urlopen error [Errno -2] Name or service not known>
+```
+
+At `2026-08-21 19:13:18Z`, all eight MDS streams transitioned to degraded/stopped with `reason=runtime_degraded`, and the Market Data Service container restarted:
+
+```text
+BTCUSDT.P:5m durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+BTCUSDT.P:1h durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+BTCUSDT.P:4h durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+BTCUSDT.P:1d durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+ETHUSDT.P:5m durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+ETHUSDT.P:1h durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+ETHUSDT.P:4h durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+ETHUSDT.P:1d durable_state=degraded realtime_status=disconnected ready=False reason=runtime_degraded
+```
+
+After restart, MDS performed startup reconciliation and returned to readiness:
+
+```text
+2026-08-21 19:13:37,893 service readiness ready=True ready_streams=8 total_streams=8
+```
+
+Runtime was stopped immediately after this new boundary was observed. A later `19:14:59Z` MDS notification failure occurred because Runtime had already been stopped intentionally after the boundary:
+
+```text
+2026-08-21 19:14:59,905 committed-bar notification delivery failed instrument=ETHUSDT.P timeframe=5m open_time_ms=1787339400000 error=POST http://strategy-runtime:8093/v1/webhooks/closed-bar failed: <urlopen error [Errno -2] Name or service not known>
+```
+
+Post-stop compose state:
+
+```text
+abi: healthy
+market-data-service: healthy after restart
+strategy-engine: healthy
+strategy-runtime: stopped
+```
+
+Read-only ABI/Bybit baseline after stopping:
+
+```text
+ETHUSDT active orders: []
+ETHUSDT position: size="0", side="", avgPrice="0"
+```
+
+ABI correlation history did not gain a high-EMA entry-package record during this attempt. The latest ABI correlation records remained the earlier cleanup entries ending at `2026-08-21T18:09:12.976Z`.
+
+Result: `HIGH_EMA_SOAK_STOPPED_AT_MDS_RESTART_BOUNDARY`.
+
+No manual Bybit mutation was performed during this launch attempt. No production code, OpenSpec artifact, or master plan was changed.
