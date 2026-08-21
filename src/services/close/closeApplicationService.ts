@@ -33,6 +33,12 @@ import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttr
 const BOUNDED_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 300;
 
+type ProtectionNeutralizationProof = {
+  expectedStopOrderId: string | null;
+  expectedTakeOrderId: string | null;
+  cleanAbsenceAllowed: boolean;
+};
+
 export type CloseApplicationServiceDeps = {
   config: AbiConfig;
   bybit: BybitAdapter;
@@ -115,7 +121,8 @@ export class CloseApplicationService {
 
     // MASTER-PLAN SAFETY GATE: protection is neutralized before aggregate
     // inspection, close identity recovery, dispatch, or resend.
-    if (!(await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure))) {
+    const protectionProof = await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure);
+    if (protectionProof === undefined) {
       return internalErrorResult();
     }
 
@@ -124,13 +131,13 @@ export class CloseApplicationService {
     }
 
     if (compareDecimal(ownExposure, "0") === 0) {
-      if (!(await this.verifyTerminalPostconditions(record, ownExposure))) {
+      if (!(await this.verifyTerminalPostconditions(record, ownExposure, protectionProof))) {
         return internalErrorResult();
       }
       return this.persistTerminal(command, record);
     }
 
-    return this.closePositiveExposure(command, record, ownExposure);
+    return this.closePositiveExposure(command, record, ownExposure, protectionProof);
   }
 
   private async neutralizeEntry(entryQuery: {
@@ -199,32 +206,54 @@ export class CloseApplicationService {
     symbol: string,
     entryOrderLinkId: string,
     ownExposure: string,
-  ): Promise<boolean> {
+  ): Promise<ProtectionNeutralizationProof | undefined> {
     let resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId });
+    let expectedStopOrderId: string | null = null;
+    let expectedTakeOrderId: string | null = null;
+    let cleanAbsenceAllowed = compareDecimal(ownExposure, "0") === 0;
 
     for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
-      if (isProtectionNeutralized(resolution, ownExposure)) {
-        return true;
+      if (resolution.kind === "none") {
+        return cleanAbsenceAllowed
+          ? { expectedStopOrderId, expectedTakeOrderId, cleanAbsenceAllowed: true }
+          : undefined;
       }
       if (resolution.kind === "ambiguous") {
-        return false;
+        return undefined;
       }
 
-      if (resolution.kind === "attributed") {
-        const active = [resolution.stop, resolution.take].find((leg) => !isTerminalOrderStatus(leg.orderStatus));
-        if (active === undefined) {
-          return true;
-        }
-
-        const cancelResult = await cancelEntryOrder({
-          config: this.deps.config,
-          bybit: this.deps.bybit,
-          payload: { category, symbol, orderId: active.orderId },
-        });
-        if (cancelResult.status === "skipped_live_execution" || !isAcknowledged(cancelResult.bybitResponse)) {
-          return false;
-        }
+      if (expectedStopOrderId === null && expectedTakeOrderId === null) {
+        expectedStopOrderId = resolution.stop.orderId;
+        expectedTakeOrderId = resolution.take.orderId;
+      } else if (
+        resolution.stop.orderId !== expectedStopOrderId ||
+        resolution.take.orderId !== expectedTakeOrderId
+      ) {
+        return undefined;
       }
+
+      const active = [resolution.stop, resolution.take].find((leg) => !isTerminalOrderStatus(leg.orderStatus));
+      if (active === undefined) {
+        return {
+          expectedStopOrderId,
+          expectedTakeOrderId,
+          cleanAbsenceAllowed: true,
+        };
+      }
+
+      const cancelResult = await cancelEntryOrder({
+        config: this.deps.config,
+        bybit: this.deps.bybit,
+        payload: { category, symbol, orderId: active.orderId },
+      });
+      if (cancelResult.status === "skipped_live_execution" || !isAcknowledged(cancelResult.bybitResponse)) {
+        return undefined;
+      }
+      // The pair was freshly and exactly attributed before this accepted
+      // cancel. A subsequent clean `none` is therefore caller-justified
+      // safe absence: realtime proves neither child is active, while the
+      // terminal history rows may still be in Bybit's propagation gap.
+      cleanAbsenceAllowed = true;
 
       if (attempt < BOUNDED_ATTEMPTS - 1) {
         await sleep(RETRY_DELAY_MS);
@@ -232,7 +261,7 @@ export class CloseApplicationService {
       }
     }
 
-    return false;
+    return undefined;
   }
 
   private async aggregateIsCompatible(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
@@ -260,6 +289,7 @@ export class CloseApplicationService {
     command: CloseCommand,
     record: EntryPackageExecutionRecord,
     ownExposure: string,
+    protectionProof: ProtectionNeutralizationProof,
   ): Promise<PositionManagementHttpResult> {
     let current = record;
 
@@ -303,7 +333,7 @@ export class CloseApplicationService {
       current = dispatched;
     }
 
-    if (!(await this.verifyTerminalPostconditions(current, ownExposure))) {
+    if (!(await this.verifyTerminalPostconditions(current, ownExposure, protectionProof))) {
       return internalErrorResult();
     }
     return this.persistTerminal(command, current);
@@ -380,7 +410,11 @@ export class CloseApplicationService {
     return "ambiguous";
   }
 
-  private async verifyTerminalPostconditions(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
+  private async verifyTerminalPostconditions(
+    record: EntryPackageExecutionRecord,
+    ownExposure: string,
+    protectionProof: ProtectionNeutralizationProof,
+  ): Promise<boolean> {
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
       return false;
@@ -416,7 +450,7 @@ export class CloseApplicationService {
           )) === "matched";
       }
 
-      if (entry.kind === "terminal" && isProtectionNeutralized(protection, ownExposure) && closeMatched) {
+      if (entry.kind === "terminal" && protectionMatchesProof(protection, protectionProof) && closeMatched) {
         return true;
       }
       if (attempt < BOUNDED_ATTEMPTS - 1) {
@@ -440,16 +474,24 @@ export class CloseApplicationService {
   }
 }
 
-function isProtectionNeutralized(resolution: AttachedProtectionResolution, ownExposure: string): boolean {
+function protectionMatchesProof(
+  resolution: AttachedProtectionResolution,
+  proof: ProtectionNeutralizationProof,
+): boolean {
   if (resolution.kind === "none") {
-    // No-fill entries never materialize native Partial children. For a
-    // positive own fill, clean none is not proof of terminal protection.
-    return compareDecimal(ownExposure, "0") === 0;
+    return proof.cleanAbsenceAllowed;
   }
   if (resolution.kind === "ambiguous") {
     return false;
   }
-  return isTerminalOrderStatus(resolution.stop.orderStatus) && isTerminalOrderStatus(resolution.take.orderStatus);
+  return (
+    proof.expectedStopOrderId !== null &&
+    proof.expectedTakeOrderId !== null &&
+    resolution.stop.orderId === proof.expectedStopOrderId &&
+    resolution.take.orderId === proof.expectedTakeOrderId &&
+    isTerminalOrderStatus(resolution.stop.orderStatus) &&
+    isTerminalOrderStatus(resolution.take.orderStatus)
+  );
 }
 
 function isTerminalOrderStatus(orderStatus: string): boolean {
