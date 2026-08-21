@@ -313,3 +313,39 @@ As an incident-specific regression, EMA2 and EMA3 were re-evaluated read-only on
 Thus a disabled SHORT is suppressed rather than relabelled as LONG. The prepared configs can emit only LONG or no entry. Runtime was not started and no new soak began.
 
 The prior stop is now precisely classified as an expected opposite-side admission veto, not a same-side ownership failure. The generic `500` followed by a permanent recovery marker remains a deferred known contract/liveness issue and was not fixed during cleanup.
+
+## Attempted LONG-only soak start
+
+Attempt date: `2026-08-21`.
+
+Runtime was started for a full LONG-only soak after the cleanup above, then stopped before any new ABI/exchange write completed. The stack state at start was:
+
+- ABI branch/HEAD: `integration/change7-current-design` at `26618391b324ab5958f685d4f526639b30004ef5`;
+- ABI, MDS, and Strategy Engine healthy;
+- Runtime initially absent/stopped, then started healthy and later stopped again;
+- live catalog files `soak-ema2.json`, `soak-ema3.json`, `soak-ema5.json`, `soak-ema10.json`, `soak-ema20.json`, and `soak-ema50.json` all contained `trade_sides.enabled=["long"]`.
+
+MDS delivered genuine closed-bar webhooks after Runtime came up. Runtime journal contains the fresh start event:
+
+```json
+{"event_type":"committed_bar_orchestration_started","occurred_at":"2026-08-21T18:24:59.981135+00:00","payload":{"instrument":"ETHUSDT.P","open_time_ms":1787336400000,"timeframe":"5m"}}
+```
+
+The attempt was stopped because Runtime's durable registered-instance state did not match the prepared LONG-only catalog. Latest state per soak-related instance still contained the old dual-side registrations for EMA2/EMA3/EMA10/EMA20/EMA50 and the previous ETH smoke instance:
+
+```text
+soak-ema2  ema_pullback:c1f6d8a5f3a77c337189ba75  sides=["long","short"]
+soak-ema3  ema_pullback:cf82c56b082da6e2995e1f63  sides=["long","short"]
+soak-ema5  ema_pullback:7ece618beed71c6e3410fd48  sides=["long","short"]
+soak-ema10 ema_pullback:8928d5841bee3fff536e7c59  sides=["long","short"]
+soak-ema20 ema_pullback:191a4b2e10fd9196971a5004  sides=["long","short"]
+soak-ema50 ema_pullback:b8ef3f2caf0ea4c80e268b18  sides=["long","short"]
+eth-smoke  ema_pullback:243bcad65efa36d995d0830c  sides=["long","short"]
+soak-ema5  ema_pullback:1a4edf9e70cbaa92620a6ff6  sides=["long"]
+```
+
+This means the intended six-instance LONG-only soak was not actually armed in Runtime. Continuing would have tested a mixed stale Runtime registration set rather than the prepared LONG-only catalog, so the soak was aborted before proceeding.
+
+No new ABI correlation record was appended after the cleanup entries at `2026-08-21T18:09:12.976Z`. Fresh Runtime journal after start contains only the orchestration start above, without a corresponding completion or ABI write. No exchange mutation was performed by this aborted start beyond starting/stopping Runtime itself.
+
+Result: `ABORTED_BEFORE_VALID_SOAK`. The next attempt needs Runtime durable registrations to be aligned with the LONG-only catalog instance IDs before Runtime is started again.
