@@ -17,10 +17,12 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 
 `entry_order_not_found` SHALL mean only that an eligible ambiguous CREATE record remained
 cleanly absent across the complete three-attempt exact-own order and execution
-observation, every aggregate sanity read was clean and flat, and validated Bybit server
-time proved the completed observation strictly inside the documented seven-day evidence
-window. It SHALL NOT be documented or encoded as a terminal state or as proof that the
-original CREATE never existed or never reached the exchange.
+observation, every aggregate sanity read was clean and either flat or same-side, and
+validated Bybit server time proved the completed observation strictly inside the
+documented seven-day evidence window. Same-side aggregate exposure is non-attributable
+and may belong to a sibling cycle. The outcome SHALL NOT be documented or encoded as a
+terminal state or as proof that the original CREATE never existed or never reached the
+exchange.
 
 #### Scenario: entry_order_live response includes the applied entry package but no fill facts
 - **WHEN** ABI resolves `entry_order_live`
@@ -51,8 +53,10 @@ internal_error` and no `recovery_state`.
 
 A single-pass clean exact-own-order absence and arbitrary aged clean-empty evidence remain
 part of this error class. Only the structurally eligible ambiguous CREATE that completes
-all three clean order/no-execution/flat attempts and passes the post-observation strict
-seven-day Bybit-time gate SHALL return `entry_order_not_found`.
+all three clean order/no-execution attempts with flat or same-side aggregate results and
+passes the post-observation strict seven-day Bybit-time gate SHALL return
+`entry_order_not_found`. A failed/malformed aggregate query or clean opposite-side
+position remains contradictory and part of the safe-error class.
 
 #### Scenario: Query failure returns a safe error
 - **WHEN** an underlying required query fails, times out, or is structurally malformed

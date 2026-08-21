@@ -5,12 +5,14 @@ classifies the exact `order_link_id` through realtime then order history. Its in
 union contains `not_found`, but today a request whose attempts stay absent ends as
 `internal_error`.
 
-Two official Bybit constraints shape the safe boundary:
+Official Bybit constraints shape the safe boundary:
 
-- official [Get Order History](https://bybit-exchange.github.io/docs/v5/order/order-list)
-  and [Get Trade History](https://bybit-exchange.github.io/docs/v5/order/execution)
-  contracts return the most recent seven days when `startTime`/`endTime` are omitted, as
-  the current adapter does;
+- [Get Order History](https://bybit-exchange.github.io/docs/v5/order/order-list) defaults
+  to a seven-day query window when `startTime`/`endTime` are omitted, but Bybit documents
+  only the last 24 hours for Cancelled, Rejected, and Deactivated orders and excludes
+  those statuses from the general last-seven-day closed-order rule;
+- [Get Trade History](https://bybit-exchange.github.io/docs/v5/order/execution) defaults to
+  the most recent seven days when the current adapter omits `startTime`/`endTime`;
 - the official [Demo Trading Service](https://bybit-exchange.github.io/docs/v5/demo)
   contract states that generated Demo orders are kept for seven days.
 
@@ -79,12 +81,15 @@ logic and supersedes earlier absence. An attributable execution prevents the fif
 even if an order row is absent; if existing response fields are insufficient to construct
 `position_open`, the request fails closed rather than misreporting absence. Any query
 failure, malformed envelope/item, identity/category/symbol mismatch, incomplete execution
-pagination, unrecognized result, or non-flat aggregate position taints the cumulative
-absence candidate. Later empty reads cannot erase that taint, although a later positive
-finding is still honored.
+pagination, or unrecognized result taints the cumulative absence candidate. Aggregate
+position remains non-attributable: a clean flat result and a clean position on
+`desired_entry.side` are both compatible, because the latter may belong to a legitimate
+same-side sibling under Change 8. A clean opposite-side position is a structural
+contradiction, and a failed/malformed aggregate query is tainted. Later empty reads cannot
+erase any taint, although a later positive own finding is still honored.
 
-Only three clean order-absent + complete no-execution + clean-flat attempts can proceed
-to freshness validation. The retry count and delay do not change.
+Only three clean order-absent + complete no-execution + aggregate-compatible attempts can
+proceed to freshness validation. The retry count and delay do not change.
 
 ### 3. Freshness is measured by Bybit time and checked after observation
 
@@ -94,17 +99,22 @@ decodes a Bybit server timestamp. The binding is eligible only when:
 
 `0 <= serverNowMs - Date.parse(current_binding_started_at) < 604800000`.
 
-Seven days is not an invented policy value: it is the documented default window for both
-queried history endpoints and the documented Demo order-retention duration. Strict `<`
-avoids claiming coverage at the retention boundary. Checking after the full observation
-ensures the entire completed decision still lies inside the window. Invalid/future
-binding time, server-time failure, or age at/above seven days yields existing
-`internal_error`, never the fifth state.
+Seven days is not an invented policy value. Exposure safety rests on three complementary
+facts: realtime covers a still-live exact own order; exact-own execution history covers
+any fill within its documented default seven-day window; and Demo documents seven-day
+retention for generated orders. Order history is additional positive evidence and may
+reveal a terminal zero-fill order while that status remains queryable, but it is not
+treated as complete seven-day visibility of Cancelled/Rejected/Deactivated zero-fill
+states. Strict `<` avoids claiming coverage at the retention boundary. Checking after the
+full observation ensures the entire completed decision still lies inside the window.
+Invalid/future binding time, server-time failure, or age at/above seven days yields
+existing `internal_error`, never the fifth state.
 
-The current order/execution adapter requests need no `startTime`/`endTime`: while the
-binding is strictly inside the current seven-day window, their documented default window
-covers its entire possible lifetime. This avoids implying support for historical slicing
-that the existing primitives do not expose.
+The current execution adapter needs no `startTime`/`endTime`: while the binding is
+strictly inside the current seven-day window, its documented default window covers the
+binding's possible fill lifetime. The order-history adapter also defaults to seven days,
+but its status-specific shorter queryability remains explicitly non-authoritative for the
+absence proof.
 
 ### 4. Execution evidence reuses the existing exact-own paginated primitive
 
@@ -127,6 +137,10 @@ When `desired_entry:null` targets a record that still has the ambiguous-CREATE s
 shape, clean order absence may reach `EntryPackageAbsent` only after the CANCEL request
 itself completes the same three-attempt order/no-execution observation and passes the same
 post-observation Bybit-time freshness gate.
+
+Its aggregate rule is identical to GET: clean flat or clean same-side is compatible;
+opposite-side is contradictory; failed/malformed aggregate evidence fails closed. A
+same-side sibling cannot suppress formal absence of this cycle's exact identity.
 
 If a live order appears, existing exact cancel behavior applies. If terminal/fill evidence
 appears, existing positive handling applies and absence is not fabricated. If evidence is

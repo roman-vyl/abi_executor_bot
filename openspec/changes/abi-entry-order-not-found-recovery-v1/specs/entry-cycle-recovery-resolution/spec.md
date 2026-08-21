@@ -15,10 +15,11 @@ physical position query as a required, co-equal signal. The aggregate physical p
 query SHALL be retained only as a narrow, state-appropriate sanity check that can block a
 resolution this cycle's own positive evidence would otherwise support. It SHALL NEVER be
 required to positively confirm `entry_order_live` or `terminal_without_fill`, and SHALL
-NEVER be consulted when resolving `terminal_after_fill`. The fifth state is the sole
-exception: its conservative non-positive observation requires a clean flat aggregate
-result on every attempt so a physical contradiction cannot be converted into actionable
-absence.
+NEVER be consulted when resolving `terminal_after_fill`. For the fifth state, aggregate
+position remains only a non-attributable veto: clean flat and clean same-side results are
+both compatible, because same-side exposure may belong to a sibling cycle; a clean
+opposite-side position is contradictory, and a failed/malformed aggregate query fails
+closed.
 
 `entry_order_not_found` is the sole non-positive observation in the union and SHALL be
 eligible only for an ambiguous CREATE record with `status` `pending_create` or `unknown`,
@@ -30,17 +31,22 @@ record shape SHALL retain the existing four-state/fail-safe behavior.
 For an eligible record ABI SHALL preserve the existing three-attempt/300-ms recovery
 budget and SHALL NOT resolve on the first clean absence. All three attempts SHALL each
 produce: clean exact-own realtime/history `not_found`, complete paginated exact-own
-execution evidence containing no execution, and a clean flat aggregate position result.
-Any failed, malformed, mismatched, incomplete, or contradictory result taints the
-absence candidate for the rest of that request. A later positive order or fill finding
-SHALL supersede any earlier clean absence and follow the existing positive-state rules.
+execution evidence containing no execution, and a clean aggregate position result that
+is either flat or on `desired_entry.side`. Any failed/malformed aggregate result, clean
+opposite-side position, or other failed, malformed, mismatched, incomplete, or
+contradictory result taints the absence candidate for the rest of that request. A later
+positive own order or fill finding SHALL supersede any earlier clean absence and follow
+the existing positive-state rules.
 
 After the full clean budget, ABI SHALL validate Bybit server time and require
-`0 <= serverNowMs - current_binding_started_at < 604800000`. The seven-day bound is the
-documented default window of the order-history and execution-list queries used here and
-the documented Demo order-retention duration. At or beyond the boundary, or when either
-timestamp is invalid/unavailable, ABI SHALL fail safe and SHALL NOT resolve the fifth
-state.
+`0 <= serverNowMs - current_binding_started_at < 604800000`. Exposure safety relies on
+realtime visibility for a still-live exact own order, the exact-own execution-list
+default seven-day window for any fill, and documented Demo seven-day order retention.
+Order history remains additional positive evidence and may expose terminal zero-fill
+states while queryable; it SHALL NOT be treated as complete seven-day visibility because
+Bybit documents shorter queryability for Cancelled, Rejected, and Deactivated statuses.
+At or beyond the boundary, or when either timestamp is invalid/unavailable, ABI SHALL
+fail safe and SHALL NOT resolve the fifth state.
 
 The outcome states only that this fresh ambiguous CREATE identity remained absent from
 the complete trustworthy bounded evidence. It SHALL NOT be represented as a terminal
@@ -81,8 +87,9 @@ close order's fate is never sufficient to resolve `position_open` or
 
 #### Scenario: Clean exact-own-order absence resolves to entry_order_not_found
 - **WHEN** an eligible ambiguous CREATE record remains cleanly order-absent,
-  execution-absent, and aggregate-flat across all three attempts, and its validated Bybit
-  server-time age at completion is non-negative and strictly below seven days
+  execution-absent, and aggregate-compatible (flat or same-side) across all three
+  attempts, and its validated Bybit server-time age at completion is non-negative and
+  strictly below seven days
 - **THEN** ABI resolves `entry_order_not_found`
 - **AND** ABI makes no claim that the order never existed, never reached Bybit, or never
   filled
@@ -96,10 +103,17 @@ close order's fate is never sufficient to resolve `position_open` or
 
 #### Scenario: One tainted attempt prevents actionable absence
 - **WHEN** any attempt contains a failed/malformed query, identity/category/symbol
-  mismatch, incomplete execution pagination, ambiguous execution result, or non-flat
-  aggregate position, and no later positive evidence resolves another state
+  mismatch, incomplete execution pagination, ambiguous execution result, failed/malformed
+  aggregate query, or clean opposite-side aggregate position, and no later positive own
+  evidence resolves another state
 - **THEN** ABI returns the existing safe error after the bounded budget
 - **AND** later clean-empty attempts in the same request do not erase the taint
+
+#### Scenario: A same-side sibling does not suppress cycle-owned absence
+- **WHEN** every exact-own order/execution/freshness condition passes but one or more clean
+  aggregate reads report a position on `desired_entry.side`
+- **THEN** ABI may resolve `entry_order_not_found`
+- **AND** does not attribute the sibling's aggregate exposure to this ambiguous CREATE
 
 #### Scenario: Attributable execution blocks entry_order_not_found
 - **WHEN** order reads are empty but the exact-own execution query finds at least one
@@ -186,8 +200,8 @@ infer or persist a terminal state.
 
 #### Scenario: Fresh full-budget ambiguous CREATE produces the observation
 - **WHEN** the record meets every ambiguous-CREATE structural condition, all three
-  attempts are clean order/execution absence with clean flat aggregate results, and the
-  post-observation Bybit-time age is strictly below seven days
+  attempts are clean order/execution absence with clean flat or same-side aggregate
+  results, and the post-observation Bybit-time age is strictly below seven days
 - **THEN** ABI resolves `entry_order_not_found`
 - **AND** does not resolve `terminal_without_fill`
 

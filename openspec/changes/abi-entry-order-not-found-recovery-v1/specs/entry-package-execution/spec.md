@@ -11,9 +11,11 @@ For a record with the ambiguous-CREATE shape used by `entry_order_not_found` —
 non-empty exact order identity, valid binding start, and no durable observation/fill/close
 identity — clean order absence SHALL NOT directly confirm absence. Before persisting
 `status:absent` or returning `EntryPackageAbsent`, the CANCEL request itself SHALL repeat
-the complete three-attempt exact-own order/no-execution/clean-flat observation and SHALL
-validate at completion that Bybit server-time binding age is non-negative and strictly
-below seven days. Any aged-out, failed, malformed, mismatched, incomplete, ambiguous, or
+the complete three-attempt exact-own order/no-execution observation and SHALL validate at
+completion that Bybit server-time binding age is non-negative and strictly below seven
+days. A clean flat aggregate and clean same-side aggregate are both compatible; the
+latter may be a sibling cycle and is not attributable to this exact identity. Any
+aged-out, failed, malformed, mismatched, incomplete, ambiguous, opposite-side, or other
 contradictory evidence SHALL fail closed without persisting absence.
 
 This additional gate applies only when absence would be inferred from clean-empty reads
@@ -33,12 +35,24 @@ record shape retain their existing behavior.
 
 #### Scenario: Fresh full-budget ambiguous-CREATE absence can be confirmed
 - **WHEN** `desired_entry` is null for the ambiguous-CREATE shape, all three CANCEL-side
-  attempts are cleanly exact-order absent, exact-execution absent, and aggregate flat,
-  and validated Bybit server time proves completed binding age strictly below seven days
+  attempts are cleanly exact-order absent and exact-execution absent, every clean
+  aggregate result is flat or same-side, and validated Bybit server time proves completed
+  binding age strictly below seven days
 - **THEN** ABI MAY durably persist `status:absent` and return exact
   `EntryPackageAbsent`
 - **AND** this confirmation does not assert that the original CREATE never existed or
   never reached Bybit
+
+#### Scenario: Same-side sibling exposure remains compatible with formal absence
+- **WHEN** every exact-own and freshness condition passes but clean aggregate position
+  reports exposure on the desired side belonging potentially to a sibling cycle
+- **THEN** ABI SHALL NOT suppress `EntryPackageAbsent` on that aggregate fact alone
+- **AND** SHALL not attribute the sibling exposure to this exact order identity
+
+#### Scenario: Opposite-side or unavailable aggregate evidence fails closed
+- **WHEN** any attempt reports a clean opposite-side aggregate position or the aggregate
+  query fails or is malformed
+- **THEN** ABI SHALL NOT persist `status:absent` or return `EntryPackageAbsent`
 
 #### Scenario: Aged-out clean-empty evidence never confirms absence
 - **WHEN** `desired_entry` is null for the ambiguous-CREATE shape and completed binding

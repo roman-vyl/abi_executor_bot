@@ -14,8 +14,9 @@
 - [ ] 2.1 Accumulate `entry_order_not_found` eligibility across all three existing
   recovery attempts instead of returning after the first order `not_found`.
 - [ ] 2.2 Require every attempt to have clean exact-order absence, complete clean
-  no-execution evidence, and clean non-contradictory aggregate state; taint the candidate
-  permanently within the request on any failed/malformed/mismatched result.
+  no-execution evidence, and clean non-contradictory aggregate state; accept both flat and
+  same-side aggregate results, but taint the candidate permanently on opposite-side or
+  failed/malformed aggregate evidence and any other failed/mismatched result.
 - [ ] 2.3 Preserve positive-state priority so a later live, terminal, or fill finding
   supersedes any earlier clean absence.
 - [ ] 2.4 Add the fifth typed/HTTP result with all conditional fields null and keep the GET
@@ -25,7 +26,7 @@
 
 - [ ] 3.1 For `desired_entry:null` against the ambiguous-CREATE shape, require the same
   full order/execution/freshness gate before clean absence can persist `status:absent` or
-  return `EntryPackageAbsent`.
+  return `EntryPackageAbsent`, with flat and same-side aggregate results compatible.
 - [ ] 3.2 Preserve existing positive behavior: cancel an exact live order; honor terminal
   or fill evidence; return safe error without absence persistence for ambiguous or
   aged-out evidence.
@@ -44,7 +45,9 @@
   server time for both GET and corrective CANCEL.
 - [ ] 4.5 Test that an observation obtained before expiry cannot produce
   `EntryPackageAbsent` when the corrective CANCEL completes at/after expiry.
-- [ ] 4.6 Run `npm test`, `npm run typecheck`, and strict OpenSpec validation.
+- [ ] 4.6 Test that a same-side sibling position does not suppress either the fifth state
+  or corrective absence, while opposite-side and failed/malformed aggregate evidence do.
+- [ ] 4.7 Run `npm test`, `npm run typecheck`, and strict OpenSpec validation.
 
 ## 5. Coordinated Phase A verification
 
