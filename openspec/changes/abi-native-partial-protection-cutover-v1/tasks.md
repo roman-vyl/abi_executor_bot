@@ -94,16 +94,16 @@
 
 ## 7. Rollout Acceptance and Evidence
 
-- [ ] 7.1 Record the pre-cutover rollback commit and deploy only the completed single-path revision; do not
+- [x] 7.1 Record the pre-cutover rollback commit and deploy only the completed single-path revision; do not
   deploy an intermediate state that admits same-side sharing before native protection and pair-scoped close
   are the only paths.
-- [ ] 7.2 Apply the separately approved Runtime→Engine timeout override operationally without changing ABI or
+- [x] 7.2 Apply the separately approved Runtime→Engine timeout override operationally without changing ABI or
   treating it as a Change 8 code task; verify Runtime, Engine, and ABI health before trading smoke.
-- [ ] 7.3 On Bybit Demo only, prove a sole owner uses canonical Partial entry, attributable native protection,
+- [x] 7.3 On Bybit Demo only, prove a sole owner uses canonical Partial entry, attributable native protection,
   and pair-scoped close with no legacy call; clean up only exact smoke entities and stop on any ambiguity.
-- [ ] 7.4 In a separate Bybit Demo phase, prove two same-side cycles coexist with independent entries and
+- [x] 7.4 In a separate Bybit Demo phase, prove two same-side cycles coexist with independent entries and
   protection, then close one and verify the sibling's exposure, entry state, child IDs, and correlation are
   unchanged; separately prove opposite-side admission is rejected before an exchange write.
-- [ ] 7.5 Report recovery acceptance separately from the next genuine-bar pipeline acceptance, preserve
+- [x] 7.5 Report recovery acceptance separately from the next genuine-bar pipeline acceptance, preserve
   `PAIR/OCO BINDING AFTER AMEND: NOT PROVEN`, confirm no experimental orders/positions remain, and stop the
   rollout on any failed invariant rather than enabling a fallback.
