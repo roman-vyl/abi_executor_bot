@@ -146,3 +146,86 @@ The principal acceptance case, â€œowner A closes while owner B remains active,â€
 - No manual exchange cleanup was performed, preserving evidence as required.
 - Before Runtime is restarted, an operator must explicitly decide how to handle the six configs, the two pending recovery markers, and the three live ETH entries. Restarting Runtime unchanged would resume the two `unknown_trade_cycle_binding` recovery loops and may start more test work.
 
+## Forensic appendix: pre-binding `500` root cause
+
+Investigation date: `2026-08-21`. No Runtime process or exchange mutation was used. The original target bar was replayed directly through the read-only Strategy Engine projection endpoint, and the resulting side was evaluated against the exact ABI durable scope state.
+
+### Reconstructed exact entry-package inputs
+
+Both failed Runtime requests used:
+
+```json
+{"ticker":"ETHUSDT.P","risk_multiplier":"1"}
+```
+
+EMA2 desired entry:
+
+```json
+{
+  "side": "short",
+  "source_plan_bar_open_time_ms": 1787332800000,
+  "planned_entry_price": "2405.8847543674137",
+  "initial_stop_price": "2483.9561829388426",
+  "initial_take_price": "2327.813325795985",
+  "locked_exit_profile": "neutral"
+}
+```
+
+EMA3 desired entry:
+
+```json
+{
+  "side": "short",
+  "source_plan_bar_open_time_ms": 1787332800000,
+  "planned_entry_price": "2407.2631211278012",
+  "initial_stop_price": "2485.33454969923",
+  "initial_take_price": "2329.1916925563723",
+  "locked_exit_profile": "neutral"
+}
+```
+
+At both attempts, the authoritative latest-record set for `linear:ETHUSDT` contained three active owners, all `long`:
+
+```json
+[
+  {"strategy_instance_id":"ema_pullback:191a4b2e10fd9196971a5004","trade_cycle_id":"b4695ef1-3198-4e7a-aec1-f400762d60af","status":"applied","side":"long"},
+  {"strategy_instance_id":"ema_pullback:243bcad65efa36d995d0830c","trade_cycle_id":"7266ea24-519f-4ce2-b3d6-7f5b37854613","status":"applied","side":"long"},
+  {"strategy_instance_id":"ema_pullback:b8ef3f2caf0ea4c80e268b18","trade_cycle_id":"58593956-af12-4513-9815-1d4fc5175d1d","status":"applied","side":"long"}
+]
+```
+
+Running the production `classifyScopeAdmission()` against this exact set and either failed command's `requestedSide="short"` returned:
+
+```json
+{"classification":"opposite_side"}
+```
+
+### Exact failing boundary
+
+The failure is `EntryPackageApplicationService.createOrder()`'s scope admission:
+
+1. `findActiveRecordsForScope("linear", "ETHUSDT")` returns the three active `long` records.
+2. `classifyScopeAdmission(activeRecords, command, "short")` returns `opposite_side` (`entryPackageApplicationService.ts:373-374`, classifier return at line 890 in commit `b590853`).
+3. The scope-lock callback returns `"conflict"` at lines 381-382.
+4. `createOrder()` returns `internalErrorResult()` at lines 395-400.
+
+Consequently, line 390 (`correlationRepository.save(provisional)`) is not reached. The mapper and `executeEntryOrder()`/Bybit create path below line 403 are also not reached. This exactly explains all original evidence: approximately 1 ms duration, no correlation line, no persisted orderLinkId/orderId, and no corresponding Bybit order.
+
+The existing service-level test `opposite-side and corrupt scope ownership fail before correlation or exchange write` independently proves the same path: the opposite-side request returns internal error, the fake Bybit create-call count does not increase, and the requesting pair remains absent from the repository. The full ABI suite passed during the forensic pass: 672 tests, 672 passed.
+
+### Why EMA20/EMA50 passed
+
+EMA20 and EMA50 each produced a `long` desired entry on the same bar. Their requested side matched every already-active ETH owner, so admission classified the scope as `empty` for the first owner and `same_side` for subsequent owners. Their provisional records were saved and their exchange creates proceeded. EMA2 and EMA3 produced `short`, so they hit the opposite-side veto. The differing outcome is side-based, not EMA-period handling, quantity calculation, mutex failure, or repository failure.
+
+### Root-cause classification
+
+- The exchange-safety decision to reject an opposite-side owner is intentional and correct.
+- The primary `500` is therefore not a multi-owner implementation defect. The same result occurs with one active opposite-side owner; multi-spec operation merely made opposing strategy directions occur naturally.
+- The correctness/liveness defect is the protocol classification: a deterministic pre-write scope rejection is exposed as generic `500 internal_error`. Runtime must conservatively treat that response as a potentially ambiguous APPLY and stores a recovery marker, but ABI has deliberately persisted no binding, so recovery can only return `unknown_trade_cycle_binding`.
+- The previously reported recovery loop is a consequence of this classification mismatch. It was not changed in this investigation.
+
+### Minimal correction direction (not implemented)
+
+Introduce a coordinated, typed, explicitly non-ambiguous entry-package rejection for the pre-write opposite-side scope veto. ABI should return that outcome only when the scope-lock proof rejects before `save(provisional)` and before any exchange dispatch. Runtime should decode it as a deterministic rejected/no-write attempt and must not create `pending_entry_recovery` for it.
+
+This is preferable to weakening opposite-side admission, fabricating an ABI binding, or treating arbitrary `unknown_trade_cycle_binding` as proof of no write. Exact public status/code and Runtime state transition require a small coordinated contract change. No correction was applied here.
