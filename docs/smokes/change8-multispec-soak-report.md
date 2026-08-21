@@ -229,3 +229,87 @@ EMA20 and EMA50 each produced a `long` desired entry on the same bar. Their requ
 Introduce a coordinated, typed, explicitly non-ambiguous entry-package rejection for the pre-write opposite-side scope veto. ABI should return that outcome only when the scope-lock proof rejects before `save(provisional)` and before any exchange dispatch. Runtime should decode it as a deterministic rejected/no-write attempt and must not create `pending_entry_recovery` for it.
 
 This is preferable to weakening opposite-side admission, fabricating an ABI binding, or treating arbitrary `unknown_trade_cycle_binding` as proof of no write. Exact public status/code and Runtime state transition require a small coordinated contract change. No correction was applied here.
+
+## Cleanup and LONG-only preparation
+
+Cleanup/preparation date: `2026-08-21`. This section supersedes the residual-state bullets recorded at the original stop; it does not change the original `FAIL / BLOCKED` verdict.
+
+### Pre-cleanup ownership inventory
+
+Runtime remained stopped. ETH was physically flat and the following three exact orders were the complete active `ETHUSDT` set:
+
+| Owner | Cycle | orderLinkId | orderId | State |
+|---|---|---|---|---|
+| soak EMA20 `ema_pullback:191a4b2e10fd9196971a5004` | `b4695ef1-3198-4e7a-aec1-f400762d60af` | `abi-ep-ac09032d835a6dc02cc2` | `bff049bb-4777-4e6d-9a43-7afaad61994d` | `Untriggered`, qty `0.01`, fill `0` |
+| soak EMA50 `ema_pullback:b8ef3f2caf0ea4c80e268b18` | `58593956-af12-4513-9815-1d4fc5175d1d` | `abi-ep-32953da78cadce39e46b` | `e302c7f1-c5a0-4b20-ac38-66c52ed1e4c2` | `Untriggered`, qty `0.01`, fill `0` |
+| pre-existing `eth-ema50-smoke.json`, `ema_pullback:243bcad65efa36d995d0830c` | `7266ea24-519f-4ce2-b3d6-7f5b37854613` | `abi-ep-51638220e91687f9c232` | `07c19b47-c6f9-4ab3-8ae5-30fd384c21f7` | `Untriggered`, qty `0.01`, fill `0` |
+
+The third order's ownership was proven by both the Runtime registered snapshot (`source_path=eth-ema50-smoke.json`) and the matching ABI correlation record, so it was eligible for the requested test-state cleanup.
+
+No protection child existed for any of the three orders. Exact execution queries were empty and aggregate ETH position size was zero.
+
+The two failed cycles still had no ABI correlation record. Their deterministic generation-1 identities were reconstructed solely to make exact exchange reads:
+
+- EMA2: `abi-ep-81b357731b1b9d740fae`;
+- EMA3: `abi-ep-0e4ccf3def25b40595cd`.
+
+Both were absent from realtime/history and had empty exact execution lists. Together with the proven pre-save `opposite_side` boundary, this confirms that neither failed cycle caused an exchange write.
+
+### Mutations and cleanup result
+
+Three pair-scoped ABI `PUT .../entry-package` requests with `desired_entry=null` were sent for the exact bound cycles above. Each returned HTTP 200 `entry_package_absent`. Read-back showed the same three order IDs in history as `Deactivated`, `cumExecQty="0"`, `leavesQty="0"`; active ETH orders became empty. No account-wide or symbol-wide cancel was used.
+
+Because there was no exposure or materialized protection, cleanup sent no protection cancellation and no reduce-only close.
+
+With Runtime still stopped, its canonical fsync-backed append-only state repository was used to append cleared snapshots for:
+
+- EMA20 and EMA50 soak current cycles after their matching ABI `EntryPackageAbsent` confirmations;
+- the proven pre-existing ETH smoke current cycle after its matching ABI confirmation;
+- EMA2 and EMA3 pending recovery markers after proving no ABI binding and no exchange write.
+
+Final read-back:
+
+- all six prior soak instances: `current_trade_cycle=null`, `pending_entry_recovery=null`;
+- pre-existing ETH smoke instance: `current_trade_cycle=null`, `pending_entry_recovery=null`;
+- three ABI bindings: durable `status=absent`, null entry identity and no pending action;
+- Bybit ETH active orders: `[]`;
+- Bybit ETH position: flat (`size="0"`);
+- soak protection children: none;
+- exact executions for all three former bindings and both failed prospective identities: none.
+
+### Prepared LONG-only catalog
+
+The supported Strategy Engine configuration mechanism was used without code changes:
+
+```json
+{"trade_sides":{"enabled":["long"]}}
+```
+
+The six files remain `soak-ema2.json`, `soak-ema3.json`, `soak-ema5.json`, `soak-ema10.json`, `soak-ema20.json`, and `soak-ema50.json`. Because side eligibility is part of semantic identity, their instance IDs changed:
+
+| EMA | Prepared LONG-only instance ID |
+|---:|---|
+| 2 | `ema_pullback:fe2d8446d4b917803a3f1115` |
+| 3 | `ema_pullback:9b45068fd5d1f833a82ba5a5` |
+| 5 | `ema_pullback:1a4edf9e70cbaa92620a6ff6` |
+| 10 | `ema_pullback:2a008f42491af59f78220d62` |
+| 20 | `ema_pullback:75a7a31b44c1d79f560cd753` |
+| 50 | `ema_pullback:54695e606ce7f06cb43b39a4` |
+
+Combined live-catalog validation (without starting Runtime) reported:
+
+```text
+scanned=10 accepted=10 soak_accepted=6 invalid=0 duplicates=0
+```
+
+All six accepted soak deployments decode `trade_sides.enabled` as the exact tuple `("long",)`. Strategy Engine constructs side-specific entry candidates only for enabled sides; its existing range test proves a LONG-only spec exposes only the `long` potential-entry key.
+
+As an incident-specific regression, EMA2 and EMA3 were re-evaluated read-only on target bar `1787332800000`, where their prior dual-side configs produced SHORT entries. Both LONG-only configs returned HTTP 200:
+
+```json
+{"desired_entry":null}
+```
+
+Thus a disabled SHORT is suppressed rather than relabelled as LONG. The prepared configs can emit only LONG or no entry. Runtime was not started and no new soak began.
+
+The prior stop is now precisely classified as an expected opposite-side admission veto, not a same-side ownership failure. The generic `500` followed by a permanent recovery marker remains a deferred known contract/liveness issue and was not fixed during cleanup.
