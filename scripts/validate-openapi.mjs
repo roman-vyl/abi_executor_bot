@@ -60,11 +60,11 @@ const expectedDocuments = [
         requestBody: "required",
       },
       {
-        method: "delete",
-        httpMethod: "DELETE",
-        path: `${routePrefix}/open-position`,
-        responses: ["200", "422", "500"],
-        requestBody: "absent",
+        method: "post",
+        httpMethod: "POST",
+        path: `${routePrefix}/close`,
+        responses: ["200", "400", "415", "422", "500"],
+        requestBody: "required",
       },
     ],
     validate: validatePositionManagementDocument,
@@ -281,7 +281,7 @@ function validateEntryCycleRecoveryDocument(document) {
 function validatePositionManagementDocument(document) {
   const schemas = document.components.schemas;
   const protectionOperation = document.paths[`${routePrefix}/protection`].put;
-  const closeOperation = document.paths[`${routePrefix}/open-position`].delete;
+  const closeOperation = document.paths[`${routePrefix}/close`].post;
 
   assert.deepEqual(schemas.ProtectionRequest.required, ["stop_price", "take_price"]);
   assert.equal(schemas.ProtectionRequest.additionalProperties, false);
@@ -296,7 +296,11 @@ function validatePositionManagementDocument(document) {
     "#/components/schemas/PositionNotOpenError",
   ]);
 
-  assert.equal("requestBody" in closeOperation, false);
+  assert.deepEqual(closeOperation.requestBody.content["application/json"].schema, {
+    $ref: "#/components/schemas/CloseRequest",
+  });
+  assert.deepEqual(schemas.CloseRequest.required, ["exposure_fraction"]);
+  assert.equal(schemas.CloseRequest.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.properties.status.const, "trade_cycle_closed");
 
@@ -305,12 +309,14 @@ function validatePositionManagementDocument(document) {
     "#/components/schemas/ValidationFailedError",
     "#/components/schemas/UnknownTradeCycleBindingError",
     "#/components/schemas/UnsupportedExchangeScopeError",
+    "#/components/schemas/CloseExecutionIncompleteError",
   ]);
   assert.equal(JSON.stringify(schemas.CloseBusinessError).includes("PositionNotOpenError"), false);
 
   assert.ok(protectionOperation.requestBody.content["application/json"].examples.withTake);
   assert.ok(protectionOperation.requestBody.content["application/json"].examples.stopOnly);
   assert.ok(protectionOperation.responses["200"].content["application/json"].examples.applied);
+  assert.ok(closeOperation.requestBody.content["application/json"].examples.fullClose);
   assert.ok(closeOperation.responses["200"].content["application/json"].examples.closed);
 
   assertForbiddenText(document, ["bybit", "Bybit", "adapter", "positionIdx", "orderLinkId"]);

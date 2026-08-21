@@ -41,11 +41,10 @@ export type ReconciliationFailureReason =
   | "amend_rejected" // Bybit rejected an amend call
   | "amend_race" // fresh evidence right before amend no longer matches what triggered the amend
   | "read_back_mismatch" // post-amend fresh read-back does not match desired state
-  // Caller-surfaced (design.md Decisions 4/5/11) — never produced inside
+  // Caller-surfaced — never produced inside
   // reconcileNativePartialProtection itself, which only ever consumes an
-  // already-resolved DesiredProtectionState. Widened onto this same union
-  // so ProtectionApplicationService.reconcileNativePartial() has exactly
-  // one failure vocabulary to report through, rather than a parallel one.
+  // already-resolved DesiredProtectionState. Kept on the same union so the
+  // production application service has one failure vocabulary.
   | "no_authoritative_qty" // resolveCurrentOwnFilledQty could not obtain any own fill evidence
   | "trading_rules_unavailable"; // InstrumentTradingRulesProvider.getRules() threw on the null-take path
 
@@ -120,9 +119,8 @@ function matchesDesired(actual: { stop: AttachedProtectionLeg; take: AttachedPro
 // in-place amend — never create, never cancel (design.md Decisions 1, 6,
 // 7, 9). No internal retry loop, no caching, no durable read/write: one
 // reconciliation attempt per call; the caller owns retry/error-mapping
-// policy, mirroring resolveOwnAttachedProtection()'s own shape. Not wired
-// to any production-decision path — see ProtectionApplicationService's
-// reconcileNativePartial(), the only intended future caller.
+// policy, mirroring resolveOwnAttachedProtection()'s own shape. The
+// production ProtectionApplicationService is the sole caller.
 export async function reconcileNativePartialProtection(input: {
   bybit: BybitAdapter;
   category: "linear" | "spot";

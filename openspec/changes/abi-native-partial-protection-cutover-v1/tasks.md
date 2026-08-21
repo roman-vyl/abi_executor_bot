@@ -1,94 +1,94 @@
 ## 1. Canonical Partial Entry Mapping
 
-- [ ] 1.1 Change `mapEntryPackageToBybit()` so every canonical live entry payload carries
+- [x] 1.1 Change `mapEntryPackageToBybit()` so every canonical live entry payload carries
   `tpslMode: "Partial"` with the existing attached Market stop/take fields, preserving exact strings,
   trigger-direction mapping, `positionIdx`, and stable entry identity.
-- [ ] 1.2 Fold the Partial payload tests into the canonical mapper suite, cover long and short entries,
+- [x] 1.2 Fold the Partial payload tests into the canonical mapper suite, cover long and short entries,
   and remove `buildPartialProtectionEntryOrderPayload()` plus every production/test reference to the
   parallel builder.
-- [ ] 1.3 Add a structural regression assertion that production entry mapping contains no `Full` mode
+- [x] 1.3 Add a structural regression assertion that production entry mapping contains no `Full` mode
   or owner-count-dependent mapper selection.
 
 ## 2. Native Protection as the Only Production Path
 
-- [ ] 2.1 Refactor `ProtectionApplicationService` so its existing public `apply()`/`process()` validation,
+- [x] 2.1 Refactor `ProtectionApplicationService` so its existing public `apply()`/`process()` validation,
   per-pair locking, durable-absence handling, active-membership checks, and live guard feed the native
   Partial desired-state/reconciliation pipeline without nested mutex acquisition.
-- [ ] 2.2 Remove the shared-owner rejection and map native reconciliation outcomes to the existing closed
+- [x] 2.2 Remove the shared-owner rejection and map native reconciliation outcomes to the existing closed
   public success/error contract; permit both sole owners and valid same-side shared owners through the
   identical lifecycle.
-- [ ] 2.3 Delete the legacy position-level protection read/write flow and all production calls to
+- [x] 2.3 Delete the legacy position-level protection read/write flow and all production calls to
   `executeProtectionUpdate()`/`setTradingStop()`; remove the adapter/execution primitive and fake support
   if repository-wide reference search confirms no remaining consumer.
-- [ ] 2.4 Replace legacy protection tests with focused native-path tests for already-satisfied state,
+- [x] 2.4 Replace legacy protection tests with focused native-path tests for already-satisfied state,
   explicit take, null-take surrogate, trigger-only amend, quantity synchronization, fresh post-amend
   read-back, typed dependency failure, terminal/ambiguous children, and skipped live execution.
-- [ ] 2.5 Add identical owner-count-one and owner-count-many protection cases proving only exact
+- [x] 2.5 Add identical owner-count-one and owner-count-many protection cases proving only exact
   `parentOrderLinkId`-attributed child IDs are observed/amended and every sibling child remains unchanged.
 
 ## 3. Pair-Scoped Close for Every Owner Count
 
-- [ ] 3.1 Remove the single-owner raw aggregate `row.size` close branch and route every active cycle
+- [x] 3.1 Remove the single-owner raw aggregate `row.size` close branch and route every active cycle
   through exact entry neutralization and final exact-own fill resolution before any protection or close
   decision; never derive own quantity from aggregate position state.
-- [ ] 3.2 Implement bounded pre-close exact-child neutralization using
+- [x] 3.2 Implement bounded pre-close exact-child neutralization using
   `resolveOwnAttachedProtection()`: cancel an active
   attributed child by exact `orderId`, re-resolve after each ACK to respect pair-coupled deactivation, and
   require both own legs inactive/terminal or safely absent under existing attribution/lifecycle rules before
   aggregate sanity, close-identity dispatch/recovery, or any market-close write; ambiguity/failure sends no
   close.
-- [ ] 3.3 Implement the aggregate sanity truth table after protection neutralization: for zero own exposure,
+- [x] 3.3 Implement the aggregate sanity truth table after protection neutralization: for zero own exposure,
   flat/same-side are compatible and opposite/failed/malformed fail; for positive own exposure, only
   same-side size `>=` own exposure is compatible, while flat, smaller, opposite, failed, or malformed fail;
   never source own quantity or completion proof from aggregate state.
-- [ ] 3.4 Generalize prior-close lookup, durable-before-dispatch identity, and resend suppression to every
+- [x] 3.4 Generalize prior-close lookup, durable-before-dispatch identity, and resend suppression to every
   owner count only after the pre-close protection and aggregate gates pass, preserving same-identity recovery
   and fail-closed live/ambiguous outcomes across create exceptions and confirmation timeouts.
-- [ ] 3.5 Make the final `terminal_closed` gate freshly reverify exact entry neutralization, exact own close execution
+- [x] 3.5 Make the final `terminal_closed` gate freshly reverify exact entry neutralization, exact own close execution
   for positive exposure (or clean zero own exposure), and verified own-child inactivity, while allowing a
   same-side sibling to keep aggregate position and its own orders active.
-- [ ] 3.6 Add close tests for sole-owner and shared-owner positive exposure, clean zero own exposure,
+- [x] 3.6 Add close tests for sole-owner and shared-owner positive exposure, clean zero own exposure,
   every aggregate truth-table row, exact/partial/zero close execution, never-created resend, ambiguous prior
   close, pair-coupled child cancel, terminal child read-back, duplicate/ambiguous attribution, and every
   durable/write crash boundary; assert zero close-order writes whenever pre-close protection is active,
   ambiguous, failed, or unconfirmed.
-- [ ] 3.7 Add sibling-isolation assertions proving close never submits a sibling entry/child `orderId`, never
+- [x] 3.7 Add sibling-isolation assertions proving close never submits a sibling entry/child `orderId`, never
   uses cancel-all/symbol-wide cancellation, never changes sibling correlation, and never includes sibling
   exposure in quantity.
 
 ## 4. Activate Side-Aware Same-Side Admission
 
-- [ ] 4.1 Remove the temporary production guard around `classifyScopeAdmission()` so `empty` and
+- [x] 4.1 Remove the temporary production guard around `classifyScopeAdmission()` so `empty` and
   `same_side` proceed while `opposite_side` and `corrupt` fail before any exchange write, with the existing
   atomic durable-claim ordering preserved.
-- [ ] 4.2 Extend service-level admission tests for a first owner, sequential and concurrent same-side join,
+- [x] 4.2 Extend service-level admission tests for a first owner, sequential and concurrent same-side join,
   same-pair retry with siblings, opposite-side rejection, corrupt/missing-side rejection, exact one-winner
   behavior where appropriate, and restart replay of multiple same-side owners.
-- [ ] 4.3 Add an end-to-end service composition test proving two genuine same-side entry-package PUT flows
+- [x] 4.3 Add an end-to-end service composition test proving two genuine same-side entry-package PUT flows
   both create canonical Partial entries and remain independently active; ensure no test-only repository
   seeding is used to establish the second owner.
 
 ## 5. Public Contract and Dead-Path Removal
 
-- [ ] 5.1 Remove `shared_scope_protection_unsupported` from domain unions, result helpers, route mapping,
+- [x] 5.1 Remove `shared_scope_protection_unsupported` from domain unions, result helpers, route mapping,
   OpenAPI, fakes, and tests while leaving all remaining protection/close request and response DTOs unchanged.
-- [ ] 5.2 Update public contract tests so a valid same-side shared-scope protection request follows the normal
+- [x] 5.2 Update public contract tests so a valid same-side shared-scope protection request follows the normal
   native lifecycle and exchange ambiguity remains a secret-safe `internal_error`.
-- [ ] 5.3 Run repository-wide forbidden-path checks and remove dead comments/helpers/imports for legacy
+- [x] 5.3 Run repository-wide forbidden-path checks and remove dead comments/helpers/imports for legacy
   `tpslMode: "Full"`, position-level `setTradingStop`, owner-count protection rejection, raw aggregate close
   quantity, and the proof-only reconciliation entry point; retain no callable fallback or feature flag.
 
 ## 6. Cross-Capability Safety Verification
 
-- [ ] 6.1 Add an integration matrix covering single owner and two same-side owners from entry creation through
+- [x] 6.1 Add an integration matrix covering single owner and two same-side owners from entry creation through
   protection reconciliation and close-one terminalization, asserting exact identities, quantities,
   attribution, durable ordering, and untouched sibling state at every step.
-- [ ] 6.2 Add negative integration cases for opposite-side/corrupt admission, non-attributed/duplicate native
+- [x] 6.2 Add negative integration cases for opposite-side/corrupt admission, non-attributed/duplicate native
   children, malformed or failed exchange queries, guard-skipped mutations, and aggregate/own-evidence
   contradictions, proving no fabricated `2xx` and no legacy fallback.
-- [ ] 6.3 Verify existing ambiguous-create recovery, entry-package retry/idempotency, correlation replay,
+- [x] 6.3 Verify existing ambiguous-create recovery, entry-package retry/idempotency, correlation replay,
   position lookup, dry-run behavior, demo/testnet execution gates, and mainnet live blocking remain green.
-- [ ] 6.4 Run `npm test`, `npm run typecheck`, the repository's OpenAPI/contract verification, and
+- [x] 6.4 Run `npm test`, `npm run typecheck`, the repository's OpenAPI/contract verification, and
   `openspec validate abi-native-partial-protection-cutover-v1 --strict`; record and resolve every failure
   causally introduced by the cutover.
 

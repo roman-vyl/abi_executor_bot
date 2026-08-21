@@ -75,18 +75,6 @@ export type PlaceMarketOrderInput = {
   orderLinkId: string;
 };
 
-// Both legs are always present: a protection write is a full-state replace,
-// never a partial patch (position-management-api's contract requires
-// stop_price on every request and take_price null-or-positive). "0" is
-// Bybit's own convention on this endpoint for "remove this leg" — callers
-// pass it explicitly rather than an optional/absent field.
-export type SetTradingStopInput = {
-  category: string;
-  symbol: string;
-  stopLoss: string;
-  takeProfit: string;
-};
-
 export interface BybitAdapter {
   getServerTime(): Promise<unknown>;
   getWalletBalance(input?: GetWalletBalanceInput): Promise<unknown>;
@@ -113,7 +101,6 @@ export interface BybitAdapter {
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
-  setTradingStop(input: SetTradingStopInput): Promise<unknown>;
 }
 
 export type GetWalletBalanceInput = {
@@ -316,22 +303,6 @@ export class RestBybitAdapter implements BybitAdapter {
     return stub("placeMarketOrder", input);
   }
 
-  // Position-level protection write, not an order amend — replaces the
-  // whole current stop-loss/take-profit state for the position
-  // (positionIdx=0, tpslMode=Full), never a delta.
-  async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    return this.signedPost("/v5/position/trading-stop", {
-      category: input.category,
-      symbol: input.symbol,
-      positionIdx: 0,
-      tpslMode: "Full",
-      stopLoss: input.stopLoss,
-      takeProfit: input.takeProfit,
-      tpTriggerBy: this.config.bybitTriggerBy,
-      slTriggerBy: this.config.bybitTriggerBy,
-    });
-  }
-
   private async signedGet(path: string, params: URLSearchParams): Promise<unknown> {
     if (this.config.bybitApiKey === "" || this.config.bybitApiSecret === "") {
       throw new Error("BYBIT_API_KEY and BYBIT_API_SECRET are required");
@@ -477,10 +448,6 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {
     return stub("placeMarketOrder", input);
-  }
-
-  async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    return stub("setTradingStop", input);
   }
 
 }

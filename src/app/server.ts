@@ -77,6 +77,7 @@ export function startServer(config: AbiConfig): void {
     correlationRepository,
     mutex,
     openPositionResolutionService,
+    tradingRules: rulesProvider,
   });
 
   // Reuses the same pair-level `mutex`, never `scopeMutex` — release of a

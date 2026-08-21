@@ -46,7 +46,6 @@ export type PositionManagementErrorCode =
   | "unsupported_exchange_scope"
   | "position_not_open"
   | "close_execution_incomplete"
-  | "shared_scope_protection_unsupported"
   | "internal_error";
 
 export type PositionManagementErrorResponse = {
@@ -372,23 +371,6 @@ export function closeExecutionIncompleteResult(): PositionManagementHttpResult {
     422,
     "close_execution_incomplete",
     "the requested cycle's own close order did not fully execute the resolved exposure",
-  );
-}
-
-// Protection-only: the requesting pair is confirmed to be one of the
-// scope's active owners, but that scope currently has more than one active
-// owner — PUT .../protection's single position-level write cannot be
-// safely attributed to just one of them (abi-same-side-virtual-exposure-
-// ownership-v1). In production today this scope is structurally
-// unreachable: EntryPackageApplicationService's own admission guard never
-// lets a second active owner, of any side, come to exist — this exists so
-// the check is real and tested ahead of the change that will eventually
-// make it reachable.
-export function sharedScopeProtectionUnsupportedResult(): PositionManagementHttpResult {
-  return errorResult(
-    422,
-    "shared_scope_protection_unsupported",
-    "this scope currently has more than one active owner; protection is not yet supported for it",
   );
 }
 

@@ -7,7 +7,6 @@ import type {
   PlaceMarketOrderInput,
   PositionQueryInput,
   PositionQueryResult,
-  SetTradingStopInput,
 } from "../../src/exchange/bybitAdapter.js";
 import { evaluatePositionQueryResponse } from "../../src/exchange/bybitAdapter.js";
 import type {
@@ -39,7 +38,6 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly getMarketPriceCalls: string[] = [];
   readonly getServerTimeCalls: number[] = [];
   readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
-  readonly setTradingStopCalls: SetTradingStopInput[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
@@ -70,8 +68,6 @@ export class FakeBybitAdapter implements BybitAdapter {
   orderHistoryResponseByLinkId = new Map<string, unknown>();
   position: BybitPosition | null = null;
   marketPrice = "61000.0";
-  setTradingStopResponse: unknown = { retCode: 0, result: {} };
-  setTradingStopError: Error | null = null;
   amendOrderResponse: unknown = { retCode: 0, result: {} };
   amendOrderError: Error | null = null;
   // Optional per-orderId overrides, checked before the flat default
@@ -134,7 +130,13 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {
     this.cancelOrderCalls.push(payload);
-    return { retCode: 0, result: { orderLinkId: payload.orderLinkId } };
+    return {
+      retCode: 0,
+      result: {
+        ...(payload.orderLinkId !== undefined ? { orderLinkId: payload.orderLinkId } : {}),
+        ...(payload.orderId !== undefined ? { orderId: payload.orderId } : {}),
+      },
+    };
   }
 
   async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
@@ -213,13 +215,6 @@ export class FakeBybitAdapter implements BybitAdapter {
     return { retCode: 0, result: {} };
   }
 
-  async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    this.setTradingStopCalls.push(input);
-    if (this.setTradingStopError !== null) {
-      throw this.setTradingStopError;
-    }
-    return this.setTradingStopResponse;
-  }
 }
 
 // Same category/symbol defaulting as withDefaultOrderIdentity below, for a
