@@ -4,10 +4,11 @@ Branch: `integration/change7-current-design`
 Report started: 2026-08-19 (UTC), against the live BBB Demo stack (`bbb_stack`, containers up 3 days at
 campaign start: `strategy-runtime`, `abi`, `strategy-engine`, `market-data-service`, all `healthy`).
 
-**Status: STOPPED at Phase A. A pre-existing, severe production blocker was found on the very first
-baseline check, before any new smoke work was introduced.** Per the campaign's own rule ("stop at the
-first new failure boundary, collect evidence, report — do not fix"), no further phases (B–F) were
-attempted. No production code, guards, or Runtime contracts were touched. No new Demo trades were placed.
+**Status: STOPPED at Phase A.** The original ambiguous-CREATE liveness blocker was safely recovered on
+`2026-08-21` by the coordinated Runtime-first → ABI rollout (Appendix B), but the first subsequent
+genuine ETH and BTC bars both timed out at Runtime → Strategy Engine before reaching ABI. Recovery
+acceptance is therefore **PASS** while genuine-bar acceptance is **FAIL**. Per the campaign's stop rule,
+no further phases (B–F) were attempted.
 
 ## 1. Current production regression (Phase A) — BLOCKED
 
@@ -335,3 +336,88 @@ this code-path and exchange evidence.
 No production source, OpenSpec artifact, master plan, Runtime state, ABI correlation data, or exchange
 state was modified. The only repository change is this report appendix and the correction of its earlier
 invalid `order_id:null` inference.
+
+## Appendix B — coordinated recovery rollout acceptance
+
+Acceptance ran on `2026-08-21` against Bybit Demo only. Runtime was built from
+`08d8bc175b63ba6be86cc12aacba97985173730f`; ABI was built from
+`99ed26bbba459900cca901e92c83f3633bf23037`. The existing durable volumes under
+`/Users/mcroma/BBB_data` were preserved. Neither incident record was manually edited, no old CREATE was
+replayed, and phases B–F were not started.
+
+### B.1 Runtime-first compatibility gate
+
+Runtime was recreated first at `2026-08-21T14:49:44.937Z` from local image
+`sha256:b0d0e19de3dc7be803d0d58a4ce7b442cf3fcb72f8e4fe04f0a7cb8604b527c8` and became healthy. Before ABI
+was recreated, both durable Runtime states still had `current_trade_cycle:null` and their original
+`pending_entry_recovery.trade_cycle_id`. The still-old ABI returned `500 Internal Server Error` to both
+recovery GETs. No entry-package write appeared in ABI logs in this interval, so the decoder-first rollout
+was inert as designed.
+
+### B.2 Recovery acceptance — PASS
+
+ABI was recreated second at `2026-08-21T14:50:37.775Z` from local image
+`sha256:9a8fc7937136f7cfdf52408a72bbe8f7c84f18abf176c1f52307efa18d2af527c8`. Startup evidence reported
+`bybitEnvironment:"demo"`, `dryRun:false`, `liveTradingEnabled:true`; correlation replay completed before
+readiness became healthy.
+
+The automatic worker then produced the required sequence for each untouched marker:
+
+| Cycle | Recovery GET | Fifth state | Corrective PUT | Formal result |
+|---|---|---|---|---|
+| ETH `c7fd0188-1731-4d80-9dc5-fcd57bc14d2e` | `14:50:57.705Z` | `entry_order_not_found` at `14:51:02.158Z` (4452.54 ms) | `14:51:02.160Z` | `entry_package_absent` at `14:51:05.939Z` (3779.45 ms) |
+| BTC `76d30c85-ed76-4748-a89a-fa69c2afd207` | `14:51:05.945Z` | `entry_order_not_found` at `14:51:09.699Z` (3754.63 ms) | `14:51:09.700Z` | `entry_package_absent` at `14:51:13.407Z` (3706.82 ms) |
+
+The public operation log does not emit one row per internal observation attempt. The live fifth-state
+responses nevertheless certify that the implemented three-attempt order/execution/aggregate gate and
+post-observation freshness check completed successfully; the subsequent `entry_package_absent` results
+certify that the independent corrective-CANCEL gate also completed. No claim is made that individual
+attempt latency can be reconstructed from these logs.
+
+After the two formal absent results, Runtime durably reported for both instances:
+
+```json
+{"current_trade_cycle":null,"pending_entry_recovery":null}
+```
+
+ABI durably reported `status:"absent"`, `desired_entry:null`, `pending_action:null`, no current
+`order_link_id`/`order_id`, and one closed historical binding with the original exact identity and
+`end_reason:"cancelled"`. ETH was updated at `14:51:05.933Z`; BTC at `14:51:13.406Z`.
+
+### B.3 Old identity non-resurrection — PASS
+
+After neutralization, signed GET-only Bybit Demo reads were repeated for both original identities. All
+three endpoints returned clean successful empty lists:
+
+```json
+{"symbol":"ETHUSDT","orderLinkId":"abi-ep-2ece167a9819694a6130","realtime":{"retCode":0,"result":{"category":"linear","list":[]}},"history":{"retCode":0,"result":{"category":"linear","list":[]}},"executions":{"retCode":0,"result":{"category":"linear","list":[]}}}
+{"symbol":"BTCUSDT","orderLinkId":"abi-ep-6b7261720b19351d3ebb","realtime":{"retCode":0,"result":{"category":"linear","list":[]}},"history":{"retCode":0,"result":{"category":"linear","list":[]}},"executions":{"retCode":0,"result":{"category":"linear","list":[]}}}
+```
+
+The ABI rollout log contains only the two recovery operations and their two explicit neutralizing
+entry-package operations; it contains no create/amend operation. Together with exact exchange absence,
+this proves neither old `orderLinkId` was recreated and no old fill appeared.
+
+### B.4 First genuine bar acceptance — FAIL and STOP
+
+The first 5m bars after both markers were cleared were genuine MDS deliveries with
+`open_time_ms=1787323800000`:
+
+| Instrument | Runtime start | Failure | Boundary |
+|---|---|---|---|
+| ETHUSDT.P | `14:55:00.076442Z` | `14:55:05.086616Z` | `Strategy Engine request timed out` |
+| BTCUSDT.P | `14:55:05.087544Z` | `14:55:10.096834Z` | `Strategy Engine request timed out` |
+
+Both Runtime webhook requests returned HTTP 200 at the intake boundary, but each orchestration summary
+has `attempted_count:1`, `succeeded_count:0`, `failed_count:1`. No ABI operation occurred in the same
+window, so the bars did not complete MDS → Runtime → Engine → ABI. At final read-back all four
+containers still reported healthy, and both Runtime states remained
+`current_trade_cycle:null,pending_entry_recovery:null`; health therefore does not negate the observed
+Engine-request timeouts.
+
+Phase A verdict is deliberately split:
+
+- ambiguous-CREATE recovery and neutralization: **PASS** for ETH and BTC;
+- next genuine bar / ordinary pipeline revival: **FAIL** for ETH and BTC at Runtime → Engine;
+- overall Phase A: **FAIL / STOP**;
+- phases B–F: **NOT STARTED**.
