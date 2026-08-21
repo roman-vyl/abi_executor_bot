@@ -704,3 +704,153 @@ native-protection attribution, aggregate-position contradiction, or OCO behavior
 
 No production fix was made in this pass. The organic ETH order and all exchange/account state were left
 untouched. The only repository change is this forensic appendix.
+
+## Appendix E — live-unfilled fix acceptance and resumed rollout
+
+Acceptance ran on `2026-08-21` against Bybit Demo. Runtime production code was not changed. Change 8
+remained deployed and unarchived; rollout stopped at the first post-fix downstream failure.
+
+### E.1 Deployed revision and regression gate
+
+ABI repository HEAD and deployed source revision were
+`71797c9291e9d8c97c03b4a8d9adb050e925d739`. Before recreate, the running container's compiled
+`openPositionResolutionService.js` hash did not match HEAD. ABI alone was rebuilt and recreated; Runtime,
+Engine, MDS, and durable volumes were not recreated. The resulting image manifest was
+`sha256:ff127611b95a54cc9d6e63713a4c33c5b88157a2916620acd1d0ab4b9a894295`, and the deployed artifact hash
+then exactly matched the local HEAD artifact:
+
+```text
+be79c8a0aa3c19bd256c588fee1550cb2dcc033e16435b8e57a03aed7e6422c8
+```
+
+ABI startup at `16:55:44.704Z` reported `bybitEnvironment:"demo"`, `dryRun:false`, and
+`liveTradingEnabled:true`; correlation replay and readiness completed successfully. The full pre-live
+gate passed:
+
+- `npm test`: **672/672 PASS**;
+- `npm run typecheck`: **PASS**;
+- `npm run build`: **PASS**;
+- `npm run validate:openapi`: **PASS** (`4 documents, 5 operations`);
+- `openspec validate abi-native-partial-protection-cutover-v1 --strict`: **PASS**.
+
+### E.2 Exact ETH state before regression
+
+The durable record remained the applied record documented in Appendix D: exact parent
+`abi-ep-83f3dd5c1eb76f488e21`, exact `orderId` `0a711b1d-1fe0-43c5-a19f-899a4985c3cf`, qty `0.01`,
+`early_execution_observation:null`, `first_fill_at_ms:null`, and no pending action.
+
+Signed GET-only Bybit Demo reads immediately before the endpoint check showed:
+
+```json
+{
+  "orderStatus":"Untriggered",
+  "orderId":"0a711b1d-1fe0-43c5-a19f-899a4985c3cf",
+  "orderLinkId":"abi-ep-83f3dd5c1eb76f488e21",
+  "qty":"0.01",
+  "leavesQty":"0.01",
+  "cumExecQty":"0",
+  "tpslMode":"Partial",
+  "history":[],
+  "executions":[],
+  "decodedPosition":{"kind":"no_position"},
+  "productionConfirmation":{"kind":"pending_confirmed"}
+}
+```
+
+The symbol-scoped active list contained only that exact ETH parent. There was no fill, position, native
+child, or duplicate entry.
+
+### E.3 Exact endpoint and recovery acceptance — PASS
+
+The exact manual GET returned HTTP 200:
+
+```json
+{"position_open":false,"first_fill_at_ms":null,"average_entry_price":null}
+```
+
+ABI logs recorded `outcome:"position_closed"` in `467.651541 ms` at `16:56:55.046Z`; no
+`internal_error` occurred. The exact recovery GET then returned HTTP 200
+`recovery_state:"entry_order_live"` with the same package and null fill fields. These results are
+semantically consistent: the entry order was live, while that cycle's own filled exposure was zero.
+
+### E.4 Next genuine ETH bar — PASS
+
+No manual webhook was used. MDS delivered the genuine 5m closed bar with
+`open_time_ms=1787331300000` at `17:00:00`. The observed sequence was:
+
+```text
+MDS → Runtime webhook 200
+→ exact ABI open-position GET 200 / position_closed (581.233833 ms)
+→ Engine POST /v1/strategy-evaluations/live-entry 200
+→ Runtime PUT existing exact entry-package with desired_entry=null
+→ ABI exact cancel confirmation / entry_package_absent 200
+→ Runtime strategy_cycle_dispatch_succeeded
+```
+
+The former `pending_confirmed` 500 did not recur in the genuine path. Runtime did not resend CREATE and
+did not generate another identity. The Engine result legitimately requested removal of the still-unfilled
+entry; this caused the only exchange write in the resumed ETH path. ABI first saved `pending_cancel`,
+cancelled the exact stored `orderId`, and then durably saved:
+
+```json
+{
+  "status":"absent",
+  "desired_entry":null,
+  "order_link_id":null,
+  "order_id":null,
+  "pending_action":null,
+  "binding_history":[{
+    "order_link_id":"abi-ep-83f3dd5c1eb76f488e21",
+    "order_id":"0a711b1d-1fe0-43c5-a19f-899a4985c3cf",
+    "end_reason":"cancelled"
+  }]
+}
+```
+
+Post-state Bybit reads showed the same exact order as `Deactivated`, `CancelByUser`, `cumExecQty:"0"`,
+`leavesQty:"0"`; exact execution history remained empty, ETH position remained flat, and the
+symbol-scoped active list was empty. Latest Runtime ETH state was
+`current_trade_cycle:null,pending_entry_recovery:null`.
+
+### E.5 First new boundary — Runtime uses retired close contract
+
+The same genuine-bar queue then processed active BTC cycle
+`64d42d48-aae7-476f-8468-68ead37a3e16`. ABI correctly returned `position_open` at `17:01:30.928Z`, and
+Engine `POST /v1/strategy-evaluations/open-trade` returned 200 at `17:03:17.938Z`. Runtime then sent:
+
+```text
+DELETE /v1/strategy-instances/ema_pullback%3A53a32ecec5d565b3ac58eec0/
+       trade-cycles/64d42d48-aae7-476f-8468-68ead37a3e16/open-position
+→ HTTP 404 Not Found
+```
+
+Runtime journal recorded:
+
+```json
+{
+  "event_type":"strategy_cycle_dispatch_failed",
+  "occurred_at":"2026-08-21T17:03:17.952099+00:00",
+  "diagnostics":{
+    "error_code":"strategy_cycle_dispatch_failed",
+    "error_message":"undocumented ABI close_position HTTP status: 404"
+  },
+  "payload":{"instrument":"BTCUSDT.P","open_time_ms":1787331300000,"status":"failed"}
+}
+```
+
+This is the first post-fix downstream blocker. Current ABI intentionally has no retired DELETE route;
+Change 8 exposes `POST .../close` with `exposure_fraction`. ABI emitted no `close_position` operation for
+the unmatched DELETE, so it dispatched no exchange close write. No workaround or Runtime change was
+attempted.
+
+Final verdict:
+
+- live-unfilled endpoint regression: **PASS**;
+- recovery/open-position semantic consistency: **PASS**;
+- next genuine ETH bar and exact non-resurrection: **PASS**;
+- first new boundary: **FAIL / STOP** at Runtime's retired `DELETE .../open-position` contract;
+- Change 8 rollout: **STOPPED**, not archived or merged.
+
+Manual exchange mutations in this acceptance: **none**. The only exchange mutation was the exact ETH
+cancel requested by the genuine Runtime→Engine decision; no create, amend, close, cancel-all, or manual
+cleanup action was issued by the acceptance tooling.
