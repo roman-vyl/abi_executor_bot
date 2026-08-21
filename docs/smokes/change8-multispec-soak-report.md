@@ -431,3 +431,50 @@ BTCUSDT position: size="0", side="", avgPrice="0"
 The controlled Runtime startup precheck was not executed in this pass. The task simultaneously required a genuine Runtime closed-bar precheck and no Bybit mutations. Current Runtime logs expose the exact selected IDs only as part of committed-bar orchestration; allowing that orchestration to run can proceed into Engine and ABI writes before the selected set is fully confirmed. Since the exchange baseline is clean and the instruction forbids exchange mutations in this task, Runtime was left stopped.
 
 Result: `CATALOG_READY_FOR_6_LONG_ONLY`; `STARTUP_PRECHECK_BLOCKED_BY_NO_EXCHANGE_MUTATION_CONSTRAINT`.
+
+## High-EMA LONG-only catalog adjustment
+
+Adjustment date: `2026-08-21`.
+
+After receiving operator direction to avoid the lower EMA soak set, Runtime was stopped before any catalog mutation. The just-started lower-EMA run had completed one full ETH 5m bar with exactly six selected canonical LONG-only deployments and no failures:
+
+```text
+open_time_ms=1787338200000 selected_count=6 attempted_count=6 succeeded_count=6 failed_count=0
+```
+
+The selected instances were exactly the lower EMA soak set (`EMA5`, `EMA10`, `EMA50`, `EMA20`, `EMA3`, `EMA2`). They all ended the bar with `current_trade_cycle=null` and `pending_entry_recovery=null`. The next ETH bar had only processed EMA5 and EMA10, also no-entry, before Runtime was stopped. ABI correlation history did not gain any new record after the prior cleanup entries at `2026-08-21T18:09:12.976Z`, so this interruption did not leave an ABI/exchange write.
+
+The live Runtime catalog was then changed outside production code:
+
+- existing lower soak configs `soak-ema2.json`, `soak-ema3.json`, `soak-ema5.json`, `soak-ema10.json`, `soak-ema20.json`, and `soak-ema50.json` were set to `enabled=false`;
+- new high-EMA soak configs were created from the existing soak template and set to `enabled=true`;
+- all high-EMA configs use `ETHUSDT.P`, `5m`, `strategy_id=ema_pullback`, and `trade_sides.enabled=["long"]`;
+- no file was deleted and no schema/identity/runtime code was changed.
+
+The resulting enabled catalog is:
+
+```text
+soak-ema200.json  ema_pullback:eb191ae3ba1b9abaff3ad00a  fast=100 anchor=200  slow=400
+soak-ema300.json  ema_pullback:48d34a18e84844800cb49467  fast=150 anchor=300  slow=600
+soak-ema400.json  ema_pullback:99538f0ce9ed9fd8a8d11690  fast=200 anchor=400  slow=800
+soak-ema500.json  ema_pullback:fa62ee54f82eed80140ce4fb  fast=250 anchor=500  slow=1000
+soak-ema700.json  ema_pullback:7599240ad538e3de481b306c  fast=350 anchor=700  slow=1400
+soak-ema1000.json ema_pullback:79bfce3abfd7794d30063d50  fast=500 anchor=1000 slow=2000
+```
+
+Catalog validation after the adjustment:
+
+```text
+scanned=16 accepted=16 invalid=0 duplicates=0 enabled=6
+```
+
+The disabled lower soak configs remain valid but are no longer selected. Runtime remained stopped after the adjustment.
+
+Read-only exchange baseline after the adjustment:
+
+```text
+ETHUSDT active orders: []
+ETHUSDT position: size="0", side="", avgPrice="0"
+```
+
+Result: `CATALOG_READY_FOR_HIGH_EMA_LONG_ONLY`; Runtime is stopped and ready for the next controlled startup on the high-EMA set.
