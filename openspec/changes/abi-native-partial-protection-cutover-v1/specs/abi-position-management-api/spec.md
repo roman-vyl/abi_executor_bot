@@ -43,7 +43,8 @@ scopes, and SHALL never substitute the aggregate position size. Runtime SHALL NO
 ### Requirement: Close cancels only orders it attributes to the pair
 ABI SHALL neutralize the requested cycle's exact residual entry order and exact native Partial
 children attributed through that entry's parent linkage, and SHALL NOT cancel any order it cannot
-attribute to that pair. ABI SHALL NOT use account-wide or symbol-wide cancellation.
+attribute to that pair. Own active Partial children SHALL be neutralized and freshly confirmed inactive
+before any market-close dispatch or resend. ABI SHALL NOT use account-wide or symbol-wide cancellation.
 
 #### Scenario: Only exact pair-owned orders are cancelled
 - **WHEN** ABI closes a cycle
@@ -52,7 +53,8 @@ attribute to that pair. ABI SHALL NOT use account-wide or symbol-wide cancellati
 
 #### Scenario: Ambiguous attribution blocks cleanup success
 - **WHEN** ABI cannot cleanly identify the requested cycle's own native children
-- **THEN** ABI does not guess, cancel candidates heuristically, or return `trade_cycle_closed`
+- **THEN** ABI does not guess, cancel candidates heuristically, dispatch a market close, or return
+  `trade_cycle_closed`
 
 ### Requirement: Close success means both postconditions are verified under complete pair correlation
 A successful close response SHALL remain HTTP `200` with exactly `strategy_instance_id`,
@@ -61,7 +63,8 @@ requested cycle's own exposure was exactly closed by its own close execution (or
 zero) and that its exact residual entry and attributable native Partial children are not active.
 Aggregate flatness SHALL NOT be required while a same-side sibling remains, and aggregate movement
 alone SHALL NOT prove success. Incomplete or contradictory correlation or attribution SHALL produce
-no `2xx`.
+no `2xx`. Protection neutralization SHALL precede any market-close write and SHALL be freshly reverified
+among the terminal postconditions.
 
 #### Scenario: Verified cycle-owned close is acknowledged
 - **WHEN** own exposure and all own attributable orders satisfy the terminal postconditions

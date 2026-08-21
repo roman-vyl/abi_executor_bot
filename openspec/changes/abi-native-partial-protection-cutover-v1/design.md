@@ -117,21 +117,39 @@ The `activeRecords.length > 1` branch and the legacy single-owner block based on
 one flow. After exact entry neutralization, every cycle:
 
 1. resolves its own filled exposure from exact current-generation entry order/execution evidence;
-2. performs a validated aggregate position read only as sanity/veto evidence;
-3. records/reuses its deterministic current-generation close identity before dispatch;
-4. dispatches a reduce-only Market close for exact own exposure, if positive;
-5. proves exact execution through that close identity;
-6. deactivates and freshly verifies only its attributable native Partial children;
-7. writes `terminal_closed` only after all own postconditions pass.
+2. freshly resolves its own native Partial children through exact parent linkage;
+3. neutralizes every active own child by exact `orderId`, re-reading after each accepted cancel, and
+   requires both own legs inactive/terminal or safely absent under the existing attribution/lifecycle
+   rules;
+4. performs a validated aggregate position read using the truth table below, only as sanity/veto evidence;
+5. for positive own exposure, records/reuses its deterministic current-generation close identity before
+   dispatch;
+6. dispatches or safely recovers a reduce-only Market close for exact own exposure;
+7. proves exact execution through that close identity;
+8. freshly reverifies that the own entry has no live remainder, own protection remains neutralized, and
+   positive own exposure is proven closed by the exact own close identity;
+9. writes `terminal_closed` only after all own postconditions pass.
 
-The aggregate read permits flat or same-side state, rejects opposite-side/malformed/failed evidence, and
-rejects an aggregate smaller than the resolved own quantity. It never supplies quantity or completion
-proof. A flat aggregate with positive unresolved own exposure is contradictory and therefore cannot
-authorize a reduce-only dispatch or terminal success.
+The aggregate sanity decision is exhaustive:
+
+| Own resolved exposure | Aggregate observation | Decision |
+|---|---|---|
+| `0` | flat | compatible; no close identity/write |
+| `0` | same-side positive | compatible sibling exposure; no close identity/write |
+| `0` | opposite-side | fail closed |
+| `0` | failed/malformed | fail closed |
+| `> 0` | flat | contradiction; fail closed |
+| `> 0` | same-side size `>=` own exposure | compatible; close exact own exposure |
+| `> 0` | same-side size `<` own exposure | fail closed |
+| `> 0` | opposite-side | fail closed |
+| `> 0` | failed/malformed | fail closed |
+
+Aggregate size never supplies own quantity and aggregate movement never proves close success.
 
 The existing stable-identity recovery path is generalized by removing its multi-owner precondition, not
-duplicated. A clean zero own exposure takes no close identity and no close write, but still neutralizes the
-entry and verifies attributable-child cleanup before terminalization.
+duplicated. Recovery lookup and any same-identity resend occur only after the current request has passed
+the pre-close protection-neutralization and aggregate gates. A clean zero own exposure takes no close
+identity and no close write, but still neutralizes the entry and protection before terminalization.
 
 Retaining the raw aggregate path for a sole owner was rejected because "sole active ABI record" does not
 prove the account aggregate contains only that record's exposure; it also makes first-owner behavior
@@ -139,25 +157,29 @@ change when a sibling joins.
 
 ### 6. Native child cleanup is bounded, exact, and pair-aware
 
-Close starts from a fresh clean attribution result. For any active own child, it sends an exact
-`orderId` cancel under the existing live guard, then re-resolves the complete pair. Because Bybit Demo
-showed that cancelling one attached child deactivates its sibling, the loop does not blindly cancel both
-IDs from a stale snapshot. It re-reads after each accepted cancel; if another exact own child remains
-active, it may cancel that freshly observed identity within the bounded budget. Success requires both
-attributed children inactive/terminal, or a caller-justified clean absence consistent with fresh terminal
-entry/execution evidence. Ambiguity, duplicate roles, identity drift, or an unconfirmed active child fails
-closed.
+After own entry neutralization and final own-exposure resolution, close starts protection neutralization
+from a fresh clean attribution result. For any active own child, it sends an exact `orderId` cancel under
+the existing live guard, then re-resolves the complete pair. Because Bybit Demo showed that cancelling one
+attached child deactivates its sibling, the loop does not blindly cancel both IDs from a stale snapshot.
+It re-reads after each accepted cancel; if another exact own child remains active, it may cancel that
+freshly observed identity within the bounded budget. The gate passes only when both attributed children
+are inactive/terminal, or a caller-justified clean absence is safe under existing attribution/lifecycle
+rules. Ambiguity, duplicate roles, identity drift, cancel failure, or unconfirmed inactivity fails closed.
+The aggregate query, close-identity dispatch/recovery, and every market-close write are unreachable until
+this gate passes.
 
 No account-wide/symbol-wide cancel is allowed. A same-side sibling's different `parentOrderLinkId` is
 excluded before planning any write. Cleanup is serialized only by the requested pair's existing lock, so
-sibling commands are not cross-pair locked.
+sibling commands are not cross-pair locked. After any positive close execution, terminal verification
+freshly re-resolves protection to prove it remains inactive/terminal or safely absent; this is revalidation,
+not deferred cleanup.
 
 ### 7. OCO-after-amend is not a cutover premise
 
 Protection read-back proves that both own legs are active with the desired identity, attribution,
 quantity, role, and trigger price. The implementation does not claim that a later fill of one amended leg
 will cancel the other; no terminal transition or close correctness proof relies on that behavior. Close
-performs explicit own-child cleanup regardless.
+explicitly neutralizes own children before market close and reverifies them afterward regardless.
 
 If a future capability requires exchange OCO as a correctness premise, it needs a separate Demo spike and
 contract change. Building an ABI OCO engine in this cutover was rejected because no current requirement
@@ -197,12 +219,14 @@ are required before rollout.
   existing strict exact-own decoder and bounded evidence; any ambiguity or contradiction fails before a
   close write, with no aggregate fallback.
 - **[Risk] Aggregate physical state can change because a sibling acts concurrently.** → Treat aggregate as
-  a veto/sanity snapshot only; exact own close execution and own child identities prove completion.
+  the explicit zero/positive truth-table veto only; exact own close execution proves completion and never
+  inherits quantity from aggregate state.
 - **[Risk] Sequential child amend can leave a temporarily mixed desired state.** → Preserve Change 7's
   per-pair lock, fresh pre/post observations, typed whole-attempt failure, and no success until both legs
   match. No additional cross-pair lock is introduced.
 - **[Risk] Cancelling one attached child can deactivate its sibling.** → Re-read the pair after every exact
-  cancel and plan the next step only from fresh evidence; never issue two blind cancels.
+  cancel and plan the next step only from fresh evidence; never issue two blind cancels and never dispatch
+  a market close until the complete own pair is confirmed neutralized.
 - **[Risk] Existing Full-created legacy records may lack native Partial children.** → Cutover fails those
   cycles closed as non-attributed rather than creating replacement protection. Rollout acceptance starts
   from the explicitly approved branch/account state; any required legacy-state disposition is operational,
@@ -219,7 +243,8 @@ are required before rollout.
 
 1. Implement and verify the canonical Partial mapper; remove the separate builder and Full expectations.
 2. Activate native protection and remove every legacy position-level production call and temporary error.
-3. Generalize pair-scoped close, add exact native-child cleanup, and remove raw aggregate close behavior.
+3. Generalize pair-scoped close, place exact native-child cleanup before every close dispatch/recovery,
+   implement the aggregate truth table, and remove raw aggregate close behavior.
 4. Remove the admission guard last within the same commit series, after all lifecycle tests pass; do not
    deploy an intermediate revision that admits sharing while legacy protection/close remains reachable.
 5. Run strict OpenSpec validation, full tests, typecheck, OpenAPI checks, and repository-wide forbidden-path

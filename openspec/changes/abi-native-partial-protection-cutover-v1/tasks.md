@@ -29,23 +29,29 @@
 ## 3. Pair-Scoped Close for Every Owner Count
 
 - [ ] 3.1 Remove the single-owner raw aggregate `row.size` close branch and route every active cycle
-  through the existing exact-own fill resolution, stable current-generation close identity, durable-before-
-  dispatch, and exact close-order recovery flow.
-- [ ] 3.2 Generalize prior-close lookup and resend suppression to every owner count, preserving same-identity
-  recovery and fail-closed live/ambiguous outcomes across create exceptions and confirmation timeouts.
-- [ ] 3.3 Validate aggregate position only as a sanity/veto observation: accept flat or matching-side
-  evidence when consistent with own exposure, and fail closed on query/decode failure, opposite-side state,
-  or aggregate quantity smaller than positive own exposure; never source close quantity or success from it.
-- [ ] 3.4 Implement bounded exact-child cleanup using `resolveOwnAttachedProtection()`: cancel an active
+  through exact entry neutralization and final exact-own fill resolution before any protection or close
+  decision; never derive own quantity from aggregate position state.
+- [ ] 3.2 Implement bounded pre-close exact-child neutralization using
+  `resolveOwnAttachedProtection()`: cancel an active
   attributed child by exact `orderId`, re-resolve after each ACK to respect pair-coupled deactivation, and
-  require both own legs inactive/terminal before terminalization.
-- [ ] 3.5 Make the final `terminal_closed` gate require exact entry neutralization, exact own close execution
+  require both own legs inactive/terminal or safely absent under existing attribution/lifecycle rules before
+  aggregate sanity, close-identity dispatch/recovery, or any market-close write; ambiguity/failure sends no
+  close.
+- [ ] 3.3 Implement the aggregate sanity truth table after protection neutralization: for zero own exposure,
+  flat/same-side are compatible and opposite/failed/malformed fail; for positive own exposure, only
+  same-side size `>=` own exposure is compatible, while flat, smaller, opposite, failed, or malformed fail;
+  never source own quantity or completion proof from aggregate state.
+- [ ] 3.4 Generalize prior-close lookup, durable-before-dispatch identity, and resend suppression to every
+  owner count only after the pre-close protection and aggregate gates pass, preserving same-identity recovery
+  and fail-closed live/ambiguous outcomes across create exceptions and confirmation timeouts.
+- [ ] 3.5 Make the final `terminal_closed` gate freshly reverify exact entry neutralization, exact own close execution
   for positive exposure (or clean zero own exposure), and verified own-child inactivity, while allowing a
   same-side sibling to keep aggregate position and its own orders active.
 - [ ] 3.6 Add close tests for sole-owner and shared-owner positive exposure, clean zero own exposure,
-  aggregate contradictions, exact/partial/zero close execution, never-created resend, ambiguous prior
+  every aggregate truth-table row, exact/partial/zero close execution, never-created resend, ambiguous prior
   close, pair-coupled child cancel, terminal child read-back, duplicate/ambiguous attribution, and every
-  durable/write crash boundary.
+  durable/write crash boundary; assert zero close-order writes whenever pre-close protection is active,
+  ambiguous, failed, or unconfirmed.
 - [ ] 3.7 Add sibling-isolation assertions proving close never submits a sibling entry/child `orderId`, never
   uses cancel-all/symbol-wide cancellation, never changes sibling correlation, and never includes sibling
   exposure in quantity.

@@ -1,42 +1,70 @@
 ## ADDED Requirements
 
 ### Requirement: Aggregate position is a non-attributable close sanity signal only
-After neutralizing the requested cycle's entry remainder, ABI SHALL query and validate the aggregate
-physical position only as a sanity and feasibility signal. A flat aggregate and a clean aggregate on
-the requested cycle's side are compatible with continuing; an opposite-side aggregate, malformed
-response, failed query, or aggregate size smaller than the cycle's own resolved exposure SHALL fail
-closed. ABI SHALL NOT use aggregate size as ownership proof or as the requested cycle's close quantity.
+Only after neutralizing the requested cycle's entry remainder, resolving its final own exposure, and
+confirming its own attributable native Partial protection inactive/terminal or safely absent under the
+existing attribution/lifecycle rules, ABI SHALL query and validate the aggregate physical position as a
+sanity and feasibility signal. ABI SHALL apply exactly this truth table:
 
-#### Scenario: Same-side sibling aggregate does not prevent own close
-- **WHEN** the aggregate position is on the requested cycle's side and includes same-side sibling
-  exposure
-- **THEN** ABI may continue using only the requested cycle's own resolved exposure as close quantity
+| Own resolved exposure | Aggregate observation | Outcome |
+|---|---|---|
+| zero | flat | compatible; no close write |
+| zero | same-side positive | compatible sibling exposure; no close write |
+| zero | opposite-side | fail closed |
+| zero | failed or malformed | fail closed |
+| positive | flat | contradiction; fail closed |
+| positive | same-side size greater than or equal to own exposure | compatible; close may proceed for exact own exposure |
+| positive | same-side size smaller than own exposure | fail closed |
+| positive | opposite-side | fail closed |
+| positive | failed or malformed | fail closed |
 
-#### Scenario: Opposite-side or insufficient aggregate fails closed
-- **WHEN** the aggregate position is opposite to the requested cycle, or its size is smaller than the
-  cycle's resolved own exposure
+Aggregate size SHALL never supply the requested cycle's own quantity and aggregate movement SHALL never
+prove close success.
+
+#### Scenario: Zero own exposure is compatible with flat or same-side sibling exposure
+- **WHEN** clean exact-own evidence resolves zero exposure and the aggregate is either flat or same-side
+  positive
+- **THEN** ABI sends no close order and may proceed to terminal postcondition verification
+
+#### Scenario: Positive own exposure requires sufficient same-side aggregate
+- **WHEN** own exposure is positive and the aggregate is same-side with size greater than or equal to
+  own exposure
+- **THEN** ABI may continue using exactly the own exposure as close quantity
+
+#### Scenario: Flat aggregate contradicts positive own exposure
+- **WHEN** own exposure is positive but the aggregate is flat
 - **THEN** ABI sends no close order and returns a safe failure
 
-#### Scenario: Aggregate size never becomes own quantity
-- **WHEN** the aggregate position is larger than the requested cycle's own resolved exposure
-- **THEN** ABI does not include the excess sibling exposure in the close quantity
+#### Scenario: Opposite-side insufficient or invalid aggregate fails closed
+- **WHEN** the aggregate is opposite-side, failed, malformed, or same-side but smaller than positive own
+  exposure
+- **THEN** ABI sends no close order and returns a safe failure
 
 ### Requirement: Close deactivates only the requested cycle's attributable native Partial children
-Before reporting the requested cycle terminally closed, ABI SHALL freshly resolve its native Partial
-children through their exact parent linkage and ensure each own active child is inactive or terminal.
-ABI SHALL cancel only exact child order identities returned by a clean own attribution result and SHALL
-fail closed on ambiguous attribution or unconfirmed cancellation. It SHALL NOT use account-wide or
-symbol-wide cancellation and SHALL NOT mutate a sibling cycle's children.
+After exact own entry neutralization and final own-exposure resolution, but before aggregate sanity or any
+market-close dispatch/resend, ABI SHALL freshly resolve the requested cycle's native Partial children
+through exact parent linkage and neutralize every own active leg. ABI SHALL cancel only an exact child
+`orderId` returned by a clean own attribution result, re-resolve the complete pair after every accepted
+cancel because pair cancellation is coupled, and require both own legs inactive/terminal or safely absent
+under the existing attribution/lifecycle rules. Ambiguous attribution, a failed cancel, identity drift,
+or unconfirmed inactivity SHALL fail the close closed with no close-order write. ABI SHALL NOT use
+account-wide or symbol-wide cancellation and SHALL NOT mutate sibling children.
 
-#### Scenario: Own children are cleaned after own exposure closes
-- **WHEN** the requested cycle's own close execution is confirmed and its attributed native Partial
-  children remain active
-- **THEN** ABI cancels only those exact own child identities and verifies they are inactive or terminal
-  before returning success
+#### Scenario: Own protection is neutralized before positive exposure close
+- **WHEN** final own exposure is positive and fresh attribution finds an active own Partial child
+- **THEN** ABI cancels only a freshly attributed exact own child identity and re-resolves the pair
+- **AND** ABI sends no market-close order until both own legs are confirmed inactive/terminal or safely
+  absent
 
-#### Scenario: Ambiguous attribution blocks terminal success
-- **WHEN** attached-protection attribution is ambiguous before cleanup or after a cancel acknowledgment
-- **THEN** ABI does not write `terminal_closed` and does not report success
+#### Scenario: Zero own exposure still requires protection cleanup
+- **WHEN** final own exposure is zero but own attributable protection remains active
+- **THEN** ABI neutralizes and confirms that protection before terminalization
+- **AND** ABI creates no close identity and sends no market-close order
+
+#### Scenario: Ambiguous or failed cleanup blocks close dispatch
+- **WHEN** attribution is ambiguous, a cancel fails, or fresh read-back does not confirm own protection
+  inactive/terminal or safely absent
+- **THEN** ABI sends no market-close order, does not write `terminal_closed`, and does not report success
 
 #### Scenario: Sibling children remain active and unchanged
 - **WHEN** a sibling cycle shares the same symbol and has its own attributable protection pair
@@ -47,22 +75,25 @@ symbol-wide cancellation and SHALL NOT mutate a sibling cycle's children.
 ### Requirement: Closing acts on the requested cycle's resolved exposure, or sends no write when none exists
 For every requested cycle, regardless of active owner count, ABI SHALL resolve that cycle's own
 exposure from its exact entry-order fill evidence and dispatch a reduce-only close order for exactly
-that quantity under its stable attributable identity. ABI SHALL never infer own exposure from the raw
-aggregate position size, and SHALL send no close order when clean own evidence proves zero exposure.
+that quantity under its stable attributable identity only after own protection neutralization and the
+aggregate sanity gate both pass. ABI SHALL never infer own exposure from raw aggregate position size,
+and SHALL send no close order when clean own evidence proves zero exposure.
 
 #### Scenario: A sole owner closes its own fill-derived exposure
-- **WHEN** the requested cycle is the scope's only active owner and has positive own attributable fill
+- **WHEN** the requested cycle is the scope's only active owner, has positive own attributable fill,
+  and its own protection and aggregate preconditions pass
 - **THEN** ABI closes exactly that fill-derived exposure under the cycle's own close identity
 - **AND** it does not substitute the aggregate position size
 
 #### Scenario: A shared-scope owner closes only its own exposure
-- **WHEN** the requested cycle shares its scope with one or more same-side active siblings
+- **WHEN** the requested cycle shares its scope with same-side siblings and its own protection and
+  aggregate preconditions pass
 - **THEN** ABI closes exactly the requested cycle's own resolved exposure, never a sibling share
 
 #### Scenario: A cycle with zero own exposure sends no close order
 - **WHEN** clean exact-own entry evidence proves the requested cycle has zero filled exposure
 - **THEN** ABI sends no close order, records no close-order identity, and continues only with own-order
-  cleanup and terminal verification
+  protection cleanup and terminal verification
 
 #### Scenario: Missing or ambiguous own fill evidence fails closed
 - **WHEN** ABI cannot cleanly resolve the requested cycle's own entry executions
@@ -72,11 +103,13 @@ aggregate position size, and SHALL send no close order when clean own evidence p
 Before ABI sends any close order for a requested cycle with positive own resolved exposure, regardless
 of owner count, it SHALL compute a deterministic close-order identity from the pair identity, fixed
 `"close"` role, and current entry-package generation, and SHALL durably record that identity before
-the exchange call. A thrown exception or live-execution-guard skip SHALL NOT revert it.
+the exchange call. This dispatch/resend stage SHALL be unreachable until own protection neutralization
+and aggregate sanity have passed. A thrown exception or live-execution-guard skip SHALL NOT revert it.
 
 #### Scenario: Every dispatched close identity is durable first
 - **WHEN** ABI dispatches a close order for either a sole owner or a shared-scope owner
 - **THEN** the pair's own record already durably carries the close identity used by that call
+- **AND** the requested cycle's own protection was freshly confirmed inactive/terminal or safely absent
 
 #### Scenario: A failed or skipped dispatch leaves identity intact
 - **WHEN** the exchange call throws or is skipped by the live-execution guard
@@ -86,7 +119,8 @@ the exchange call. A thrown exception or live-execution-guard skip SHALL NOT rev
 Before dispatching any close order, regardless of owner count, ABI SHALL check for a close identity
 already recorded for the current generation and resolve that exact order through fresh bounded reads.
 ABI SHALL send no second order while its fate is live or ambiguous. It SHALL reuse the same identity
-only when the bounded evidence cleanly proves it was never created.
+only when the bounded evidence cleanly proves it was never created. Any resend SHALL still occur only
+after the current request has freshly passed own-protection neutralization and aggregate sanity.
 
 #### Scenario: Confirmed execution prevents duplicate dispatch
 - **WHEN** the recorded close identity is confirmed to have executed the full resolved own quantity
@@ -98,7 +132,7 @@ only when the bounded evidence cleanly proves it was never created.
 
 #### Scenario: Clean never-created evidence permits same-identity resend
 - **WHEN** the full bounded exact-identity observation cleanly proves the recorded close order was never
-  created
+  created and the current pre-close protection and aggregate gates have passed
 - **THEN** ABI may resend the close using that same identity and never computes another identity
 
 ### Requirement: The requested cycle's own close order is the exclusive proof that its exposure was closed
@@ -110,7 +144,8 @@ aggregate position movement SHALL NOT prove this cycle's result.
 #### Scenario: Exact own close execution gates success
 - **WHEN** the requested cycle's close order confirms executed quantity equal to its submitted own
   exposure
-- **THEN** ABI may proceed to protection-child cleanup and terminal verification
+- **THEN** ABI may proceed to fresh terminal postcondition verification without any post-close cleanup
+  being needed to make sibling exposure safe
 
 #### Scenario: Partial or zero execution fails closed
 - **WHEN** the exact close order terminates with executed quantity below the submitted own exposure
@@ -125,18 +160,20 @@ aggregate position movement SHALL NOT prove this cycle's result.
 ### Requirement: The durable terminal write is gated on freshly confirmed postconditions and precedes physical scope release
 Immediately before writing `terminal_closed`, ABI SHALL freshly confirm over bounded attempts that the
 entry order has no live remainder, any positive own exposure was exactly executed by the cycle's own
-close order, and no attributable native Partial child remains active. Zero own exposure requires no
-close order but still requires exact entry neutralization and own-child cleanup. Aggregate flatness is
-not a terminal precondition when a same-side sibling remains. Exhaustion, query failure, ambiguity, or
-contradiction SHALL fail closed. Scope membership is released only by the durable terminal write.
+close order, and the native Partial protection neutralized before close remains inactive/terminal or
+safely absent. Zero own exposure requires no close order but still requires exact entry neutralization
+and pre-terminal own-protection cleanup. Aggregate flatness is not a terminal precondition when a same-side
+sibling remains. Exhaustion, query failure, ambiguity, contradiction, or reappearing active own protection
+SHALL fail closed. Scope membership is released only by the durable terminal write.
 
 #### Scenario: Same-side sibling exposure can remain after terminalization
 - **WHEN** all requested-cycle postconditions are confirmed but a sibling keeps the aggregate position
   positive on the same side
 - **THEN** ABI may write the requested cycle `terminal_closed` while the sibling remains active
 
-#### Scenario: Active own child blocks terminalization
-- **WHEN** the requested cycle's exposure is closed but an attributable own Partial child remains active
+#### Scenario: Reappearing or still-active own child blocks terminalization
+- **WHEN** final read-back after close finds an attributable own Partial child active or cannot cleanly
+  reconfirm the pre-close neutralized state
 - **THEN** ABI does not write `terminal_closed` or return `trade_cycle_closed`
 
 #### Scenario: Exhausted confirmation fails closed
