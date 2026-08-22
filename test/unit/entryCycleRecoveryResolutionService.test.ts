@@ -710,7 +710,16 @@ test("a legacy amend-pending binding still resolves terminal_after_fill when pos
   });
 });
 
-test("fresh ambiguous CREATE absence across the full budget resolves entry_order_not_found without writes", async () => {
+// Before abi-entry-cycle-recovery-convergence-v1, entry_order_not_found was
+// purely diagnostic: the record stayed "unknown" and only a subsequent PUT
+// could durably record absence. Convergence changes this deliberately —
+// once this outcome is positively resolved (the same bounded/freshness
+// gate as before, unchanged), ABI durably converges the record to
+// "absent" in the same locked step, reusing the exact write shape
+// entry-package-execution's own successful-CANCEL/ambiguous-CREATE-absence
+// path already produces (identity cleared, one binding_history entry
+// closed with end_reason "cancelled").
+test("fresh ambiguous CREATE absence across the full budget resolves entry_order_not_found and converges to absent", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord({ pendingAction: "create" }));
     bybit.orderByLinkIdResponse = orderList([]);
@@ -736,7 +745,38 @@ test("fresh ambiguous CREATE absence across the full budget resolves entry_order
     assert.equal(bybit.getServerTimeCalls.length, 1);
     assert.equal(bybit.cancelOrderCalls.length, 0);
     assert.equal(bybit.createOrderCalls.length, 0);
-    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "absent");
+    assert.equal(converged?.order_link_id, null);
+    assert.equal(converged?.order_id, null);
+    assert.equal(converged?.pending_action, null);
+    assert.equal(converged?.desired_entry, null);
+    assert.equal(converged?.binding_history.length, 1);
+    assert.equal(converged?.binding_history[0]?.end_reason, "cancelled");
+  });
+});
+
+test("re-resolving an already-converged entry_order_not_found record is idempotent", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ pendingAction: "create" }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.executionListResponse = executionList([]);
+
+    await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+    const firstConverged = repo.get("instance-1", "cycle-1");
+    assert.equal(firstConverged?.status, "absent");
+
+    // A record already "absent" is durably closed: process() answers
+    // directly from status, with no further exchange query and no further
+    // write.
+    const orderReadsBefore = bybit.getOrderByLinkIdCalls.length;
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "terminal_without_fill");
+    assert.equal(bybit.getOrderByLinkIdCalls.length, orderReadsBefore);
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), firstConverged);
   });
 });
 
@@ -860,6 +900,280 @@ test("the strict seven-day boundary and future binding time never emit the fifth
     });
   }
 });
+
+// --- Recovery Convergence (abi-entry-cycle-recovery-convergence-v1) ---
+
+// Exact live-incident shape: an EMA200 cycle applied, then degraded to
+// "unknown" during a transient network revalidation ambiguity, then
+// recovery positively proved position_open. Before convergence, status
+// stayed "unknown" forever and every subsequent GET open-position 500'd.
+test("an unknown-status record with a proven fill converges to applied, in the same write that captures first_fill_at_ms", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100500" })]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100500", openTime: 222 });
+    bybit.executionListResponse = executionList([1785000012345]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "position_open");
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "applied");
+    assert.equal(converged?.first_fill_at_ms, 1785000012345);
+  });
+});
+
+test("an unknown-status record with a proven live unfilled order converges to applied", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+  });
+});
+
+test("a pending_action:create ambiguity proven to have landed converges to applied and clears pending_action", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: "create" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "applied");
+    assert.equal(converged?.pending_action, null);
+  });
+});
+
+test("a pending_create record with no confirmed order_id does not converge from entry_order_live", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(
+      makeRecord({ status: "pending_create", pendingAction: "create", orderLinkId: "link-1" }) as EntryPackageExecutionRecord,
+    );
+    // makeRecord always sets order_id: "order-1" — simulate the genuine
+    // pending_create shape (order_id still null) directly against the repo.
+    const provisional = repo.get("instance-1", "cycle-1");
+    assert.ok(provisional);
+    await repo.save({ ...provisional, order_id: null });
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    const stillPending = repo.get("instance-1", "cycle-1");
+    assert.equal(stillPending?.status, "pending_create");
+    assert.equal(stillPending?.order_id, null);
+  });
+});
+
+test("an in-flight cancel intent is never silently overridden by a proven live-truth outcome", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: "cancel" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    const unchanged = repo.get("instance-1", "cycle-1");
+    assert.equal(unchanged?.status, "unknown");
+    assert.equal(unchanged?.pending_action, "cancel");
+  });
+});
+
+test("a legacy amend pending_action never reaches convergence for entry_order_live", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: "amend" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+test("an unknown-status record proven terminal without fill converges to terminal_unfilled with a binding_history close entry", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([liveOrder({ orderStatus: "Cancelled", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "terminal_without_fill");
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "terminal_unfilled");
+    assert.equal(converged?.binding_history.length, 1);
+    assert.equal(converged?.binding_history[0]?.end_reason, "exchange_terminal");
+  });
+});
+
+test("an in-flight cancel intent is left to its own dedicated path for terminal_without_fill", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: "cancel" }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([liveOrder({ orderStatus: "Cancelled", cumExecQty: "0" })]);
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "terminal_without_fill");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+test("repeated recovery after convergence is a no-op: no further write, same outcome", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+
+    await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+    const afterFirst = repo.get("instance-1", "cycle-1");
+    assert.equal(afterFirst?.status, "applied");
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "entry_order_live");
+    assert.deepEqual(repo.get("instance-1", "cycle-1"), afterFirst);
+  });
+});
+
+test("a failed first_fill_at_ms-only capture (status already applied) still returns position_open, unaffected by the status-changing fail-closed rule", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "applied", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100500" })]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100500", openTime: 222 });
+    bybit.executionListResponse = executionList([1785000012345]);
+    let saveCalls = 0;
+    repo.save = async () => {
+      saveCalls += 1;
+      throw new Error("simulated disk error");
+    };
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string; first_fill_at_ms?: number }).recovery_state, "position_open");
+    assert.equal((result.body as { first_fill_at_ms?: number }).first_fill_at_ms, 1785000012345);
+    assert.equal(saveCalls, 1);
+  });
+});
+
+test("a failed durable write during status convergence returns internal_error, not the positive outcome, and leaves the record unconverged", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+    const originalSave = repo.save.bind(repo);
+    let saveCalls = 0;
+    repo.save = async (record: EntryPackageExecutionRecord) => {
+      saveCalls += 1;
+      throw new Error("simulated disk error");
+    };
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(saveCalls, 1);
+    repo.save = originalSave;
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+// Binding-continuity guard: an outcome resolved against one binding must
+// never be applied to a different binding that has since taken over the
+// same (strategy_instance_id, trade_cycle_id) composite key.
+test("a binding that changed generation/order_link_id between resolution and the lock is never converged", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "New", cumExecQty: "0" })]);
+    const originalGet = repo.get.bind(repo);
+    let getCalls = 0;
+    repo.get = (strategyInstanceId: string, tradeCycleId: string) => {
+      getCalls += 1;
+      const record = originalGet(strategyInstanceId, tradeCycleId);
+      // The second get() call is the fresh, under-lock re-read inside
+      // finalizeOutcomeLocked — simulate a new binding having taken over
+      // the same composite key in between.
+      if (getCalls === 2 && record !== undefined) {
+        return { ...record, generation: record.generation + 1, order_link_id: "link-2", order_id: "order-2" };
+      }
+      return record;
+    };
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 500);
+    repo.get = originalGet;
+    const unchanged = repo.get("instance-1", "cycle-1");
+    assert.equal(unchanged?.status, "unknown");
+    assert.equal(unchanged?.generation, 1);
+  });
+});
+
+test("an unknown-status record proven terminal after fill converges to terminal_closed, reusing close-execution's own write shape", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: null, closeOrderLinkId: "close-link-1" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000" })]);
+    bybit.orderByLinkIdResponseByLinkId.set(
+      "close-link-1",
+      orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001" })]),
+    );
+    bybit.orderHistoryResponseByLinkId.set(
+      "close-link-1",
+      orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001" })]),
+    );
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "terminal_after_fill");
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "terminal_closed");
+    assert.equal(converged?.pending_action, null);
+    // close-execution's own persistTerminal() write appends no
+    // binding_history entry — convergence reuses that exact shape, not a
+    // second, divergent one.
+    assert.equal(converged?.binding_history.length, 0);
+  });
+});
+
+test("any non-null pending_action prevents terminal_after_fill convergence", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ status: "unknown", pendingAction: "cancel", closeOrderLinkId: "close-link-1" }));
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000" })]);
+    bybit.orderByLinkIdResponseByLinkId.set(
+      "close-link-1",
+      orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001" })]),
+    );
+    bybit.orderHistoryResponseByLinkId.set(
+      "close-link-1",
+      orderList([liveOrder({ orderStatus: "Filled", cumExecQty: "0.001" })]),
+    );
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal((result.body as { recovery_state?: string }).recovery_state, "terminal_after_fill");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+  });
+});
+
+// Durably-closed statuses answer directly from the durable record (existing
+// behavior, unmodified) — Recovery Convergence must never even be reached,
+// let alone perform a write, for any of the three.
+for (const status of ["absent", "terminal_unfilled", "terminal_closed"] as const) {
+  test(`status: ${status} never reaches Recovery Convergence — no write of any kind`, async () => {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord({ status, orderLinkId: null, pendingAction: null }));
+      const before = repo.get("instance-1", "cycle-1");
+
+      await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+      assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+      assert.deepEqual(repo.get("instance-1", "cycle-1"), before);
+    });
+  });
+}
 
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };

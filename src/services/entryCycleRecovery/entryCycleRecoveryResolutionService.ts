@@ -31,6 +31,8 @@ import {
   completedObservationIsFresh,
   observeAmbiguousCreateAbsenceAttempt,
 } from "../entryPackage/ambiguousCreateAbsence.js";
+import type { RecoveryConvergenceOutcome } from "./recoveryConvergencePolicy.js";
+import { evaluateRecoveryConvergence } from "./recoveryConvergencePolicy.js";
 
 // Same bounded-retry shape CloseApplicationService.verifyBothPostconditions
 // already uses (3 attempts / 300ms) — no time-based recovery horizon of any
@@ -220,7 +222,7 @@ export class EntryCycleRecoveryResolutionService {
         bindingStartedAtMs: absenceCandidate.bindingStartedAtMs,
       }))
     ) {
-      return entryOrderNotFoundResult();
+      return this.resolveConvergedResult(record, { state: "entry_order_not_found" }, entryOrderNotFoundResult());
     }
 
     return internalErrorResult();
@@ -262,11 +264,47 @@ export class EntryCycleRecoveryResolutionService {
     outcome: ResolvedOutcome,
     record: EntryPackageExecutionRecord,
   ): Promise<RecoveryStateHttpResult> {
-    if (outcome.state === "terminal_without_fill") {
-      return terminalWithoutFillResult();
+    // Every outcome now runs under the pair mutex, re-reading the record
+    // fresh — a concurrent close, cancel-confirmation, or another recovery
+    // call may have raced ahead since this attempt's outer, unlocked read
+    // (abi-entry-cycle-recovery-attribution-v1 design.md Decision 2,
+    // generalized to all five outcomes by abi-entry-cycle-recovery-
+    // convergence-v1, mirroring OpenPositionResolutionService.
+    // resolveLiveQueryAdmissible).
+    const key = correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id);
+    return this.deps.mutex.withKeyLock(key, () => this.finalizeOutcomeLocked(outcome, record));
+  }
+
+  private async finalizeOutcomeLocked(
+    outcome: ResolvedOutcome,
+    resolvedAgainst: EntryPackageExecutionRecord,
+  ): Promise<RecoveryStateHttpResult> {
+    const fresh = this.deps.correlationRepository.get(resolvedAgainst.strategy_instance_id, resolvedAgainst.trade_cycle_id);
+    if (fresh === undefined) {
+      return unknownTradeCycleBindingResult();
     }
+
+    // Binding-continuity guard (abi-entry-cycle-recovery-convergence-v1):
+    // the resolved outcome describes only the exact binding it was proven
+    // against. If the pair's binding has since advanced to a new
+    // generation/order_link_id (e.g. the prior binding reached absent and a
+    // later PUT established a new one while this attempt's bounded exchange
+    // queries were still in flight), the outcome must not be applied to the
+    // fresh, unrelated binding now occupying the same composite key.
+    if (!sameBinding(fresh, resolvedAgainst)) {
+      return internalErrorResult();
+    }
+
+    if (isDurablyClosedEntryPackageStatus(fresh.status)) {
+      return fresh.status === "terminal_closed" ? terminalAfterFillResult() : terminalWithoutFillResult();
+    }
+
+    if (outcome.state === "terminal_without_fill") {
+      return this.convergeAndRespond(fresh, { state: "terminal_without_fill" }, terminalWithoutFillResult());
+    }
+
     if (outcome.state === "terminal_after_fill") {
-      return terminalAfterFillResult();
+      return this.resolveTerminalAfterFillResult(fresh);
     }
 
     if (outcome.state === "entry_order_live") {
@@ -279,46 +317,32 @@ export class EntryCycleRecoveryResolutionService {
       // entry, not the stored desired_entry — so entry_order_live can never
       // safely report AppliedEntryPackage for such a record. Fails safe
       // instead; no legacy recovery state machine is introduced.
-      if (record.pending_action === "amend" || record.pending_action === "cancel_and_create") {
+      if (fresh.pending_action === "amend" || fresh.pending_action === "cancel_and_create") {
         return internalErrorResult();
       }
-      const desiredEntry = record.desired_entry;
-      const calculatedQuantity = record.calculated_quantity;
+      const desiredEntry = fresh.desired_entry;
+      const calculatedQuantity = fresh.calculated_quantity;
       if (desiredEntry === null || calculatedQuantity === null) {
         return internalErrorResult();
       }
-      return entryOrderLiveResult({ appliedDesiredEntry: desiredEntry, calculatedQuantity });
+      return this.convergeAndRespond(
+        fresh,
+        { state: "entry_order_live" },
+        entryOrderLiveResult({ appliedDesiredEntry: desiredEntry, calculatedQuantity }),
+      );
     }
 
-    // position_open runs under the pair mutex, re-reading the record fresh
-    // — a concurrent close or amend may have raced ahead since this
-    // attempt's outer, unlocked read (abi-entry-cycle-recovery-attribution-
-    // v1 design.md Decision 2, mirroring
-    // OpenPositionResolutionService.resolveLiveQueryAdmissible).
-    return this.resolvePositionOpenResult(record, outcome.averageEntryPrice);
+    // position_open
+    return this.resolvePositionOpenResultLocked(fresh, outcome.averageEntryPrice);
   }
 
-  private async resolvePositionOpenResult(
-    record: EntryPackageExecutionRecord,
-    averageEntryPrice: string,
-  ): Promise<RecoveryStateHttpResult> {
-    const key = correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id);
-    return this.deps.mutex.withKeyLock(key, () => this.resolvePositionOpenResultLocked(record, averageEntryPrice));
-  }
-
+  // Runs entirely against a record already fresh, under the lock, and
+  // already binding-continuity-checked by the caller — never re-reads or
+  // re-locks itself.
   private async resolvePositionOpenResultLocked(
-    record: EntryPackageExecutionRecord,
+    fresh: EntryPackageExecutionRecord,
     averageEntryPrice: string,
   ): Promise<RecoveryStateHttpResult> {
-    const fresh = this.deps.correlationRepository.get(record.strategy_instance_id, record.trade_cycle_id);
-    if (fresh === undefined) {
-      return unknownTradeCycleBindingResult();
-    }
-
-    if (isDurablyClosedEntryPackageStatus(fresh.status)) {
-      return fresh.status === "terminal_closed" ? terminalAfterFillResult() : terminalWithoutFillResult();
-    }
-
     if (fresh.pending_action === "amend" || fresh.pending_action === "cancel_and_create") {
       return internalErrorResult();
     }
@@ -330,12 +354,16 @@ export class EntryCycleRecoveryResolutionService {
     }
 
     if (fresh.first_fill_at_ms !== null) {
-      return positionOpenResult({
-        appliedDesiredEntry: desiredEntry,
-        calculatedQuantity,
-        firstFillAtMs: fresh.first_fill_at_ms,
-        averageEntryPrice,
-      });
+      return this.convergeAndRespond(
+        fresh,
+        { state: "position_open" },
+        positionOpenResult({
+          appliedDesiredEntry: desiredEntry,
+          calculatedQuantity,
+          firstFillAtMs: fresh.first_fill_at_ms,
+          averageEntryPrice,
+        }),
+      );
     }
 
     if (fresh.order_link_id === null || (fresh.exchange_category !== "linear" && fresh.exchange_category !== "spot")) {
@@ -356,27 +384,133 @@ export class EntryCycleRecoveryResolutionService {
       return internalErrorResult();
     }
 
+    // The pre-existing first_fill_at_ms-only capture keeps its existing
+    // best-effort behavior: a failure here does not invalidate an
+    // otherwise-true response, because status convergence (below, via
+    // convergeAndRespond) still correctly reflects reality regardless of
+    // whether this particular capture attempt durably lands (the next
+    // recovery call retries the capture, since first_fill_at_ms was never
+    // durably set).
+    let withFill = fresh;
     try {
       await this.deps.correlationRepository.save({
         ...fresh,
         first_fill_at_ms: captured.firstFillAtMs,
         updated_at: new Date().toISOString(),
       });
+      withFill = { ...fresh, first_fill_at_ms: captured.firstFillAtMs };
     } catch {
-      // A durable-write failure (e.g. a disk error) does not convert an
-      // otherwise-successful determination into an error response — the
-      // freshly-captured value is still truthful in this moment. The next
-      // resolve() retries the capture, since first_fill_at_ms was never
-      // durably set.
+      withFill = { ...fresh, first_fill_at_ms: captured.firstFillAtMs };
     }
 
-    return positionOpenResult({
-      appliedDesiredEntry: desiredEntry,
-      calculatedQuantity,
-      firstFillAtMs: captured.firstFillAtMs,
-      averageEntryPrice,
+    return this.convergeAndRespond(
+      withFill,
+      { state: "position_open" },
+      positionOpenResult({
+        appliedDesiredEntry: desiredEntry,
+        calculatedQuantity,
+        firstFillAtMs: captured.firstFillAtMs,
+        averageEntryPrice,
+      }),
+    );
+  }
+
+  // Mirrors resolvePositionOpenResultLocked's own capture-if-missing
+  // pattern for first_fill_at_ms — best-effort, never blocks the response —
+  // before evaluating status convergence. Runs against a record already
+  // fresh, under the lock, and binding-continuity-checked by the caller.
+  private async resolveTerminalAfterFillResult(fresh: EntryPackageExecutionRecord): Promise<RecoveryStateHttpResult> {
+    let record = fresh;
+    if (
+      record.first_fill_at_ms === null &&
+      record.order_link_id !== null &&
+      (record.exchange_category === "linear" || record.exchange_category === "spot")
+    ) {
+      const captured = await resolveFirstAttributableFillAtMs({
+        bybit: this.deps.bybit,
+        category: record.exchange_category,
+        symbol: record.exchange_symbol,
+        orderLinkId: record.order_link_id,
+      });
+      if (captured.kind === "found") {
+        try {
+          await this.deps.correlationRepository.save({
+            ...record,
+            first_fill_at_ms: captured.firstFillAtMs,
+            updated_at: new Date().toISOString(),
+          });
+        } catch {
+          // Best-effort, same as position_open's own capture — status
+          // convergence below is unaffected either way.
+        }
+        record = { ...record, first_fill_at_ms: captured.firstFillAtMs };
+      }
+    }
+
+    return this.convergeAndRespond(record, { state: "terminal_after_fill" }, terminalAfterFillResult());
+  }
+
+  // Evaluates the pure Recovery Convergence policy against a record already
+  // fresh, under the lock, and binding-continuity-checked, then applies any
+  // returned patch. A `no_change` decision returns `positiveResult`
+  // unchanged. A `"converge"` decision whose durable write fails returns
+  // the existing fail-safe `internal_error` response instead of
+  // `positiveResult` — a status/pending_action-changing convergence must
+  // never be reported as successful unless it durably lands, or a caller
+  // could treat this cycle as resolved while ABI's own durable record
+  // remains exactly as unresolved as before (abi-entry-cycle-recovery-
+  // convergence-v1 design.md section G).
+  private async convergeAndRespond(
+    fresh: EntryPackageExecutionRecord,
+    outcome: RecoveryConvergenceOutcome,
+    positiveResult: RecoveryStateHttpResult,
+  ): Promise<RecoveryStateHttpResult> {
+    const decision = evaluateRecoveryConvergence(outcome, fresh, new Date().toISOString());
+    if (decision.kind === "no_change") {
+      return positiveResult;
+    }
+
+    try {
+      await this.deps.correlationRepository.save({ ...fresh, ...decision.patch });
+    } catch {
+      return internalErrorResult();
+    }
+
+    return positiveResult;
+  }
+
+  // Shared by finalizeOutcomeLocked and the entry_order_not_found path: the
+  // outcome only ever describes the exact binding it was resolved against.
+  private async resolveConvergedResult(
+    resolvedAgainst: EntryPackageExecutionRecord,
+    outcome: RecoveryConvergenceOutcome,
+    positiveResult: RecoveryStateHttpResult,
+  ): Promise<RecoveryStateHttpResult> {
+    const key = correlationRecordKey(resolvedAgainst.strategy_instance_id, resolvedAgainst.trade_cycle_id);
+    return this.deps.mutex.withKeyLock(key, async () => {
+      const fresh = this.deps.correlationRepository.get(
+        resolvedAgainst.strategy_instance_id,
+        resolvedAgainst.trade_cycle_id,
+      );
+      if (fresh === undefined) {
+        return unknownTradeCycleBindingResult();
+      }
+      if (!sameBinding(fresh, resolvedAgainst)) {
+        return internalErrorResult();
+      }
+      return this.convergeAndRespond(fresh, outcome, positiveResult);
     });
   }
+}
+
+// Whether `fresh` is still the exact same binding `resolvedAgainst` was —
+// the only two fields a change to which means an outcome no longer
+// describes the record it's about to be applied to (abi-entry-cycle-
+// recovery-convergence-v1 design.md section D). Generation and
+// order_link_id are both durably stable for the lifetime of one binding and
+// both change together whenever a binding is superseded.
+function sameBinding(fresh: EntryPackageExecutionRecord, resolvedAgainst: EntryPackageExecutionRecord): boolean {
+  return fresh.generation === resolvedAgainst.generation && fresh.order_link_id === resolvedAgainst.order_link_id;
 }
 
 // Own evidence determines the candidate state; the aggregate physical
