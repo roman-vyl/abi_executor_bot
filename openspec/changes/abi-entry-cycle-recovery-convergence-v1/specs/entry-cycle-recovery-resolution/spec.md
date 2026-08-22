@@ -29,16 +29,23 @@ for the existing `first_fill_at_ms` capture.
 When Recovery Resolution positively resolves `entry_order_live` or `position_open` for a
 correlation record whose `status` is not durably closed, and whose `pending_action` is
 `null` or `"create"`, ABI SHALL durably converge `status` to `"applied"`. If
-`pending_action` was `"create"`, ABI SHALL also clear it to `null` in the same write. For
-`entry_order_live` specifically, this convergence SHALL apply only when the record's
-`order_id` is already non-null; a record whose `order_id` is still `null` (i.e.
-`pending_create`) SHALL NOT converge from this outcome. For `position_open`, ABI SHALL
-continue to capture `first_fill_at_ms` exactly as it already does today (capture-once,
-immutable), in the same locked write as the `status` convergence when both apply.
+`pending_action` was `"create"`, ABI SHALL also clear it to `null` in the same write. **This
+convergence SHALL apply only when the record's `order_id` is already non-null in the fresh,
+under-lock-read record — for BOTH `entry_order_live` and `position_open` alike, not
+`entry_order_live` alone.** A record whose `order_id` is still `null` (i.e. `pending_create`)
+SHALL NOT converge from either outcome. This durable write SHALL be evaluated against the
+correlation record re-read fresh under the pair mutex, after acquiring the lock and before
+evaluating the convergence decision — not against the outer, unlocked snapshot the outcome
+was originally resolved against. For `position_open`, ABI SHALL continue to capture
+`first_fill_at_ms` exactly as it already does today (capture-once, immutable), in the same
+locked write as the `status` convergence when both apply. **If the durable write changes
+`status` and/or `pending_action` and fails, ABI SHALL return the existing fail-safe
+`internal_error` response instead of the positive resolved outcome, and the record SHALL
+remain unconverged for the next recovery attempt.**
 
 #### Scenario: An unknown-status record with a proven fill converges to applied
-- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`, and
-  Recovery Resolution positively resolves `position_open`
+- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`,
+  `order_id` is non-null, and Recovery Resolution positively resolves `position_open`
 - **THEN** ABI durably converges `status` to `"applied"` in the same write that captures
   `first_fill_at_ms`
 - **AND** a subsequent `GET .../open-position` for the same pair no longer fails solely
@@ -54,11 +61,32 @@ immutable), in the same locked write as the `status` convergence when both apply
   and Recovery Resolution positively resolves `entry_order_live` or `position_open`
 - **THEN** ABI durably converges `status` to `"applied"` and `pending_action` to `null`
 
-#### Scenario: A pending-create ambiguity with no confirmed order_id does not converge from entry_order_live
+#### Scenario: A pending-create ambiguity with no confirmed order_id does not converge from either live-truth outcome
 - **WHEN** a correlation record's `status` is `pending_create`, `order_id` is `null`, and
-  Recovery Resolution positively resolves `entry_order_live`
-- **THEN** ABI does NOT converge `status` — the record remains unchanged
-- **AND** this is a deliberate, deferred boundary, not a failure
+  Recovery Resolution positively resolves `entry_order_live` OR `position_open`
+- **THEN** ABI does NOT converge `status` for either outcome — the record remains unchanged
+- **AND** this is a deliberate, deferred boundary, applied symmetrically to both outcomes,
+  not a failure or an oversight
+
+#### Scenario: A failed durable write during status convergence never returns the positive outcome
+- **WHEN** Recovery Resolution positively resolves `entry_order_live` or `position_open`,
+  Recovery Convergence decides to converge `status` (and/or `pending_action`), and the
+  durable write fails
+- **THEN** ABI returns the existing fail-safe `internal_error` response, NOT
+  `entry_order_live`/`position_open`
+- **AND** the correlation record's `status`/`pending_action` remain exactly as they were
+  before the attempt, so the next recovery call retries convergence from the same starting
+  point
+
+#### Scenario: A race between the outer resolution read and the lock is resolved by re-evaluating against the fresh record
+- **WHEN** the correlation record's `pending_action` or `order_id` changes between
+  Recovery Resolution's own outer, unlocked read and the pair mutex being acquired for the
+  convergence write
+- **THEN** ABI evaluates the convergence decision against the record re-read fresh under
+  the lock, not against the outer snapshot the outcome was originally resolved against
+- **AND** a guard that would exclude convergence under the fresh record (e.g. a
+  `pending_action` that became `"cancel"` in the interim) is honored, even though the outer
+  snapshot would have permitted convergence
 
 #### Scenario: An in-flight cancel intent is never silently overridden by a live-truth outcome
 - **WHEN** a correlation record's `pending_action` is `"cancel"`, and Recovery Resolution
@@ -136,6 +164,38 @@ convergence.
   `order_id` to `null`, and `pending_action` to `null`
 - **AND** this write shape is identical to the existing successful-CANCEL confirmation's
   own `status:"absent"` write
+
+### Requirement: A failed status-changing durable write never yields a positive response, for every convergence outcome
+For every convergence transition defined in this capability (`entry_order_live`/
+`position_open` → `applied`, `terminal_without_fill` → `terminal_unfilled`,
+`terminal_after_fill` → `terminal_closed`, `entry_order_not_found` → `absent`), ABI SHALL
+evaluate the Recovery Convergence decision against the correlation record re-read fresh
+under the pair mutex — acquired after Recovery Resolution's own outcome is resolved and
+before the convergence decision is evaluated, not merely before its write is applied. When
+the resulting decision durably changes `status` and/or `pending_action` and the underlying
+repository write fails, ABI SHALL return the existing fail-safe `internal_error` response
+instead of the outcome that would otherwise have been positive, and the correlation
+record SHALL remain unconverged, exactly as it was, for the next recovery attempt to retry.
+This rule applies uniformly to all five outcomes' convergence transitions; it does not
+apply to the pre-existing, unmodified `first_fill_at_ms`-only capture that occurs when
+`status` is already `"applied"` and no lifecycle field is changing — a failure of that
+narrower, pre-existing capture continues to return the already-true resolved outcome
+unchanged, exactly as it does today.
+
+#### Scenario: A failed terminal-status write never returns the positive terminal outcome
+- **WHEN** Recovery Resolution positively resolves `terminal_without_fill`,
+  `terminal_after_fill`, or `entry_order_not_found`, Recovery Convergence decides to
+  converge `status` accordingly, and the durable write fails
+- **THEN** ABI returns the existing fail-safe `internal_error` response, not the resolved
+  terminal outcome
+- **AND** the correlation record's `status` remains exactly as it was before the attempt
+
+#### Scenario: A pre-existing field-only capture failure is unaffected by this rule
+- **WHEN** a correlation record's `status` is already `"applied"`, Recovery Resolution
+  positively resolves `position_open`, and only the pre-existing `first_fill_at_ms` capture
+  (no `status`/`pending_action` change) fails to durably write
+- **THEN** ABI still returns `position_open`, exactly as this pre-existing capture behavior
+  already does today
 
 ### Requirement: Convergence is idempotent under repeated recovery
 Recovery Convergence SHALL be a pure function of the currently-resolved outcome and the

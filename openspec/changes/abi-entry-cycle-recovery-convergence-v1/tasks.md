@@ -2,11 +2,14 @@
 
 - [ ] 1.1 Add `RecoveryConvergencePolicy`/`ConvergenceDecision` (exact names per
   implementation) in `src/services/entryCycleRecovery/`, taking the already-resolved
-  outcome and the current `EntryPackageExecutionRecord`, returning `no_change` or a
-  patch — no HTTP, no Bybit adapter, no mutex, no repository access.
+  outcome, the current `EntryPackageExecutionRecord`, and a caller-supplied `now` timestamp
+  (for `binding_history` entries), returning `no_change` or a patch — no HTTP, no Bybit
+  adapter, no mutex, no repository access, and no internal clock read (`now` is an
+  argument, never read via `Date.now()`/`new Date()` inside the policy).
 - [ ] 1.2 Implement the `entry_order_live`/`position_open` → `applied` decision, including
-  the `pending_action ∈ {null, "create"}` guard, the `order_id`-non-null guard for
-  `entry_order_live`, and the `pending_action:"create" → null` clear.
+  the `pending_action ∈ {null, "create"}` guard, the `order_id`-non-null guard applied
+  identically to BOTH `entry_order_live` and `position_open` (not `entry_order_live`
+  alone), and the `pending_action:"create" → null` clear.
 - [ ] 1.3 Implement the `terminal_without_fill` → `terminal_unfilled` decision, including
   the `pending_action ∈ {null, "create"}` guard and the `binding_history` append via the
   existing `closeBindingFrom(record, "exchange_terminal", now)` helper.
@@ -23,13 +26,18 @@
 ## 2. Application-layer wiring
 
 - [ ] 2.1 Extend `EntryCycleRecoveryResolutionService`'s existing locked finalize/write
-  call site(s) to invoke the convergence policy after each of the five outcomes resolves,
-  and apply any returned patch via the existing `correlationRepository.save()` call, under
-  the existing per-pair `KeyedMutex`, re-reading the record fresh first (mirroring the
-  existing `resolvePositionOpenResultLocked` pattern for every outcome, not only
-  `position_open`).
-- [ ] 2.2 Preserve the existing HTTP response shape and existing crash-safety behavior: a
-  durable-write failure during convergence must not change the already-resolved response.
+  call site(s), for every one of the five outcomes (not only `position_open`), to: acquire
+  the per-pair `KeyedMutex` → re-read the record fresh under the lock → evaluate the
+  convergence policy against that fresh record → apply any returned patch via the existing
+  `correlationRepository.save()` call. The fresh re-read MUST happen before policy
+  evaluation, not only before the write (mirrors and generalizes the existing
+  `resolvePositionOpenResultLocked` pattern).
+- [ ] 2.2 Preserve the existing HTTP response shape, with corrected crash-safety behavior:
+  when the convergence decision changes `status`/`pending_action` and the durable write
+  fails, return the existing fail-safe `internal_error` response — NOT the positive
+  resolved outcome — leaving the record unconverged for the next attempt. The pre-existing,
+  unmodified `first_fill_at_ms`-only capture (no lifecycle field changing) keeps its
+  existing best-effort behavior unchanged.
 
 ## 3. Focused verification
 
@@ -44,8 +52,17 @@
   refusal).
 - [ ] 3.4 `pending_action:"create"` mirror case: `entry_order_live`/`position_open`
   converges to `applied` with `pending_action` cleared.
-- [ ] 3.5 Deferred boundary: `pending_create` (`order_id: null`) + `entry_order_live` does
-  NOT converge — explicit test proving the deliberate deferral.
+- [ ] 3.5 Deferred boundary: `pending_create` (`order_id: null`) + `entry_order_live` AND
+  `pending_create` (`order_id: null`) + `position_open` both do NOT converge — explicit
+  tests for both outcomes proving the deliberate, symmetric deferral.
+- [ ] 3.5a Write-failure fail-closed: for each of the five outcomes' status-changing
+  convergence, a simulated `correlationRepository.save()` failure returns `internal_error`
+  (never the positive outcome), and the record remains unconverged for a subsequent retry.
+- [ ] 3.5b Write-failure unaffected case: a simulated `first_fill_at_ms`-only capture
+  failure (status already `applied`) still returns `position_open`, unchanged from today.
+- [ ] 3.5c Race-ordering: a `pending_action`/`order_id` change between Resolution's outer
+  read and lock acquisition is honored by re-evaluating convergence against the fresh,
+  under-lock record — not the outer snapshot.
 - [ ] 3.6 `terminal_without_fill` convergence's `binding_history` entry is shape-identical
   to `entry-package-execution`'s own existing `terminal_without_fill` write.
 - [ ] 3.7 `terminal_after_fill` convergence's write is shape-identical to

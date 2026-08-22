@@ -85,15 +85,26 @@ EntryCycleRecoveryResolutionService.process()          [UNCHANGED]
         │  own-evidence dual-query resolution
         │  → one of 5 outcomes, or fail-safe
         ▼
-NEW: RecoveryConvergencePolicy.evaluate(outcome, record) [NEW, pure]
+acquire existing per-pair KeyedMutex                     [reused, unchanged]
+        ▼
+re-read the correlation record fresh, under the lock     [reused pattern —
+        │                                                  now the MANDATORY
+        │                                                  first step under
+        │                                                  the lock, before
+        │                                                  evaluation, not an
+        │                                                  optional re-check
+        │                                                  before the write —
+        │                                                  see section D]
+        ▼
+NEW: RecoveryConvergencePolicy.evaluate(outcome, freshRecord, now) [NEW, pure]
         │  → { kind: "no_change" }
         │  or { kind: "converge", patch: Partial<EntryPackageExecutionRecord> }
         ▼
-EntryCycleRecoveryResolutionService (existing locked-write call site, extended)
-        │  applies patch via existing correlationRepository.save(),
-        │  under the existing per-pair KeyedMutex
+if "converge": correlationRepository.save(patch) MUST succeed before a
+positive HTTP outcome is returned — a failed durable write returns the
+existing fail-safe internal_error instead (see section G)
         ▼
-HTTP recovery-state response (UNCHANGED shape)
+HTTP recovery-state response (UNCHANGED shape on success)
         │
         ▼
 Runtime existing recovery transition (unchanged, out of scope)
@@ -118,12 +129,33 @@ what the durable record *should become*.
 
 **Recovery Convergence** (new): "given this already-resolved outcome and the current
 durable record, what — if anything — should the durable record become?" A single pure
-function, `RecoveryConvergencePolicy.evaluate(outcome, record) -> ConvergenceDecision`,
-with **no HTTP, no Bybit adapter, no scheduler, no repository access, no mutex** — it takes
-the outcome and the record snapshot already in hand and returns a decision value. It never
-re-queries anything; if the record snapshot it's given is stale, the caller (the existing
-locked write call site, mirroring `resolvePositionOpenResultLocked`'s own existing
-re-read-fresh-under-mutex pattern) re-reads fresh before applying.
+function, `RecoveryConvergencePolicy.evaluate(outcome, record, now) -> ConvergenceDecision`,
+with **no HTTP, no Bybit adapter, no scheduler, no repository access, no mutex, and no
+internal clock read** — `now` is passed in by the caller (needed only for the terminal
+outcomes' `binding_history` entry timestamp, e.g. `closeBindingFrom`'s own `now` parameter);
+the policy itself never calls `Date.now()`/`new Date()`. It takes the outcome and a record
+snapshot and returns a decision value; it never re-queries anything.
+
+**Ordering fix over the first draft of this design**: the record snapshot passed to
+`evaluate()` MUST be the fresh, under-lock re-read, not the outer unlocked read the outcome
+was originally resolved against. `status`, `pending_action`, `order_id`, and
+`binding_history` can all change between the outer read and the lock being acquired (a
+concurrent close, cancel-confirmation, or another recovery call). The correct sequence is:
+
+```
+resolve outcome (existing, unlocked, as today)
+  → acquire pair mutex
+  → re-read record fresh, under the lock
+  → evaluate(outcome, freshRecord, now)
+  → apply patch (if "converge") via correlationRepository.save()
+```
+
+Re-reading only *before applying a write that the stale snapshot already decided on* is not
+sufficient — the fresh record must be an input to the decision itself, not only to the
+write, because the guard conditions (`pending_action`, `order_id`, durably-closed status)
+are exactly the fields a race could have changed. This mirrors, and generalizes to every
+outcome, the re-read-under-lock step `resolvePositionOpenResultLocked` already performs
+before its own existing `first_fill_at_ms` write today.
 
 Concretely, in `src/services/entryCycleRecovery/`:
 
@@ -147,7 +179,8 @@ type ConvergenceDecision =
 
 function evaluate(
   outcome: ResolvedRecoveryOutcome, // the 5 existing outcomes, unchanged shape
-  record: EntryPackageExecutionRecord,
+  record: EntryPackageExecutionRecord, // MUST be the fresh, under-lock read
+  now: string, // caller-supplied timestamp; policy never reads the clock itself
 ): ConvergenceDecision;
 ```
 
@@ -186,21 +219,23 @@ filled), exactly as durably recorded.
   already refuses to resolve either outcome for these records (existing spec requirement:
   "A binding left mid-amend by a legacy pending_action never resolves a live-truth state").
   Convergence never even sees an outcome here; nothing to decide.
-- **`order_id` guard for `entry_order_live` specifically**: every `applied`-status record
-  observed in the live durable store has a non-null `order_id`, captured at the moment of
-  the original confirmed create. `RecoveryEntryOrderSignal`'s `live_unfilled` variant
-  (`packageConfirmation.ts`) does not currently carry the order's own `orderId` from the
-  Bybit response, only its terminality/fill classification. **Open question, see section
-  K**: converging `pending_create` (whose `order_id` is always `null` until confirmed) via
-  `entry_order_live` would require either backfilling `order_id` from fresh evidence (a
-  small extension to `RecoveryEntryOrderSignal`) or accepting an `applied` row with
-  `order_id: null` (breaking an invariant every other `applied` row in this codebase's
-  history has held). **This design recommends deferring `pending_create + entry_order_live`
-  convergence** — guard convergence-to-`applied` on `order_id` already being non-null in the
-  current record — and treating the `RecoveryEntryOrderSignal` extension as an explicit,
-  separately-scoped follow-up if this combination is ever observed live. `position_open`'s
-  own existing evidence chain already carries everything needed (own order-query response
-  for price, own durable-or-freshly-captured `first_fill_at_ms`) — no equivalent gap there.
+- **`order_id` guard applies to BOTH `entry_order_live` and `position_open` — not
+  `entry_order_live` alone.** Every `applied`-status record observed in the live durable
+  store has a non-null `order_id`, captured at the moment of the original confirmed create;
+  converging to `applied` with `order_id` still `null` would break that invariant
+  regardless of which of the two outcomes triggered it. Neither `RecoveryEntryOrderSignal`'s
+  `live_unfilled` variant nor its `position_open`-producing fill variants
+  (`packageConfirmation.ts`) currently carry the order's own `orderId` from the Bybit
+  response — `ResolvedOutcome`'s `position_open` case only carries `averageEntryPrice`, no
+  `orderId` either. So `pending_action:"create"` (whose `order_id` is `null` until a
+  confirmed create sets it — this is true for `pending_create` regardless of whether the
+  fresh evidence resolves `entry_order_live` or `position_open`) is symmetrically exposed to
+  the same gap on both outcomes, and must be guarded identically on both: **convergence to
+  `applied` requires `record.order_id !== null` in the fresh, under-lock-read record,
+  unconditionally, for both `entry_order_live` and `position_open`.** Backfilling `order_id`
+  from fresh evidence (extending `RecoveryEntryOrderSignal` and `ResolvedOutcome`'s
+  `position_open` case to also carry the order's own `orderId`) is an explicit, separately-
+  scoped follow-up (section K), not part of this change's guard logic.
 - **Idempotency**: an already-`applied`, `pending_action:null` record resolving
   `entry_order_live`/`position_open` again decides `no_change` (nothing to converge).
 
@@ -275,8 +310,8 @@ fill/close/observation evidence. This proposal does not touch that gate.
 
 | Outcome | Eligible `pending_action` | Target `status` | Other fields touched | Excluded cell → decision |
 |---|---|---|---|---|
-| `entry_order_live` | `null`, `"create"` | `applied` | `pending_action → null` if was `"create"`; **guard: `order_id` already non-null** | `"cancel"` → `no_change`; legacy → unreachable |
-| `position_open` | `null`, `"create"` | `applied` | `pending_action → null` if was `"create"`; `first_fill_at_ms` capture-if-missing (existing mechanism, unchanged) | `"cancel"` → `no_change`; legacy → unreachable |
+| `entry_order_live` | `null`, `"create"` | `applied` | `pending_action → null` if was `"create"`; **guard: `order_id` already non-null** | `"cancel"` → `no_change`; legacy → unreachable; `order_id:null` → `no_change` |
+| `position_open` | `null`, `"create"` | `applied` | `pending_action → null` if was `"create"`; **guard: `order_id` already non-null**; `first_fill_at_ms` capture-if-missing (existing mechanism, unchanged) | `"cancel"` → `no_change`; legacy → unreachable; `order_id:null` → `no_change` |
 | `terminal_without_fill` | `null`, `"create"` | `terminal_unfilled` | `pending_action → null`; `binding_history` append via existing `closeBindingFrom(..., "exchange_terminal", ...)` | `"cancel"` → `no_change` (dedicated path owns it) |
 | `terminal_after_fill` | `null` only | `terminal_closed` | `first_fill_at_ms` capture-if-missing; `binding_history` via existing close-write shape | any non-null → `no_change` (defensive, unreachable) |
 | `entry_order_not_found` | `"create"` only (gate-defined upstream) | `absent` | `order_link_id`, `order_id`, `pending_action → null` | n/a — gate excludes everything else upstream |
@@ -311,14 +346,34 @@ fill/close/observation evidence. This proposal does not touch that gate.
 
 ## G. Crash/retry/idempotency semantics
 
-- The finalize step already re-reads the record fresh under the pair mutex before applying
-  any write (existing `resolvePositionOpenResultLocked` pattern, reused unchanged for every
-  outcome's convergence, not only `position_open`'s).
-- A durable-write failure (e.g. a disk error) during convergence does not change the
-  already-truthful HTTP response for that request — same existing behavior as
-  `first_fill_at_ms`'s own try/catch. The next recovery call re-resolves the same outcome
-  against the still-unconverged record and retries convergence; no retry counter, no
-  backoff, no new durable bookkeeping.
+- The finalize step re-reads the record fresh under the pair mutex **before** evaluating
+  the convergence policy, not only before applying its write (section D's ordering fix) —
+  reused and generalized from the existing `resolvePositionOpenResultLocked` pattern to
+  every outcome's convergence, not only `position_open`'s.
+- **A durable-write failure for a `status`/`pending_action`-changing convergence MUST NOT
+  return the positive resolved outcome.** This corrects the first draft of this design,
+  which proposed the opposite (return the resolved outcome regardless of write success) by
+  analogy with the existing `first_fill_at_ms`-only capture — that analogy does not hold
+  once the write also changes `status`. If it did: `position_open` proven, the durable
+  `status → "applied"` write fails, but ABI still returns `position_open` to Runtime —
+  Runtime may then treat recovery as resolved and clear its own marker, while ABI's durable
+  record remains stuck exactly as `unknown` as it was before this proposal, silently
+  reproducing the same incident class this proposal exists to close. The correct rule:
+  - **`no_change` decision**: return the resolved outcome exactly as today (nothing was
+    ever going to be written; no new failure mode introduced).
+  - **`converge` decision whose patch changes `status` and/or `pending_action`**: the
+    `correlationRepository.save()` call MUST succeed before the positive HTTP outcome is
+    returned. On failure, ABI returns the existing fail-safe `internal_error` response
+    instead — the same shape already used for any other inconclusive recovery attempt — and
+    the record remains unconverged for the next recovery call to retry. No new retry
+    counter, no backoff, no new durable bookkeeping: the existing periodic recovery caller
+    is the retry mechanism.
+  - **`converge` decision whose patch is field-only and does not change `status` or
+    `pending_action`** (the pre-existing `first_fill_at_ms`-when-`status`-is-already-
+    `applied` case, unchanged by this proposal): existing best-effort behavior is
+    preserved — a failed capture does not invalidate an already-true response, because the
+    record's `status` already correctly permits every future reader to resolve it
+    regardless of whether this particular capture attempt durably lands.
 - Repeated recovery calls against an already-converged record are provably idempotent: the
   policy is a pure function of `(outcome, record)`, and once `record` reflects the
   converged state, the same outcome recomputes to `no_change` on every subsequent call
@@ -419,9 +474,10 @@ decision):
 8. **`entry_order_live`/`position_open` from `pending_action:"create"`**: proves the
    create-succeeded mirror of the sibling `entry_order_not_found` change — status converges
    to `applied`, `pending_action` clears to `null`.
-9. **`pending_create` + `entry_order_live` is explicitly NOT converged** (per the deferred
-   `order_id` guard in section E) — prove `no_change` and document why, so this is a
-   deliberate, tested boundary rather than an untested gap.
+9. **`pending_create` + `entry_order_live` AND `pending_create` + `position_open` are both
+   explicitly NOT converged** (per the `order_id`-non-null guard in section E, which applies
+   symmetrically to both outcomes) — prove `no_change` for both, and document why, so this
+   is a deliberate, tested boundary rather than an untested gap.
 10. **`terminal_without_fill` convergence** reuses `closeBindingFrom(..., "exchange_terminal",
     ...)` exactly — prove the appended `binding_history` entry is byte-identical in shape to
     `persistConfirmationOutcome`'s own existing write for the same outcome.
@@ -433,16 +489,24 @@ decision):
     this path is unreachable for any record with durable fill/close identity (already
     guaranteed upstream by the sibling change's own eligibility gate, tested here only as a
     boundary confirmation, not a new gate).
-13. **Crash-safety**: a durable-write failure during convergence returns the already-
-    resolved (truthful) HTTP response unchanged; the record remains unconverged for the
-    next attempt.
+13. **Crash-safety, status-changing convergence**: a durable-write failure for a
+    `status`/`pending_action`-changing convergence (e.g. `unknown` → `applied`) returns
+    `internal_error`, NOT the positive resolved outcome; the record remains unconverged for
+    the next attempt to retry. This is the corrected behavior — the first draft of this
+    design specified the opposite and is superseded.
+14. **Crash-safety, field-only capture unchanged**: a durable-write failure for the
+    pre-existing `first_fill_at_ms`-only capture (status already `applied`, nothing else
+    changing) still returns the already-true resolved outcome unchanged — this narrow case
+    is unaffected by item 13's correction, per the distinction in section G.
 14. Full existing `entry-cycle-recovery-resolution` test suite continues passing unchanged
     — this proposal adds behavior, it does not alter any existing resolution scenario.
 
 ## K. Open questions
 
-1. Whether/when to extend `RecoveryEntryOrderSignal`'s `live_unfilled` variant to carry the
-   order's own `orderId`, to enable `pending_create + entry_order_live` convergence safely.
+1. Whether/when to extend `RecoveryEntryOrderSignal`'s `live_unfilled` variant and
+   `ResolvedOutcome`'s `position_open` case to also carry the order's own `orderId`, to
+   enable `pending_create + entry_order_live` and `pending_create + position_open`
+   convergence safely (both guarded to `no_change` in this proposal, symmetrically).
    Deferred; not blocking this proposal, since the live incident (and every currently-
    observed `unknown`-shaped record) already has a non-null `order_id`.
 2. Whether `pending_action:"cancel"` + `entry_order_live`/`position_open`/
