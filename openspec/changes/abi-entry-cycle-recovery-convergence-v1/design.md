@@ -96,6 +96,12 @@ re-read the correlation record fresh, under the lock     [reused pattern —
         │                                                  before the write —
         │                                                  see section D]
         ▼
+binding-continuity guard: fresh.generation === resolvedAgainst.generation
+AND fresh.order_link_id === resolvedAgainst.order_link_id?            [NEW —
+        │  no  → fail-safe internal_error, fresh (new) binding left
+        │        entirely untouched, no convergence evaluated at all
+        │  yes → proceed]
+        ▼
 NEW: RecoveryConvergencePolicy.evaluate(outcome, freshRecord, now) [NEW, pure]
         │  → { kind: "no_change" }
         │  or { kind: "converge", patch: Partial<EntryPackageExecutionRecord> }
@@ -143,9 +149,13 @@ was originally resolved against. `status`, `pending_action`, `order_id`, and
 concurrent close, cancel-confirmation, or another recovery call). The correct sequence is:
 
 ```
-resolve outcome (existing, unlocked, as today)
+resolve outcome against record R (existing, unlocked, as today)
   → acquire pair mutex
   → re-read record fresh, under the lock
+  → binding-continuity guard: fresh.generation === R.generation
+                               AND fresh.order_link_id === R.order_link_id ?
+                                 no  → fail-safe internal_error, stop
+                                 yes → continue
   → evaluate(outcome, freshRecord, now)
   → apply patch (if "converge") via correlationRepository.save()
 ```
@@ -156,6 +166,37 @@ write, because the guard conditions (`pending_action`, `order_id`, durably-close
 are exactly the fields a race could have changed. This mirrors, and generalizes to every
 outcome, the re-read-under-lock step `resolvePositionOpenResultLocked` already performs
 before its own existing `first_fill_at_ms` write today.
+
+**Binding-continuity guard, second correction over the first draft.** A fresh, under-lock
+re-read is necessary but not sufficient: it proves the *current* record's mutable fields
+(`pending_action`, `order_id` as a value) haven't raced ahead unnoticed, but it does not by
+itself prove the fresh record is still *the same binding* the outcome was resolved against.
+`entry-package-execution`'s own existing lifecycle already allows a binding at `generation`
+N to reach `absent`, followed by a later PUT establishing an entirely new binding at
+`generation` N+1 with a different `order_link_id` — entirely through existing, unmodified
+write paths, with no involvement from this proposal. Because Resolution's own bounded
+exchange queries can take multiple seconds (observed: single recovery attempts up to
+several seconds; the `entry_order_not_found` ambiguous-absence path spans three full
+attempts with 300ms delays between them, several seconds total), this window is not
+theoretical. If generation N's outcome is applied to generation N+1's record purely because
+both happen to share the same `(strategy_instance_id, trade_cycle_id)` composite key, stale
+evidence from a binding that no longer exists could durably mutate an unrelated, currently
+live binding — for example, generation N's `terminal_without_fill` closing generation N+1's
+genuinely-in-flight `pending_create`. The fix is a single equality check on two already-
+present fields, evaluated once, immediately after the fresh re-read and before
+`evaluate()` is ever called: `fresh.generation === R.generation && fresh.order_link_id ===
+R.order_link_id`. No new identity subsystem, no `ResolvedOutcome` extension: both values are
+already present on both the pre-lock and post-lock record snapshots the application layer
+already holds. A mismatch fails closed exactly like any other inconclusive recovery
+attempt — the fresh (new) binding is left completely untouched, and the next recovery tick
+resolves fresh evidence against it entirely on its own terms.
+
+This closes the gap for every outcome uniformly, including `entry_order_not_found`: that
+outcome's own upstream eligibility gate (`abi-entry-order-not-found-recovery-v1`) is
+evaluated against the pre-lock record its own bounded attempts queried against — it proves
+absence for *that* binding, not for whatever binding happens to occupy the same composite
+key by the time the lock is acquired. The binding-continuity guard is what makes that
+already-proven absence safe to apply durably.
 
 Concretely, in `src/services/entryCycleRecovery/`:
 
@@ -298,13 +339,21 @@ fill/close/observation evidence. This proposal does not touch that gate.
   and `pending_action` to `null` — **exactly** mirroring `confirmCancelOutcomeAndPersist`'s
   own existing successful-cancel write shape ("durably persists `status: "absent"` together
   with `order_link_id: null`"), not a new shape.
-- **Do not generalize this outcome's semantics beyond what its own upstream eligibility gate
-  already allows.** Because that gate already excludes any record carrying durable fill,
-  close identity, or a non-`"create"` `pending_action`, Convergence for this outcome can
-  never see an uncertain-*removal* topology or a previously-filled cycle — Resolution
-  itself already prevents it. No additional guard is needed here beyond trusting the
-  existing gate; this proposal explicitly does not extend `entry_order_not_found` handling
-  to Runtime's separate, dormant `uncertain-removal` gap (out of scope, see Non-Goals).
+- **Do not generalize this outcome's topological semantics beyond what its own upstream
+  eligibility gate already allows.** Because that gate already excludes any record carrying
+  durable fill, close identity, or a non-`"create"` `pending_action`, Convergence for this
+  outcome can never see an uncertain-*removal* topology or a previously-filled cycle —
+  Resolution itself already prevents it. This proposal explicitly does not extend
+  `entry_order_not_found` handling to Runtime's separate, dormant `uncertain-removal` gap
+  (out of scope, see Non-Goals).
+- **This outcome is NOT exempt from the binding-continuity guard.** The eligibility gate
+  above proves absence for the specific binding (`generation`/`order_link_id`) Resolution's
+  bounded attempts actually queried against — it says nothing about whatever binding
+  occupies the same `(strategy_instance_id, trade_cycle_id)` composite key by the time the
+  pair mutex is acquired. The general binding-continuity guard (section D) applies here
+  exactly as it does to every other outcome: if `generation`/`order_link_id` changed between
+  resolution and the lock, convergence to `absent` MUST NOT be applied, even though the
+  eligibility gate itself was satisfied against the (now-superseded) pre-lock record.
 
 ### Summary table
 
@@ -350,6 +399,13 @@ fill/close/observation evidence. This proposal does not touch that gate.
   the convergence policy, not only before applying its write (section D's ordering fix) —
   reused and generalized from the existing `resolvePositionOpenResultLocked` pattern to
   every outcome's convergence, not only `position_open`'s.
+- **A binding-continuity mismatch (`generation`/`order_link_id` changed between resolution
+  and the lock) fails closed exactly like a query failure — `internal_error`, no write, no
+  special-cased response.** This is a second, independent gate on top of the guard
+  conditions inside `evaluate()` itself: it runs before `evaluate()` is even called, because
+  a changed binding means the outcome doesn't describe the fresh record at all, not merely
+  that some guard field inside it changed. The next recovery tick evaluates the new binding
+  entirely on its own terms — no state is retained across the mismatch.
 - **A durable-write failure for a `status`/`pending_action`-changing convergence MUST NOT
   return the positive resolved outcome.** This corrects the first draft of this design,
   which proposed the opposite (return the resolved outcome regardless of write success) by
@@ -500,6 +556,15 @@ decision):
     is unaffected by item 13's correction, per the distinction in section G.
 14. Full existing `entry-cycle-recovery-resolution` test suite continues passing unchanged
     — this proposal adds behavior, it does not alter any existing resolution scenario.
+15. **Binding-continuity guard**: an outcome resolved against `generation` N /
+    `order_link_id` A, where the fresh under-lock record has already advanced to
+    `generation` N+1 / `order_link_id` B (e.g. the prior binding reached `absent` and a new
+    PUT established a new binding in the interim) → convergence MUST NOT run, no durable
+    write occurs, `internal_error` is returned, and the fresh (new) binding is left
+    completely untouched. Prove this for at least one live-truth outcome and for
+    `entry_order_not_found` specifically (its own eligibility gate is evaluated against the
+    pre-lock record and must not be treated as proving anything about a binding that has
+    since changed).
 
 ## K. Open questions
 

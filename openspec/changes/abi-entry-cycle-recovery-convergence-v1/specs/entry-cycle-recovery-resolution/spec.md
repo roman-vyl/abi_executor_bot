@@ -5,13 +5,14 @@ Once Recovery Resolution has already positively resolved one of the five recover
 (`entry_order_live`, `position_open`, `terminal_without_fill`, `terminal_after_fill`,
 `entry_order_not_found`) for a given `(strategy_instance_id, trade_cycle_id)` pair, ABI
 SHALL evaluate a separate, pure Recovery Convergence decision — given only the resolved
-outcome and the current correlation record — that determines whether the durable
-correlation record's `status` (and, where specified, `pending_action` and related fields)
-SHALL converge toward that proven outcome, or SHALL remain unchanged (`no_change`). The
-Convergence decision function itself SHALL NOT query the exchange, SHALL NOT acquire the
-per-pair mutex, and SHALL NOT write to the correlation repository directly — those remain
-the responsibility of the existing application-layer call site, exactly as they are today
-for the existing `first_fill_at_ms` capture.
+outcome, the current correlation record, and a caller-supplied timestamp — that determines
+whether the durable correlation record's `status` (and, where specified, `pending_action`
+and related fields) SHALL converge toward that proven outcome, or SHALL remain unchanged
+(`no_change`). The Convergence decision function itself SHALL NOT query the exchange, SHALL
+NOT acquire the per-pair mutex, SHALL NOT write to the correlation repository directly, and
+SHALL NOT read the system clock itself — those remain the responsibility of the existing
+application-layer call site, exactly as they are today for the existing `first_fill_at_ms`
+capture.
 
 #### Scenario: Convergence never runs for a durably-closed record
 - **WHEN** the correlation record's `status` is already `absent`, `terminal_unfilled`, or
@@ -24,6 +25,42 @@ for the existing `first_fill_at_ms` capture.
 - **WHEN** Recovery Resolution cannot positively establish one of the five outcomes
 - **THEN** Recovery Convergence is never invoked
 - **AND** the correlation record's `status` remains exactly as it was
+
+### Requirement: A resolved outcome converges only the exact binding it was resolved against
+Recovery Resolution's bounded exchange queries take place against a specific record
+snapshot read before the pair mutex is acquired (Resolution's own existing, unmodified
+behavior). Between that read and the mutex being acquired for convergence, the same
+`(strategy_instance_id, trade_cycle_id)` pair's binding MAY have durably changed — including
+to a new generation with a new `order_link_id` — through the entry-package execution path's
+own existing lifecycle (e.g. the prior binding reaching `absent` and a subsequent PUT
+establishing a new one). A resolved outcome describes only the exact binding it was proven
+against, never the pair in the abstract. Before evaluating the convergence decision against
+the fresh, under-lock record, ABI SHALL verify that the fresh record's `generation` and
+`order_link_id` are identical to the record's `generation` and `order_link_id` at the time
+Resolution resolved the outcome. If either has changed, ABI SHALL NOT evaluate or apply any
+convergence for that outcome — it SHALL return the existing fail-safe `internal_error`
+response, and the fresh record (the new binding) SHALL be left entirely untouched. This
+guard applies to all five outcomes uniformly, including `entry_order_not_found`, whose own
+upstream eligibility gate is evaluated against the pre-lock record and therefore does not,
+by itself, prove anything about a binding that has since changed.
+
+#### Scenario: A generation change between resolution and the lock prevents convergence
+- **WHEN** Recovery Resolution resolves an outcome against a record at `generation` N with
+  `order_link_id` A, and by the time the pair mutex is acquired the fresh record is at
+  `generation` N+1 with a different `order_link_id` B (e.g. the prior binding reached
+  `absent` and a new PUT established a new binding in the interim)
+- **THEN** ABI does NOT evaluate or apply any convergence decision
+- **AND** ABI returns the existing fail-safe `internal_error` response
+- **AND** the fresh record (generation N+1 / `order_link_id` B) remains entirely unchanged
+  by this recovery attempt
+- **AND** a subsequent recovery call resolves fresh evidence against the new binding on its
+  own terms
+
+#### Scenario: An unchanged binding proceeds to convergence normally
+- **WHEN** the fresh, under-lock record's `generation` and `order_link_id` are identical to
+  those of the record the outcome was resolved against
+- **THEN** ABI proceeds to evaluate the convergence decision against the fresh record,
+  exactly as already specified elsewhere in this capability
 
 ### Requirement: A proven live-truth outcome converges an eligible non-durably-closed record to applied
 When Recovery Resolution positively resolves `entry_order_live` or `position_open` for a

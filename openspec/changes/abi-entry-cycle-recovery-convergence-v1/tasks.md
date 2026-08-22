@@ -32,6 +32,12 @@
   `correlationRepository.save()` call. The fresh re-read MUST happen before policy
   evaluation, not only before the write (mirrors and generalizes the existing
   `resolvePositionOpenResultLocked` pattern).
+- [ ] 2.1a Add the binding-continuity guard between the fresh re-read and policy evaluation:
+  compare `fresh.generation`/`fresh.order_link_id` against the same two fields on the record
+  the outcome was originally resolved against (the pre-lock snapshot the application layer
+  already holds); on any mismatch, skip evaluation entirely and return the existing
+  fail-safe `internal_error` response, leaving the fresh (new) binding completely untouched.
+  Applies uniformly to all five outcomes, including `entry_order_not_found`.
 - [ ] 2.2 Preserve the existing HTTP response shape, with corrected crash-safety behavior:
   when the convergence decision changes `status`/`pending_action` and the durable write
   fails, return the existing fail-safe `internal_error` response — NOT the positive
@@ -63,6 +69,12 @@
 - [ ] 3.5c Race-ordering: a `pending_action`/`order_id` change between Resolution's outer
   read and lock acquisition is honored by re-evaluating convergence against the fresh,
   under-lock record — not the outer snapshot.
+- [ ] 3.5d Binding-continuity guard: an outcome resolved against `generation` N /
+  `order_link_id` A, where the fresh under-lock record has advanced to `generation` N+1 /
+  `order_link_id` B before the lock is acquired, MUST NOT converge — `internal_error`, no
+  write, fresh binding left untouched. Test at least one live-truth outcome and
+  `entry_order_not_found` specifically (its own eligibility gate is evaluated against the
+  pre-lock record and does not by itself prove anything about the post-lock binding).
 - [ ] 3.6 `terminal_without_fill` convergence's `binding_history` entry is shape-identical
   to `entry-package-execution`'s own existing `terminal_without_fill` write.
 - [ ] 3.7 `terminal_after_fill` convergence's write is shape-identical to
