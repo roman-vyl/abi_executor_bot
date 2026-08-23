@@ -1,6 +1,7 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { compareDecimal } from "../domain/exactDecimal.js";
 import { positionScopeKey } from "../domain/positionScope.js";
 import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
 import type { EntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
@@ -86,6 +87,18 @@ export class EntryPackageCorrelationRepository {
         return { ok: false, reason: `correlation record at line ${index + 1} does not match the expected schema` };
       }
 
+      // Fill-fact monotonicity, checked in file order against the previous
+      // line for the same pair — unlike scope ownership (Phase 2 below),
+      // a single pair's own fill-fact sequence has no legitimate
+      // "intermediate disagreement" case: every line for the same pair is
+      // either a compatible continuation of the previous line or it is
+      // real corruption, so per-line comparison is correct here.
+      const key = correlationRecordKey(parsed.strategy_instance_id, parsed.trade_cycle_id);
+      const regression = fillFactRegression(this.byCompositeKey.get(key), parsed);
+      if (regression !== undefined) {
+        return { ok: false, reason: `${regression} at line ${index + 1}` };
+      }
+
       // Phase 1: replay every valid line, keyed indexes only. byScope is
       // deliberately not touched here — an intermediate line can show a
       // scope legitimately mid-transfer between two pairs before a later
@@ -125,7 +138,46 @@ export class EntryPackageCorrelationRepository {
     return this.byScope.get(positionScopeKey(category, symbol));
   }
 
+  // Every active (non-durably-closed) record currently sharing a physical
+  // scope, regardless of which pair holds it. A plain scan over
+  // byCompositeKey (already the authoritative "latest record per pair"
+  // collection) rather than a second maintained index — nothing here can
+  // drift out of sync with it. In production this can only ever return zero
+  // or one record today: EntryPackageApplicationService.createOrder()'s
+  // scope-claim guard is unchanged by this method's existence and still
+  // enforces single ownership. This exists so a repository-level test can
+  // seed multiple same-side records directly (bypassing that guard) and
+  // prove the repository layer itself has no single-owner assumption baked
+  // in — see virtual-exposure-state spec.md.
+  findActiveRecordsForScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord[] {
+    const targetScope = positionScopeKey(category, symbol);
+    const results: EntryPackageExecutionRecord[] = [];
+
+    for (const record of this.byCompositeKey.values()) {
+      if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+        continue;
+      }
+      if (isDurablyClosedEntryPackageStatus(record.status)) {
+        continue;
+      }
+      if (positionScopeKey(record.exchange_category, record.exchange_symbol) !== targetScope) {
+        continue;
+      }
+      results.push(record);
+    }
+
+    return results;
+  }
+
   async save(record: EntryPackageExecutionRecord): Promise<void> {
+    const regression = fillFactRegression(
+      this.byCompositeKey.get(correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)),
+      record,
+    );
+    if (regression !== undefined) {
+      throw new Error(regression);
+    }
+
     const line = `${JSON.stringify(record)}\n`;
 
     const task = this.writeQueue.then(() => this.appendDurable(line));
@@ -259,6 +311,38 @@ export class EntryPackageCorrelationRepository {
 
 function isSamePair(a: EntryPackageExecutionRecord, b: EntryPackageExecutionRecord): boolean {
   return a.strategy_instance_id === b.strategy_instance_id && a.trade_cycle_id === b.trade_cycle_id;
+}
+
+// A pair's own recorded cumulative_filled_qty must never regress across
+// writes: it is sourced from Bybit's own monotonic cumExecQty for that
+// cycle's own entry order at every observation point
+// (packageConfirmation.ts's toObservation), so no legitimate write can ever
+// produce a smaller value than what is already durably recorded for the
+// same pair. A violation is a programming-error signal, not a real business
+// outcome (virtual-exposure-state spec.md, "Cumulative filled quantity
+// never regresses"). average_execution_price is deliberately not checked —
+// it is not required to move in any particular direction. Returns a
+// descriptive reason on violation, undefined otherwise; callers decide
+// whether to throw (live save()) or fail replay closed.
+function fillFactRegression(
+  previous: EntryPackageExecutionRecord | undefined,
+  incoming: EntryPackageExecutionRecord,
+): string | undefined {
+  const previousObservation = previous?.early_execution_observation ?? null;
+  const incomingObservation = incoming.early_execution_observation;
+  if (previousObservation === null || incomingObservation === null) {
+    return undefined;
+  }
+
+  if (compareDecimal(incomingObservation.cumulative_filled_qty, previousObservation.cumulative_filled_qty) < 0) {
+    return (
+      `cumulative_filled_qty regression for ` +
+      `${correlationRecordKey(incoming.strategy_instance_id, incoming.trade_cycle_id)}: ` +
+      `${incomingObservation.cumulative_filled_qty} < ${previousObservation.cumulative_filled_qty}`
+    );
+  }
+
+  return undefined;
 }
 
 function isNotFoundError(error: unknown): boolean {
