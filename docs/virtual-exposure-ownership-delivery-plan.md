@@ -452,6 +452,63 @@
 > Полная truth table, design decisions (включая точный код temporary guard'а) и обоснование — в
 > design-фазе Change 5 (OpenSpec `abi-same-side-virtual-exposure-ownership-v1`), не здесь.
 
+> **Ревизия v15 — Changes 6–8 переосмыслены вокруг нативной Bybit attached `tpslMode: "Partial"`
+> модели вместо ABI-generated conditional-ордеров (найдено design-check'ом до proposal Change 6, до
+> applied Change 5 не затрагивает).**
+>
+> **Что изменилось.** Весь предыдущий текст Changes 6–8 (v1–v14 этого документа) предполагал, что ABI
+> сама создаёт, подписывает и управляет собственными reduceOnly conditional stop/take-ордерами: своя
+> identity-схема (`stop`/`take` orderLinkId-роли), свой `protection_generation`, свой create-order
+> payload, своя recovery-логика, своя OCO-семантика между двумя ногами. Это был архитектурно корректный
+> и полностью проработанный вариант (отдельный design-check подтвердил: shared `protection_generation`
+> на весь tuple достаточен, минимальный durable state — 7 additive-полей, deriving previous-generation
+> identity через `generation − 1` безопасно, crash-windows все закрыты) — но он избыточен. Bybit уже
+> сегодня предоставляет собственный нативный механизм: entry create уже прикрепляет position-level
+> protection через `tpslMode: "Full"` (`mapEntryPackageToBybit()`, `bybitOrderMapper.ts:107-131`) —
+> переключение этого же mapping в `tpslMode: "Partial"` заставляет Bybit materializes собственные child
+> TP/SL-ордера **per parent order**, каждый несущий `parentOrderLinkId`, равный own entry orderLinkId
+> родителя. ABI не обязана изобретать свой protection-lifecycle — она обязана научиться **достоверно
+> обнаруживать и атрибутировать** то, что биржа уже создаёт сама.
+>
+> **Что удалено из объёма Changes 6–8 этой ревизией** (как преждевременная архитектура, не как
+> опровергнутая): ABI-generated identity-роли `stop`/`take`; собственные `stop_order_link_id`/
+> `take_order_link_id`/`stop_order_id`/`take_order_id`; `protection_generation`-счётчик; generic
+> conditional reduce-only create-order payload под protection; recovery для ордеров, которые сама ABI
+> никогда не создавала; любая ABI-side OCO-реализация. Ничего из этого не было ни предложено, ни
+> применено как OpenSpec — переписывается только этот планирующий документ.
+>
+> **Что добавлено.** Change 6 — read/decode/classification foundation: главный новый primitive —
+> query-driven атрибуция вида `own entry orderLinkId → Bybit order query → children WHERE
+> parentOrderLinkId == own entry orderLinkId → классификация (STOP | TAKE | неопознанный)`, с fail-closed
+> на любую неоднозначность (0 children при уже доказанном fill+Partial; больше двух подходящих; два
+> одной роли — всё ambiguous, никогда не угадывается). Точные поля Bybit response (какое поле — родитель,
+> какое отличает STOP от TAKE, гарантирует ли биржа атомарную OCO-нейтрализацию sibling-ноги) — предмет
+> обязательного technical spike перед proposal Change 6, не предположение этого документа (см.
+> переформулированный риск §6 п.4).
+>
+> **Новое sequencing (та же foundation → lifecycle → activation дисциплина, что уже применена ownership-
+> цепочке Changes 1→5):**
+> - **Change 6** (`abi-native-partial-protection-attribution-v1`) — read/attribution foundation;
+>   entry-mapping остаётся `tpslMode: "Full"`; никаких новых durable-полей.
+> - **Change 7** (`abi-native-partial-protection-lifecycle-v1`) — lifecycle замены native Partial
+>   protection при изменении желаемого stop/take (решает "как заменить qty=4 на qty=7 без double/zero-
+>   coverage окна"); production-инертен, guard из Change 5 не снимается, mapping остаётся Full.
+> - **Change 8** (`abi-native-partial-protection-cutover-v1`) — единственный coordinated cutover:
+>   entry-mapping `Full → Partial`, включение lifecycle из Change 7, снятие Change 5's temporary
+>   admission guard и `shared_scope_protection_unsupported`, close-интеграция (own attributable Partial
+>   children нейтрализуются при close). Единственная Activation программы — не меняется относительно
+>   ревизии v14, меняется только то, из чего состоит cutover.
+>
+> **Что не меняется этой ревизией.** Changes 1–5 (applied/archived или, для Change 5, уже
+> implemented+archived как foundation) не затрагиваются и не переоткрываются — Change 5's temporary
+> guard остаётся ровно тем, что уже реализовано, его снятие остаётся работой Change 8. "Архитектурное
+> решение: protection" ниже переписано (вариант B помечен отклонённым/superseded вариантом C, не
+> удалён из истории). Change 6/7/8's собственные тела ниже переписаны полностью, а не точечно, тем же
+> способом, каким ревизия v5 переписала Change 2 целиком.
+>
+> Полная truth table, точная Bybit response shape и design decisions — design-фаза Change 6 (после
+> technical spike), не здесь.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -500,10 +557,12 @@ change (`2026-08-07-abi-position-scope-exclusivity-v1`, `...-close-execution-v1`
 
 4. **`ProtectionApplicationService`** использует `/v5/position/trading-stop` — это **position-level, full-state
    replace** для всей физической позиции (`tpslMode: "Full"`, `positionIdx: 0`,
-   `src/exchange/bybitAdapter.ts:257-271`). У этого API физически нет способа независимо обслуживать
+   `src/exchange/bybitAdapter.ts:278-292`). У этого API физически нет способа независимо обслуживать
    несколько trade cycles одного symbol — значит текущий protection-execution обязан быть либо
-   переосмыслен (pair-owned reduce-only conditional orders), либо временно заблокирован для shared-scope,
-   пока не переосмыслен.
+   переосмыслен, либо временно заблокирован для shared-scope, пока не переосмыслен. **[Ревизия v15]**
+   Тот же `tpslMode`-параметр, который сегодня отправляет `"Full"`, поддерживает нативный `"Partial"`
+   режим — Bybit сам materializes per-parent-order protection children вместо position-level protection;
+   переосмысление — атрибуция нативных children, не изобретение ABI-собственных conditional-ордеров.
 
 5. **Concurrency сегодня уже дружелюбна к multi-owner**: mutex-гранулярность — `(strategy_instance_id,
    trade_cycle_id)` пара (`src/concurrency/keyedMutex.ts`, используется одним и тем же instance во всех
@@ -513,9 +572,12 @@ change (`2026-08-07-abi-position-scope-exclusivity-v1`, `...-close-execution-v1`
    scope-claim.
 
 6. **Order identity уже cycle-scoped**: `orderLinkId = abi-ep-{sha256(strategyInstanceId, tradeCycleId,
-   role, generation)}` (`src/domain/entryPackageOrderIdentity.ts:8-20`). Это готовый паттерн для будущих
-   pair-owned protection-ордеров (roles `"stop"`/`"take"` вместо `"entry"`), не требующий изобретения новой
-   схемы идентичности.
+   role, generation)}` (`src/domain/entryPackageOrderIdentity.ts:8-20`). **[Ревизия v15]** После пивота к
+   native Partial attribution это не паттерн для новых ABI-generated protection-ролей — это сам якорь
+   атрибуции: собственный entry `order_link_id` этого cycle — единственное значение, по которому
+   нативные Bybit Partial TP/SL children должны совпасть через `parentOrderLinkId`, чтобы быть законно
+   приписаны этому cycle. Никакой новой identity-схемы Change 6 не вводит — она читает то, что Bybit уже
+   связывает с уже существующим entry-identity.
 
 7. **Recovery** (`EntryCycleRecoveryResolutionService`) сегодня подтверждает `position_open` через пару
    (order query по своему orderLinkId) + (aggregate position query, сверка по side). При shared scope
@@ -584,36 +646,56 @@ durable correlation state, not a new store" (position-scope-exclusivity spec L35
 
 ### Архитектурное решение: protection
 
-Сравнены два варианта:
+Сравнены три варианта:
 
 - **A. Position-level protection с виртуальной координацией** (агрегированный/усреднённый stop-take на
   всю физическую позицию). Отклонён: физически невозможно честно обслужить два разных желаемых
   stop/take одновременно через один `/v5/position/trading-stop`; закрытие одного cycle требует
   пересчитывать/переотправлять общий stop для оставшихся; нарушает уже существующий инвариант
   "exact numeric match to accepted values" per pair (protection-execution spec L75-119).
-- **B. Pair-owned reduce-only conditional exit orders** (собственный stop-order и take-order на cycle,
-  reduceOnly, qty = ABI-resolved authoritative exposure этого cycle (см. quantity ownership boundary,
-  Change 1/2 — не отдельное mutable поле), orderLinkId по уже существующей схеме
-  `entryPackageOrderIdentity.ts`). Выбран как архитектурно верный — единственный вариант с честной
-  per-cycle изоляцией, переиспользует уже отработанные паттерны (order identity, bounded confirmation,
-  reduceOnly semantics, которые уже использует close-execution). Долгосрочно protection тоже придёт к
-  семантике `exposure_fraction` (см. ревизию v5, Change 2): "protect `exposure_fraction = 1` этого
-  cycle", а не "защитить всю физическую Bybit-позицию" — Changes 6–8 этой правкой не переписываются,
-  protection HTTP contract не меняется.
+- **B. ABI-generated pair-owned reduce-only conditional exit orders** (собственный stop-order и
+  take-order на cycle, свои orderLinkId-роли `stop`/`take`, свой `protection_generation`, свой
+  create/cancel/confirm lifecycle, своя OCO-логика между двумя ногами). Изначально выбран (эта секция и
+  Changes 6–8 в ревизиях v1–v14 этого документа) как архитектурно корректный — единственный вариант с
+  честной per-cycle изоляцией, переиспользующий уже отработанные паттерны (order identity, bounded
+  confirmation, reduceOnly semantics close-execution). **Отклонён ревизией v15** — не как некорректный
+  (отдельный design-check перед proposal Change 6 подтвердил: shared `protection_generation` на весь
+  tuple достаточен, минимальный durable state — 7 additive-полей, все crash-windows закрыты), а как
+  избыточный: он заставил бы ABI спроектировать и доказать безопасной собственную OCO-семантику, которую
+  Bybit уже реализует атомарно на своей стороне для варианта C.
+- **C. Native Bybit attached `tpslMode: "Partial"` protection, атрибутированная через `parentOrderLinkId`**
+  (выбран ревизией v15). Тот же механизм, который ABI уже использует сегодня для `tpslMode: "Full"` на
+  entry create (`mapEntryPackageToBybit()`, `bybitOrderMapper.ts:107-131`), но переключённый в
+  `"Partial"` режим: Bybit materializes собственные child TP/SL-ордера **per parent order**, а не per
+  physical position, каждый несущий `parentOrderLinkId`, равный own entry orderLinkId этого cycle. ABI
+  не создаёт, не подписывает и не отменяет собственные conditional-ордера — она **читает и атрибутирует**
+  то, что Bybit уже создал сам, тем же query-driven способом, каким `packageConfirmation.ts` уже читает
+  собственный entry-ордер по его identity. Устраняет необходимость в: собственной identity-схеме под
+  protection, собственном generation-счётчике, собственном create-order payload, собственной
+  recovery-логике для никогда-не-ABI-созданных ордеров и — главное — собственной OCO-реализации, если
+  Bybit сам гарантирует атомарную нейтрализацию sibling-ноги (предстоит технически подтвердить в
+  Change 6, не предполагать заранее). Долгосрочно protection тоже придёт к семантике `exposure_fraction`
+  (см. ревизию v5, Change 2): "protect `exposure_fraction = 1` этого cycle" — protection HTTP contract
+  не меняется ни вариантом B, ни вариантом C.
 
-Вариант B реализуется не одним, а **тремя** отдельными changes (6, 7, 8 — см. ниже): отдельно data model/
-identity/adapter-примитивы (foundation, без изменения поведения), отдельно сам execution-lifecycle
-(create/replace/cancel/confirm, **без снятия guard** — производственно инертен), отдельно интеграция с
-close (cancellation своих protection-ордеров при закрытии cycle) **и только там** снятие guard —
-активация. Это то же разделение foundation/activation, что уже применено к базовой ownership-цепочке
-(Changes 1 → 5), доведённое (после ревизии v3) до той же гарантии: ни один applied change не оставляет
-систему в небезопасном промежуточном состоянии.
+Вариант C реализуется, как и отклонённый вариант B, **тремя** отдельными changes (6, 7, 8 — см. ниже), но
+с другим распределением работы: Change 6 — read/decode/classification foundation (никакого изменения
+production-поведения, включая entry-mapping — остаётся `tpslMode: "Full"`); Change 7 — lifecycle замены/
+обновления native Partial legs при изменении желаемого stop/take (production-инертен, guard не
+снимается); Change 8 — единственный coordinated cutover: mapping `Full → Partial`, включение lifecycle,
+снятие Change 5's temporary admission guard и `shared_scope_protection_unsupported`, close-интеграция —
+всё одним контролируемым шагом. Та же гарантия, что уже применена к базовой ownership-цепочке (Changes
+1 → 5): ни один applied change не оставляет систему в небезопасном промежуточном состоянии.
 
 ### Нужен ли отдельный "foundation" change до изменения execution semantics?
 
 **Да, дважды** — не только для базовой ownership-цепочки (Change 1), но и для protection (Change 6).
-Оба раза принцип один: сначала эволюция данных/идентичности (без изменения наблюдаемого поведения,
-тестируется независимо), потом изменение бизнес-политики/execution поверх уже стабильного фундамента.
+Оба раза принцип один: сначала эволюция read/attribution-примитивов поверх уже существующей identity
+(без изменения наблюдаемого поведения, тестируется независимо на synthetic/фикстурных данных), потом
+изменение бизнес-политики/execution поверх уже стабильного фундамента. **[Ревизия v15]** Для Change 6 это
+больше не "эволюция данных/идентичности" в смысле новых durable-полей — это эволюция способности
+достоверно читать и классифицировать то, что Bybit уже создаёт сам; сам принцип "foundation до policy"
+не меняется.
 
 ### Ключевой сиквенс-инсайт (важно для порядка ниже)
 
@@ -624,8 +706,10 @@ recovery станут owner-aware — иначе в первый же момен
 multi-owner заранее — их новая ветка логики тестируется на **синтетически подготовленных** multi-owner
 фикстурах (репозиторий это позволяет без изменения claim-политики), пока производственная claim-политика
 всё ещё эксклюзивна. Реальная активация (разрешение второго owner) становится последним, самым маленьким
-и самым безопасным шагом среди "базовых" changes. Тот же принцип (после ревизии v3) применён и к
-protection: lifecycle строится и тестируется в Change 7 production-инертно, активация — только в Change 8.
+и самым безопасным шагом среди "базовых" changes. Тот же принцип (после ревизии v3, объём переосмыслен
+ревизией v15) применён и к protection: native Partial replacement lifecycle строится и тестируется в
+Change 7 production-инертно (entry-mapping остаётся Full), активация — включая mapping cutover — только
+в Change 8.
 
 ---
 
@@ -686,9 +770,9 @@ protection: lifecycle строится и тестируется в Change 7 pro
 | 3 | `abi-pair-scoped-open-position-resolution-v1` | `open-position-resolution` | Consumer prep (owner-aware, wire-контракт без изменений; durable-поле — открытый design-вопрос, см. Change 3) |
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
 | 5 | `abi-same-side-virtual-exposure-ownership-v1` | `position-scope-exclusivity` (internal mechanism only); guard в `protection-execution` | **Foundation, не activation** (ревизия v14) — admission-механика и side-aware replay готовятся и тестируются на synthetic fixtures; production exclusivity (максимум один active owner на scope, любой стороны) сохраняется temporary guard'ом до Change 8 |
-| 6 | `abi-pair-owned-protection-state-foundation-v1` | новая: pair-owned protection identity/state (+ additive к `protection-execution`) | Data model/identity, без изменения поведения |
-| 7 | `abi-pair-owned-protection-execution-v1` | `protection-execution` | Execution lifecycle, **production-инертно** (guard из Change 5 не снимается) |
-| 8 | `abi-pair-owned-protection-close-cleanup-v1` | `close-execution` (расширение) | Close-cleanup + **единственная Activation программы** (ревизия v14) — снимает Change 5's admission guard, тем самым реально включает same-side multi-owner в production |
+| 6 | `abi-native-partial-protection-attribution-v1` | read/attribution primitives поверх уже существующей `entry-package-execution` order identity (+ additive к `protection-execution`, без новых durable-полей) | Read/decode/classification foundation, без изменения поведения — mapping остаётся `tpslMode: "Full"` (переосмыслен ревизией v15) |
+| 7 | `abi-native-partial-protection-lifecycle-v1` | `protection-execution` | Native Partial replacement lifecycle, **production-инертно** (guard из Change 5 не снимается, mapping остаётся Full; переосмыслен ревизией v15) |
+| 8 | `abi-native-partial-protection-cutover-v1` | `entry-package-execution` (mapping switch Full→Partial), `protection-execution`, `close-execution` (расширение) | Coordinated cutover + **единственная Activation программы** (ревизии v14/v15) — снимает Change 5's admission guard, тем самым реально включает same-side multi-owner в production |
 
 Changes 2, 3, 4 формально зависят только от Change 1 и **не зависят друг от друга** — их можно вести
 параллельно/в любом порядке. Change 8 можно слить с Change 7 только если объединённый change по-прежнему
@@ -1006,8 +1090,9 @@ remainder; resize/cancel-recreate protection-ордеров; protection coverage
 reconciliation policy; generation-scoped close-identity bump для auto-retry после нулевого/частичного
 исполнения; global drift-tolerance config (убран полностью — сравнение, которое он бы толерировал,
 устранено редизайном); cross-owner aggregate reconciliation как отдельная observability-проверка;
-same-side production activation (Change 5); opposite-side coexistence; pair-owned protection-ордера
-(Changes 6–8); `first_fill`/entry-bar resolution (Change 3); recovery redesign (Change 4); Runtime,
+same-side production activation (Change 5); opposite-side coexistence; native Partial protection
+attribution/lifecycle/cutover (Changes 6–8, переосмыслено ревизией v15); `first_fill`/entry-bar
+resolution (Change 3); recovery redesign (Change 4); Runtime,
 хранящий/пересылающий абсолютный quantity; ABI → Runtime push; portfolio/netting engine; точный Runtime
 change-id и его wire-представление (будущий Runtime OpenSpec).
 
@@ -1337,197 +1422,272 @@ recovery раньше активации).
 open-position уже корректны для этого случая, включая живой partial fill; protection временно
 заблокирован для shared scope до Change 8.
 
-**Осознанно вне scope.** Сам pair-owned protection redesign (Changes 6–8); поддержка opposite-side
-(намеренно остаётся запрещённой согласно требованию пользователя); любой netting/portfolio-движок.
+**Осознанно вне scope.** Сам protection redesign (native Partial attribution/lifecycle/cutover — Changes
+6–8, переосмыслено ревизией v15); поддержка opposite-side (намеренно остаётся запрещённой согласно
+требованию пользователя); любой netting/portfolio-движок.
 
 ---
 
-### Change 6 — `abi-pair-owned-protection-state-foundation-v1`
+### Change 6 — `abi-native-partial-protection-attribution-v1` (переименован и переосмыслен ревизией v15; старый id `abi-pair-owned-protection-state-foundation-v1` не был предложен как OpenSpec и не используется)
 
-**Цель.** Дать protection-подсистеме те же foundation-примитивы, что Change 1 дал ownership-цепочке:
-identity-схему и durable-модель для будущих per-cycle stop/take-ордеров, **без изменения текущего
-поведения** `PUT .../protection` (guard из Change 5, если она уже применена, продолжает действовать
-неизменно).
+**Цель.** Научить ABI **достоверно обнаруживать и атрибутировать** собственные protection-ноги
+(stop/take) конкретного cycle, materialized Bybit'ом нативно через `tpslMode: "Partial"` на entry-ордере
+— не создавать, не подписывать и не управлять собственными conditional-ордерами. Это read/decode/
+classification foundation, полностью production-инертный: entry create остаётся на `tpslMode: "Full"`,
+`PUT .../protection` продолжает работать через `/v5/position/trading-stop` в точности как сегодня.
+
+**Модель.** `EntryPackageExecutionRecord` уже знает own entry orderLinkId этого cycle
+(`order_link_id`, `entryPackageExecutionRecord.ts:88`). При `tpslMode: "Partial"` Bybit после fill
+materializes собственные child TP/SL-ордера, каждый несущий `parentOrderLinkId`, равный own entry
+orderLinkId родителя. Атрибуция сводится к:
+
+```
+EntryPackageExecutionRecord.order_link_id (own entry)
+        ↓
+Bybit order query (realtime + history, те же примитивы, что packageConfirmation.ts уже использует)
+        ↓
+children WHERE parentOrderLinkId == own entry orderLinkId
+        ↓
+классификация каждого найденного child: STOP-нога | TAKE-нога | неопознанный
+```
 
 **Что меняется.**
-- `src/domain/entryPackageOrderIdentity.ts`: расширение схемы orderLinkId новыми ролями (`"stop"`,
-  `"take"` вместо/наряду с `"entry"`), с той же детерминированной `abi-ep-{sha256(...)}` генерацией.
-- Correlation record: новые additive-поля для хранения protection-ордеров cycle — отдельные от
-  entry-ордера (`order_link_id`/`order_id` заняты entry), например `stop_order_link_id`,
-  `stop_order_id`, `take_order_link_id`, `take_order_id`, плюс собственный statuses/generation при
-  необходимости — конкретная форма решается в design-фазе этого change.
-- `src/exchange/bybitAdapter.ts`: DTO/method-примитивы для conditional (reduce-only stop/take) ордеров,
-  если ещё не покрыты существующими `createOrder`/`cancelOrder` (техническая проверка — риск §6.4). На
-  этом этапе примитивы **не вызываются** из `ProtectionApplicationService` — только определяются и
-  тестируются изолированно (payload-shape тесты против фикстур).
-- `EntryPackageCorrelationRepository`: replay корректно восстанавливает новые поля.
+- Новый read-only primitive (рабочее название `resolveOwnAttachedProtection(entryOrderLinkId)` →
+  `{ stop: AttachedProtectionLeg | null; take: AttachedProtectionLeg | null }` либо явный ambiguous/
+  contradiction-исход) в `packageConfirmation.ts` или соседнем модуле — по аналогии с уже существующими
+  `classifyEntryOrderTerminality`/`classifyOwnCloseOrderOutcome`: то же query-driven, ничего не хранящее
+  устройство, никакого нового durable state под это НЕ заводится в Change 6.
+- Технический spike и decode-слой над реальной Bybit response shape (переформулированный риск §6 п.4):
+  какие поля реально нужны для однозначной атрибуции и классификации — `parentOrderLinkId` (атрибуция,
+  требует подтверждения против реального Bybit V5 response, не документации на веру), `orderId` (audit),
+  поле, надёжно отличающее Stop-Loss child от Take-Profit child (точное имя подтверждается спайком),
+  `triggerPrice`, и какие именно из `qty`/`cumExecQty`/`leavesQty` нужны уже классификации (существование/
+  тип), а какие только будущему Change 7 (sizing/coverage) — решается в design-фазе, не здесь.
+- Строгая классификация обнаруженного набора children для одного own entry orderLinkId:
+  - **0 children** — допустимо, если fill ещё не произошёл (entry live/unfilled) или mapping для этого
+    entry ещё не Partial (сегодняшнее — единственное — production-состояние); но **contradiction**, если
+    own fill facts (`early_execution_observation`, Change 1) уже доказывают finality И mapping для этого
+    entry был Partial — недостижимо в production Change 6 (mapping остаётся Full), проверяется только на
+    synthetic fixtures.
+  - **ровно один STOP + один TAKE** — attributable protection pair, единственный "здоровый" исход после
+    fill под будущим Partial mapping.
+  - **что угодно ещё** (0 при уже доказанном fill+Partial; больше двух подходящих; два одной роли; child
+    без опознаваемой роли) — **ambiguous → fail closed**, никогда не угадывается и не выбирается
+    "наиболее подходящий" кандидат.
+- `EntryPackageCorrelationRepository`/`EntryPackageExecutionRecord` — **никаких новых durable полей** в
+  этом change (в отличие от объёма ревизий v1-v14 этой секции): никаких `stop_order_link_id`/
+  `take_order_link_id`, никакого `protection_generation`. Атрибуция полностью query-driven от уже
+  существующего `order_link_id`, тем же принципом, что уже применён к finding #6 выше и к Change 1's
+  "не заводить новых полей там, где существующие уже корректны".
+- Mapper/DTO-подготовка для `tpslMode: "Partial"` (`bybitOrderMapper.ts`) — **пишется и тестируется**
+  (payload-shape тесты против фикстур), но **не подключается** к production `mapEntryPackageToBybit()`,
+  которая остаётся на `"Full"` до Change 8 — тот же паттерн temporary-guard/production-инертности, что
+  уже применён к Change 5's admission guard.
 
-**Какие инварианты отменяются.** Ни один поведенческий — `PUT .../protection` продолжает работать через
-`/v5/position/trading-stop` (или через guard из Change 5, если он уже применён) в точности как до этого
-change.
+**Какие инварианты отменяются.** Ни один — entry create и `PUT .../protection` производственно
+неотличимы от состояния до этого change.
 
-**Новые инварианты.** "Protection-ордер идентичность (`stop`/`take` orderLinkId) детерминирована и
-стабильна per cycle per generation, так же как entry-ордер." "Correlation record способна durable хранить
-собственные protection-ордера cycle независимо от entry-ордера того же cycle."
+**Новые инварианты.** "Own attached protection children этого cycle однозначно атрибутируются через
+`parentOrderLinkId == own entry orderLinkId`, никогда через side-match или другую эвристику." "Любое
+состояние набора children, не являющееся ровно {0 при отсутствии fill/Partial} или {STOP+TAKE}, fail
+closed как ambiguous — никогда не разрешается эвристикой 'бери первый подходящий'."
 
-**Затрагиваемые слои.** `src/domain/entryPackageOrderIdentity.ts`,
-`src/correlation/entryPackageExecutionRecord.ts`, `src/correlation/entryPackageCorrelationRepository.ts`,
-`src/exchange/bybitAdapter.ts` (только новые примитивы, не переключение существующих вызовов).
+**Затрагиваемые слои.** Новый read-only primitive (`packageConfirmation.ts` или соседний модуль),
+decode-слой для order-query responses (расширение `orderQueryResponseDecoder.ts` полями
+`parentOrderLinkId` и тем, что понадобится для роль-классификации), `bybitOrderMapper.ts` (новый,
+неподключённый Partial-payload). Не трогает `EntryPackageExecutionRecord`,
+`EntryPackageCorrelationRepository`, `ProtectionApplicationService`, `CloseApplicationService`.
 
 **HTTP-контракты.** Не меняются.
 
 **Обязательные тесты.**
-- Детерминированность генерации `stop`/`take` orderLinkId (аналог существующих entry-order-identity
-  тестов).
-- Replay корректно восстанавливает новые protection-ордер-поля (включая backward-compat со старыми
-  записями без них).
-- Adapter-примитивы для conditional-ордеров — payload-shape тесты против фикстур Bybit-ответов, без
-  реального вызова из бизнес-логики.
-- Регрессия `protectionApplicationService.test.ts` — **без изменений**, `PUT .../protection` ведёт себя
-  идентично состоянию до этого change.
+- Классификация: 0 children (fill отсутствует) → допустимо; 0 children при synthetic
+  fill-proven-final+Partial fixture → contradiction; ровно STOP+TAKE → attributable pair; лишние/
+  дублирующиеся/неопознанные children → ambiguous, все варианты по отдельности.
+- Атрибуция по `parentOrderLinkId` не путает children чужого entry orderLinkId (в т.ч. соседнего
+  same-side cycle на synthetic multi-owner scope) со своими.
+- Decode-слой: payload-shape тесты против фикстур реального Bybit V5 response для Partial-materialized
+  children (после technical spike).
+- Mapper: `tpslMode: "Partial"` payload-shape тесты, изолированные от `mapEntryPackageToBybit()`'s
+  production пути — регрессия существующих `entryPackageApplicationService.test.ts`/
+  `bybitOrderMapper`-тестов подтверждает production mapping не изменился.
+- Регрессия `protectionApplicationService.test.ts` — без изменений.
 
-**Зависит от.** Change 1 (использует ту же схему записи/replay).
+**Зависит от.** Change 1 (own entry orderLinkId/fill facts как якорь атрибуции).
 
-**Состояние после.** Инфраструктура для pair-owned protection существует и протестирована изолированно;
-production-поведение `PUT .../protection` не меняется.
+**Состояние после.** ABI умеет достоверно и строго обнаруживать/классифицировать собственные native
+Partial protection children, полностью протестировано на synthetic/фикстурных данных; production entry
+create и `PUT .../protection` не изменились.
 
-**Осознанно вне scope.** Любое изменение поведения `ProtectionApplicationService`/`CloseApplicationService`
-(это Changes 7 и 8).
+**Осознанно вне scope.** Любое изменение `mapEntryPackageToBybit()`'s production payload; любой
+create/cancel/replace-lifecycle для protection (Change 7); снятие любого guard (Change 8); OCO-семантика
+между stop/take (предстоит подтвердить как нативную биржевую гарантию, не реализовать самостоятельно —
+Change 7/8); sizing/qty-coverage-логика сверх того, что нужно для самой классификации (Change 7).
 
 ---
 
-### Change 7 — `abi-pair-owned-protection-execution-v1` (production-инертен — guard НЕ снимается)
+### Change 7 — `abi-native-partial-protection-lifecycle-v1` (переименован и переосмыслен ревизией v15; старый id `abi-pair-owned-protection-execution-v1` не был предложен как OpenSpec; production-инертен — guard НЕ снимается)
 
-**Цель.** Построить и полностью протестировать pair-owned reduce-only conditional exit orders lifecycle
-для protection, **не активируя** его в production для shared scope — guard из Change 5 остаётся в силе.
-Это тот же принцип, что уже применён к Changes 2/3/4/6: реализация готова и протестирована заранее,
-активация — отдельным, последним шагом (Change 8).
+**Цель.** Построить и полностью протестировать lifecycle **замены/обновления** native Partial
+protection при изменении желаемого stop/take через `PUT .../protection` — **не активируя** его для
+production multi-owner scope. Guard из Change 5 остаётся в силе; entry create остаётся на
+`tpslMode: "Full"` (mapping-cutover — Change 8). Тот же принцип, что уже применён к Changes 2/3/4/6:
+реализация готова и протестирована заранее, активация — отдельным, последним шагом (Change 8).
+
+**Центральный нерешённый вопрос, который этот change обязан закрыть в design-фазе.** Как заменить
+существующую native Partial TP/SL-пару (например stop/take на qty=4, унаследованный от предыдущего
+подтверждённого fill-состояния) на новую пару с другими ценами и qty=7 (после дальнейшего fill того же
+entry-ордера), сохранив непрерывность protection-покрытия и не создав опасного окна двойного покрытия
+(старая и новая пара одновременно защищают перекрывающийся qty) или окна нулевого покрытия (старая уже
+отменена/исполнилась, новая ещё не подтверждена)? Это execution-lifecycle вопрос, не data-model —
+не решается в Change 6, полностью в scope Change 7.
 
 **Что меняется.**
-- Добавляется (но не подключается к production-пути `PUT .../protection` для shared scope) полный
-  create/update/cancel/confirm lifecycle pair-owned stop/take-ордеров через примитивы из Change 6, с
-  qty = ABI-resolved authoritative exposure этого cycle (per Change 1/2's quantity ownership boundary —
-  `cumulative_filled_qty` once `isFillFactFinal`, не отдельное mutable поле; долгосрочно эта же
-  величина соответствует "`exposure_fraction = 1` этого cycle", см. ревизию v5).
-- Bounded confirmation для protection-ордеров зеркалит существующую bounded confirmation для entry
+- `ProtectionApplicationService`'s **новый** (не production-decision) code path: `PUT .../protection` →
+  refresh own cumulative fill (переиспользует Change 1's own-order fill facts,
+  `early_execution_observation`/`isFillFactFinal`) → `resolveOwnAttachedProtection()` (Change 6) →
+  сравнение обнаруженной пары с желаемой (`stop_price`/`take_price` команды) → если уже совпадает
+  (в пределах существующей already-satisfied semantics, `evaluateReadBack`-эквивалент) → no-op success;
+  если отличается → safe replacement sequence (cancel old legs → confirm neutralized → создать новую
+  native Partial пару под текущим qty → confirm resulting attributable coverage через Change 6's
+  классификацию ещё раз). Bounded confirmation зеркалит существующую bounded confirmation для entry
   (`packageConfirmation.ts`).
-- `ProtectionApplicationService` получает эту lifecycle-реализацию как готовый, полностью протестированный
-  code path, но **выбор**, каким путём обслуживать конкретный `PUT .../protection` (старый
-  `setTradingStop` для single-owner, guard-отказ для multi-owner), не меняется — guard из Change 5 всё
-  ещё активен для multi-owner scope. Явно фиксируется: этот change **сознательно не активирует**
-  multi-owner protection в production.
+- **Production-decision path `ProtectionApplicationService.process()` не переключается** — существующий
+  `setTradingStop`/`tpslMode: "Full"` путь и `shared_scope_protection_unsupported`-guard для multi-owner
+  scope остаются ровно как сегодня. Новый lifecycle существует как готовый, полностью протестированный,
+  но не вызываемый production-путём code path — тесты обращаются к нему напрямую.
+- Явно фиксируется: этот change **сознательно не активирует** multi-owner protection и не переключает
+  entry-mapping в production.
 
-**Какие инварианты отменяются/заменяются.** Ни один production-наблюдаемый инвариант не меняется —
-только появляется новый, полностью протестированный, но ещё не подключённый к production-decision code
-path.
+**Какие инварианты отменяются/заменяются.** Ни один production-наблюдаемый — только появляется новый,
+полностью протестированный, но ещё не подключённый к production-decision code path.
 
-**Новые инварианты.**
-- Protection-ордер lifecycle (create/confirm/cancel/replace) для одного cycle корректен и независим от
-  соседних cycles на том же physical scope — доказано тестами, но ещё не наблюдаемо в production.
-- Bounded confirmation для protection-ордеров: fail closed при неоднозначности, зеркалит entry-package.
+**Новые инварианты.** "Replacement-lifecycle для native Partial protection одного cycle никогда не
+создаёт окно двойного покрытия и никогда не оставляет окно нулевого покрытия дольше bounded-retry
+budget" (точная гарантия и её доказательство — design-фаза, см. центральный вопрос выше). "Bounded
+confirmation для protection-replacement: fail closed при неоднозначности, зеркалит entry-package."
 
 **Затрагиваемые слои.** `src/services/protection/protectionApplicationService.ts` (добавляется новый
-lifecycle, существующий production-decision path не меняется). Не расширяет `CloseApplicationService` —
-это Change 8.
+lifecycle, существующий production-decision path не меняется). Не расширяет `CloseApplicationService`
+(Change 8), не меняет `bybitOrderMapper.ts`'s production mapping (Change 8).
 
 **HTTP-контракты.** `PUT .../protection` — форма и **наблюдаемое поведение** не меняются вообще (в т.ч.
 `shared_scope_protection_unsupported` из Change 5 продолжает возвращаться для multi-owner scope).
 
 **Обязательные тесты.**
-- Два same-side cycle с разными stop/take на одном physical scope (тест обращается к lifecycle
-  напрямую, минуя production-decision path `ProtectionApplicationService`, если тот ещё не переключён):
-  оба подтверждаются независимо, каждый — со своим orderLinkId.
-- Bybit reject/partial-confirm сценарии для conditional-ордеров — bounded retry, fail closed при
-  неоднозначности.
+- Замена native Partial пары на новые цены/qty (synthetic fixture с уже materialized children из
+  Change 6's фикстур) — непрерывность покрытия и отсутствие double-coverage окна доказаны тестом, не
+  предполагаются.
+- Два same-side cycle с разными native Partial парами на одном physical scope (synthetic, lifecycle
+  вызывается напрямую, минуя production-decision path): обе атрибутируются и обновляются независимо,
+  каждая — по своему own entry orderLinkId через `parentOrderLinkId`.
+- Bybit reject/partial-confirm/ambiguous-classification сценарии при replacement — bounded retry, fail
+  closed при неоднозначности, никогда double-coverage как "безопасный" default.
+- Already-satisfied short-circuit для native Partial (обнаруженная пара уже соответствует желаемой —
+  no-op, без cancel/create).
 - Регрессия `protectionApplicationService.test.ts` для **существующего** production-decision path —
   байт-в-байт без изменений (включая guard-отказ для multi-owner scope).
 
-**Зависит от.** Change 6 (identity/data model), Change 5 (нужны реально существующие multi-owner scopes
-для интеграционных тестов lifecycle, хотя production-decision path их ещё не использует), Change 3
-(lifecycle делегирует в open-position-resolution).
+**Зависит от.** Change 6 (атрибуция/классификация), Change 1 (own fill facts).
 
-**Состояние после.** Полный pair-owned protection lifecycle реализован и протестирован; production-
-поведение `PUT .../protection` не изменилось — multi-owner scope по-прежнему получает guard-отказ.
+**Состояние после.** Полный, протестированный replacement-lifecycle для native Partial protection
+существует и доказан на synthetic-данных; `PUT .../protection` в production продолжает вести себя
+идентично состоянию до Change 6.
 
-**Осознанно вне scope.** Подключение lifecycle к production-decision path и снятие guard (Change 8);
-интеграция с close (Change 8); поддержка opposite-side. **[Future note, зафиксировано ревью Change 2]**
-Долгосрочно protection принадлежит cycle, а не физической позиции, и должна следовать за
-`exposure_fraction` этого cycle: как только появится настоящий partial close (`exposure_fraction < 1`,
-вне текущей программы), успешное partial close того же cycle обязано соответственно уменьшить qty его
-собственных stop/take-ордеров (`stop qty == take qty == оставшаяся exposure cycle`, не старая полная
-величина) — resize-алгоритм этим change не проектируется, только фиксируется как инвариант, который
-Change 6/7's `qty = ABI-resolved authoritative exposure этого cycle` формулировка уже совместима с ним.
+**Осознанно вне scope.** Переключение production entry-mapping `Full → Partial`; снятие Change 5's
+guard; снятие `shared_scope_protection_unsupported`; интеграция с close (все — Change 8); поддержка
+opposite-side. **[Future note, зафиксировано ревью Change 2, актуально после v15]** Долгосрочно
+protection принадлежит cycle, а не физической позиции, и должна следовать за `exposure_fraction` этого
+cycle: как только появится настоящий partial close (`exposure_fraction < 1`, вне текущей программы),
+успешное partial close того же cycle обязано соответственно уменьшить qty его native Partial protection
+(replacement-lifecycle этого change — тот же примитив, который уже решает "qty=4 → qty=7", симметрично
+решает и "qty=7 → qty=4") — resize-политика при partial close этим change не проектируется, только
+фиксируется как уже совместимый со своим replacement-примитивом сценарий.
 
 ---
 
-### Change 8 — `abi-pair-owned-protection-close-cleanup-v1` (Close-cleanup + единственная Activation программы — снимает Change 5's guard; см. ревизию v14)
+### Change 8 — `abi-native-partial-protection-cutover-v1` (переименован ревизией v15; старый id `abi-pair-owned-protection-close-cleanup-v1` не был предложен как OpenSpec; единственная Activation программы — снимает Change 5's guard, см. ревизии v14/v15)
 
-**Цель.** Завершить redesign protection: `CloseApplicationService` при закрытии cycle отменяет его
-собственные protection-ордера как часть терминального перехода, и **только после этого** guard из
-Change 5 снимается — `PUT .../protection` для multi-owner scope становится production-active через
-lifecycle из Change 7. Это единственный change во всей protection-цепочке, меняющий production-
-наблюдаемое поведение — то же место в последовательности, что Change 5 занимает для базового ownership.
+**Цель.** Единственный, маленький, полностью контролируемый coordinated cutover: переключить entry
+mapping с `tpslMode: "Full"` на `"Partial"`, включить native Partial protection lifecycle из Change 7,
+снять Change 5's temporary admission guard и `shared_scope_protection_unsupported`, и связать close с
+native Partial children — всё одним change, той же гарантией "ни один applied change не оставляет
+систему в небезопасном промежуточном состоянии", что уже применена к Change 5. Это единственный change
+во всей protection-цепочке, меняющий production-наблюдаемое поведение — то же место в последовательности,
+что Change 5 занимает для базового ownership.
 
 **Что меняется.**
-- `CloseApplicationService` расширяется: при durable close cycle отменяет (cancel + bounded confirm, тот
-  же паттерн, что уже применяется к entry-ордеру в close-execution) его собственные `stop`/`take`
-  conditional-ордера (по данным из Change 6) до/как часть закрытия его resolved exposure (Change 2:
-  `exposure_fraction = "1"` этого cycle). `terminal_closed` теперь гейтится на **оба** постусловия:
-  (а) exposure запрошенного cycle закрыта (Change 2's postcondition — physical zero лишь частный
-  single-owner случай), (б) собственные protection-ордера этого cycle неактивны (отменены или уже
-  терминальны).
-- `ProtectionApplicationService`: guard `shared_scope_protection_unsupported` из Change 5 снимается —
-  production-decision path переключается на lifecycle из Change 7 для multi-owner scope.
+1. **Entry create mapping**: `mapEntryPackageToBybit()` (`bybitOrderMapper.ts:107-131`) переключается с
+   `tpslMode: "Full"` на `"Partial"` (payload-форма подготовлена и протестирована в Change 6, здесь
+   впервые подключается к production `createOrder()`-пути).
+2. **`ProtectionApplicationService`**: production-decision path переключается на lifecycle из Change 7
+   для multi-owner scope; `shared_scope_protection_unsupported`-guard из Change 5 снимается.
+3. **`EntryPackageApplicationService.createOrder()`**: Change 5's temporary admission guard (единственный
+   блок, явно закомментированный "TEMPORARY... Change 8 removes this") удаляется —
+   `classifyScopeAdmission()`'s уже полностью корректный и протестированный результат (`empty`/
+   `same_side` claim, `opposite_side`/`corrupt` conflict) впервые становится production-decision, не
+   только internal classification.
+4. **`CloseApplicationService`**: при durable close cycle нейтрализует own remaining entry (уже
+   существующий cancel-entry-order-first паттерн, Change 2) **и** own attributable native Partial
+   children (обнаруженные через Change 6's атрибуции, отменённые через Change 7's cancel-примитивы) до
+   закрытия own resolved exposure (Change 2: `exposure_fraction = "1"`). `terminal_closed` гейтится на
+   **оба** постусловия: (а) exposure этого cycle закрыта, (б) own attributable protection children
+   этого cycle неактивны (отменены, исполнились, или изначально отсутствовали).
 
-**Какие инварианты отменяются/заменяются.** Постусловие close-execution ("terminal_closed требует
-подтверждённого zero position size AND no attributable active entry-order remainder") расширяется:
-дополнительно требуется отсутствие live protection-ордеров этого cycle. Временный инвариант Change 5
-("protection для scope с >1 owner фейлится закрыто") — снимается.
+**Какие инварианты отменяются/заменяются.** Temporary guard Change 5 ("любой другой active record →
+conflict") — снимается: production claim впервые следует `classifyScopeAdmission()`'s полной семантике
+(`empty`/`same_side` → claim, `opposite_side`/`corrupt` → conflict). Временный инвариант Change 5
+("protection для scope с >1 owner фейлится закрыто") — снимается. Постусловие close-execution
+("terminal_closed требует closed exposure AND no attributable active entry-order remainder")
+расширяется own attributable protection children.
 
-**Новые инварианты.** "Close cycle гарантированно не оставляет собственных protection-ордеров висящими
-на бирже после durable close — ни при single-owner, ни при multi-owner scope." "`PUT .../protection` для
-multi-owner scope корректно и независимо обслуживает каждый cycle через pair-owned conditional-ордера."
+**Новые инварианты.** "Entry create прикрепляет `tpslMode: "Partial"` protection, атрибутируемую
+per-cycle через `parentOrderLinkId`, а не position-level `"Full"`." "Physical scope может честно
+обслуживать несколько same-side cycles одновременно — каждый со своей независимо атрибутируемой
+protection и корректной close-очисткой."
 
-**Затрагиваемые слои.** `src/services/close/closeApplicationService.ts` (дополнение, не рефакторинг
-основной логики close из Change 2), `src/services/protection/protectionApplicationService.ts` (снятие
-guard — переключение production-decision path на lifecycle из Change 7).
+**Затрагиваемые слои.** `bybitOrderMapper.ts` (mapping switch), `entryPackageApplicationService.ts`
+(guard removal), `protectionApplicationService.ts` (guard removal, production path switch),
+`closeApplicationService.ts` (protection-children cleanup).
 
-**HTTP-контракты.** `POST .../close` (контракт уже установлен Change 2) и `PUT .../protection` — форма
-не меняется этим change. `shared_scope_protection_unsupported` больше не возвращается (contract narrows
-back to fewer error cases — обратно совместимо, просто меньше 4xx-путей).
+**HTTP-контракты.** `PUT .../entry-package`, `PUT .../protection`, `POST .../close` — форма не меняется.
+`shared_scope_protection_unsupported` больше не возвращается (contract narrows back — обратно
+совместимо).
 
 **Обязательные тесты.**
-- Close одного cycle отменяет именно его protection-ордера, не трогая ордера соседнего same-side cycle.
-- `terminal_closed` не достигается, пока protection-ордера этого cycle ещё живы/неоднозначны (fail
-  closed на неоднозначности отмены, зеркалит существующий паттерн cancel-entry-order-first).
-- После снятия guard: два same-side cycle с разными stop/take на одном scope оба обслуживаются
-  независимо через `PUT .../protection` (интеграционный тест production-decision path, не только
-  lifecycle напрямую, как в Change 7).
-- Single-owner регрессия (в зависимости от решения риска §6.7 — либо байт-в-байт то же поведение через
-  fallback на `setTradingStop`, либо явно новое поведение через conditional-ордера, задокументированное
-  как намеренное изменение).
-- Регрессия `closeApplicationService.test.ts` для scope без активных protection-ордеров (no-op путь).
+- Два same-side entry-package от разных cycles на одном scope оба claim успешно и сосуществуют (первый
+  реальный production multi-owner тест всей программы).
+- Каждый из двух cycles получает свою native Partial protection пару, атрибутированную независимо через
+  `parentOrderLinkId == own entry orderLinkId`.
+- Close одного cycle отменяет именно его native Partial children, не трогая соседний same-side cycle.
+- `terminal_closed` не достигается, пока own attributable protection children этого cycle ещё
+  живы/неоднозначны.
+- Opposite-side claim по-прежнему conflict (регрессия admission).
+- Single-owner регрессия: `tpslMode: "Partial"` на единственном owner ведёт себя эквивалентно
+  (не обязательно байт-в-байт — задокументировать любое намеренное отличие от текущего `"Full"`-поведения,
+  та же дисциплина, что риск §6 п.7 уже требовал).
+- Полная регрессия существующих тестов, не относящихся к multi-owner activation.
 
-**Зависит от.** Change 7 (нужен готовый lifecycle), Change 2 (расширяет уже существующую pair-scoped
-close-логику).
+**Зависит от.** Change 7 (готовый lifecycle), Change 6 (mapping/атрибуция), Change 5 (guard, который
+снимается), Change 2 (close pipeline, расширяется).
 
 **Примечание по объёму.** Если в ходе design-фазы Change 6/7 выяснится, что cancellation-логика
 тривиальна, Change 8 можно слить с Change 7 в один change — но правило "guard снимается только после
-того, как close уже умеет neutralize protection-ордера" при слиянии сохраняется как внутренний порядок
+того, как close уже умеет neutralize protection children" при слиянии сохраняется как внутренний порядок
 шагов этого объединённого change, а не отменяется. По умолчанию держим отдельно как более безопасный и
 проще review-ируемый вариант.
 
-**Состояние после.** Полная реализация всех четырёх целевых архитектурных идей пользователя; long+long и
-short+short полностью и честно поддержаны, включая независимую protection с корректной уборкой при close;
-long+short остаётся запрещённым, пока жива противоположная exposure. Ни один из applied changes 1–8 не
-проходил через небезопасное промежуточное production-состояние.
+**Состояние после.** Полная реализация целевой архитектуры: long+long и short+short полностью и честно
+поддержаны, каждый cycle — с независимой, нативно-атрибутированной protection и корректной уборкой при
+close; long+short остаётся запрещённым, пока жива противоположная exposure. Ни один из applied changes
+1–8 не проходил через небезопасное промежуточное production-состояние.
 
 **Осознанно вне scope.** Полноценный portfolio/netting engine; hedge mode; opposite-side coexistence.
-**[Future note, зафиксировано ревью Change 2]** Этот change покрывает "manual close A neutralizes A's
-own protection orders" — но OCO-style автоматическая нейтрализация (take-нога исполнилась полностью →
-sibling stop-нога того же cycle автоматически нейтрализуется, и наоборот, независимо от manual close)
-нигде явно не зафиксирована в текущем описании Changes 6–8. Это открытый вопрос **design-фазы Change 7
-или 8** (какая из двух — решается на месте), не решаемый и не проектируемый здесь.
+**[Future note, зафиксировано ревью Change 2, актуально и после v15]** Этот change покрывает "manual
+close A neutralizes A's own protection children" — автоматическая биржевая OCO-нейтрализация (take-нога
+исполнилась → sibling stop-нога того же parent автоматически снимается биржей, и наоборот) — это гипотеза
+о нативном биржевом поведении, требующая технического подтверждения в Change 6/7's read-primitives
+работе (см. "Архитектурное решение: protection", вариант C), а не логика, которую ABI реализует сама.
 
 ---
 
@@ -1540,18 +1700,20 @@ Change 1 (foundation: exposure state)
    └──> Change 4 (recovery, owner-aware)      ──┤
                                                  ├──> Change 5 (foundation: admission/replay mechanics, production guard stays up)
                               (2,3 напрямую;     │        │
-                               4 — по соглас-    │        ├──> Change 6 (foundation: protection identity/state)
+                               4 — по соглас-    │        ├──> Change 6 (foundation: native Partial attribution, mapping stays Full)
                                ованности)        │        │        │
-                                                  │        │        └──> Change 7 (protection lifecycle, guard НЕ снимается)
+                                                  │        │        └──> Change 7 (native Partial replacement lifecycle, guard НЕ снимается)
                                                   │        │                 │
-                                                  │        │                 └──> Change 8 (close cleanup + единственная Activation: снимает Change 5's guard)
+                                                  │        │                 └──> Change 8 (cutover: Full→Partial + close-cleanup + единственная Activation: снимает Change 5's guard)
                                                   │        │                          ▲
                                                   └────────┴──────────────────────────┘ (Change 8 также зависит от Change 2)
 ```
 
 Текстово: 1 → {2, 3, 4} (параллельно возможны) → 5 (требует 1,2,3, желательно 4; foundation, не activation
-— ревизия v14) → 6 (требует 1, может идти параллельно с 2/3/4/5) → 7 (требует 6, 5, 3; production-инертен)
-→ 8 (требует 7, 2; единственная Activation программы).
+— ревизия v14) → 6 (требует 1, может идти параллельно с 2/3/4/5; foundation: native Partial attribution,
+mapping остаётся Full — ревизия v15) → 7 (требует 6, 5, 3; native Partial replacement lifecycle,
+production-инертен) → 8 (требует 7, 2; единственная Activation программы: mapping cutover Full→Partial +
+guard removal).
 
 ---
 
@@ -1572,15 +1734,19 @@ Change 1 (foundation: exposure state)
   `exposure_fraction`), затем Change 8 (дополнительное постусловие про protection-ордера); остальное
   (cancel-entry-order-first, unsupported_exchange_scope, идемпотентность) сохраняется без изменений.
 - **`protection-execution`** — **изменяется четырежды**: малое дополнение в Change 5 (guard), additive
-  foundation в Change 6 (без изменения поведения), новый lifecycle в Change 7 (production-инертно,
-  наблюдаемое поведение не меняется), и наконец практическая замена production-decision path в Change 8
-  (guard снимается).
+  read/attribution foundation в Change 6 (native Partial classification primitives, без изменения
+  поведения — mapping остаётся Full; переосмыслен ревизией v15), новый native Partial replacement
+  lifecycle в Change 7 (production-инертно, наблюдаемое поведение не меняется), и наконец практическая
+  замена production-decision path в Change 8 (guard снимается, включая mapping cutover Full→Partial).
 - **`entry-cycle-recovery-resolution`** — **изменяется** Change 4 (атрибуционная логика), остальное
   (dual-query bounded retry, legacy pending_action guard, read-only гарантия) сохраняется.
 - **`entry-package-execution`** — **дополняется** Change 1 (новые additive-поля/их заполнение,
   переиспользующее существующие `cumExecQty`/`avgPrice` точки чтения в `packageConfirmation.ts`) и
-  Change 6 (новые orderLinkId-роли), основной текст (order identity, create/cancel semantics,
-  confirmation) не меняется.
+  **изменяется** Change 8 (`mapEntryPackageToBybit()`'s `tpslMode` mapping switch `Full → Partial` —
+  единственное production-наблюдаемое изменение этой capability во всей программе; переосмыслено
+  ревизией v15). Change 6 добавляет только read-only decode/attribution primitives поверх уже
+  существующей order identity — не новые orderLinkId-роли и не новый create/cancel semantics; основной
+  текст (order identity, create/cancel semantics, confirmation) не меняется ни Change 6, ни Change 1.
 - **`abi-position-management-api`** — **wire-level изменяется в Change 2** (close: `DELETE
   .../open-position` → `POST .../close`, новое request body `exposure_fraction`, новая
   error-таксономия для non-canonical fraction — не только prose); protection-часть спеки — только
@@ -1623,9 +1789,17 @@ Change 1 (foundation: exposure state)
    это additive-изменение текста closed-vocabulary таблиц в
    `abi-position-management-api`/`abi-entry-package-api`). Нужно решение до Change 5.
 
-4. **Технические детали conditional-ордеров Bybit V5** для Change 6/7 (triggerBy, типы Stop/TakeProfit,
-   корректное сосуществование нескольких reduceOnly conditional ордеров на один symbol в one-way mode)
-   — рекомендуется отдельный technical spike перед написанием proposal Change 6.
+4. **[Переформулирован ревизией v15]** Технические детали нативной Bybit `tpslMode: "Partial"`
+   attached-protection модели для Change 6/7: точная response shape для materialized children (какое
+   поле реально несёт parent-attribution — `parentOrderLinkId` предполагается по названию, требует
+   подтверждения против реального Bybit V5 response, не документации на веру), какое поле надёжно
+   отличает STOP-child от TAKE-child, гарантирует ли Bybit атомарную OCO-нейтрализацию sibling-ноги при
+   исполнении одной (используется вариантом C, см. "Архитектурное решение: protection") или это нужно
+   проверять самой ABI, и как выглядит response для entry-ордера с уже materialized Partial children при
+   повторном query/replace. Рекомендуется отдельный technical spike (реальные Demo-запросы, не только
+   документация) перед написанием proposal Change 6 — этот риск теперь **более**, а не менее критичен для
+   Change 6, чем в исходной (вариант B) формулировке, поскольку вся архитектура Change 6-8 зависит от
+   того, что нативная модель действительно ведёт себя так, как предполагается.
 
 5. **Observability пробел.** Сегодня нет метрик/событий, различающих scope contention или multi-owner
    состояние (`src/observability/events.ts` не имеет соответствующих полей). Без добавления полей
@@ -1641,10 +1815,15 @@ Change 1 (foundation: exposure state)
    уже используется entry-package create/cancel), чтобы retry/restart после потери ответа не мог
    отправить второй close-ордер и случайно затронуть чужую exposure соседнего cycle на том же scope.
 
-7. **Совместимость protection в single-owner случае (Change 7/8).** Нужно решить: сохраняется ли
-   `/v5/position/trading-stop` как fallback-путь для scope с ровно одним owner (проще, меньше нового
-   кода на бирже) или всё protection полностью переезжает на conditional-ордера даже для single-owner
-   (единообразнее, но масштабнее рефакторинг и меняет поведение даже для сегодняшнего mainline-сценария).
+7. **[Переформулирован ревизией v15] Совместимость protection в single-owner случае (Change 8).**
+   Нужно решить: остаётся ли `tpslMode: "Full"` mapping'ом для entry create безусловно (никакого cutover
+   вообще, пока scope реально не разделён несколькими owners — переключение в `"Partial"` происходит
+   только для scope, где реально join второй same-side owner) или Change 8 безусловно переключает
+   mapping на `"Partial"` для всех scope, включая сегодняшний mainline single-owner случай
+   (единообразнее — один mapping path вместо двух — но меняет production-наблюдаемое поведение даже там,
+   где multi-owner никогда не возникает). Решение — design-фаза Change 8. (Исходная формулировка этого
+   риска — про `setTradingStop`-fallback vs. ABI-generated conditional-ордера, отклонённый вариант B —
+   больше не актуальна.)
 
 8. **Рассмотренная и отклонённая альтернатива: Bybit hedge mode.** Positional hedge mode
    (`positionIdx` 1/2) нативно разделяет long/short на две физические позиции и тривиально решил бы
@@ -1697,9 +1876,10 @@ Change 1 (foundation: exposure state)
 0. **Housekeeping (вне программы):** заархивировать `abi-entry-package-exchange-canonical-confirmation-v1`
    в `openspec/changes/archive/`, чтобы baseline специй был чист.
 1. **Закрыть риски §6** (механизм refresh для cumulative_filled_quantity/avgPrice, точная величина
-   допуска дрейфа/tolerance-алгоритм, таксономия ошибок, conditional-order детали, single-owner fallback
-   в protection, **координация Runtime rollout и decommission-план для `DELETE .../open-position`** —
-   риски 11–12) — до написания первого proposal.
+   допуска дрейфа/tolerance-алгоритм, таксономия ошибок, нативная `tpslMode: "Partial"` response shape
+   и её technical spike (риск 4, переформулирован ревизией v15), single-owner mapping-политика в
+   protection (риск 7, переформулирован v15), **координация Runtime rollout и decommission-план для
+   `DELETE .../open-position`** — риски 11–12) — до написания первого proposal.
 2. **Change 1** → apply → регрессия всего существующего test suite (ожидается 0 поведенческих изменений)
    → smoke: restart процесса на существующих данных, подтвердить, что single-owner scopes резолвятся
    идентично; отдельно smoke на реальном частичном fill на Bybit Demo — убедиться, что
@@ -1732,18 +1912,23 @@ Change 1 (foundation: exposure state)
    `PUT protection` для единственного owner ведёт себя байт-в-байт как раньше. Multi-owner classification/
    replay/protection-guard-логика уже полностью протестирована модульно на synthetic fixtures (часть этого
    change), но не в Demo smoke — на Demo её физически нельзя вызвать, пока guard стоит.
-7. **Change 6** → apply → smoke: identity-генерация и replay protection-полей работают изолированно;
-   `PUT .../protection` ведёт себя байт-в-байт как до этого change.
-8. **Change 7** → apply → smoke: lifecycle protection-ордеров корректно работает при прямом вызове (не
-   через production `PUT .../protection`); production-путь `PUT .../protection` для multi-owner scope
-   по-прежнему возвращает guard-отказ — явно проверить, что ничего не изменилось для пользователя.
-9. **Change 8 (единственная Activation программы — ревизия v14)** → apply → smoke на Bybit Demo: Change 5's
-   admission guard снят — впервые в программе два same-side entry-package на одном symbol от разных
-   trade cycles оба успешно создаются и сосуществуют; третья opposite-side попытка отклоняется; у двух
-   same-side cycles независимые stop/take conditional-ордера через `PUT .../protection`; close одного
-   cycle уменьшает физическую позицию строго на его долю (или отменяет именно его conditional-ордера,
-   не трогая второго), второй cycle остаётся нетронутым; `terminal_closed` достигается только после
-   обоих постусловий.
+7. **Change 6 (native Partial attribution foundation — ревизия v15)** → apply → smoke: атрибуция и
+   классификация native Partial children работают изолированно на synthetic/фикстурных данных (никакого
+   реального Partial-fill на Demo — entry-mapping там всё ещё Full); `PUT .../protection` и entry create
+   ведут себя байт-в-байт как до этого change.
+8. **Change 7 (native Partial replacement lifecycle — ревизия v15)** → apply → smoke: replacement-
+   lifecycle native Partial protection корректно работает при прямом вызове (synthetic fixtures, не
+   через production `PUT .../protection`) — включая замену пары с изменением qty без double/zero-coverage
+   окна; production-путь `PUT .../protection` по-прежнему `setTradingStop`/`tpslMode: "Full"`,
+   guard-отказ для multi-owner scope не изменился — явно проверить, что ничего не изменилось для
+   пользователя.
+9. **Change 8 (единственная Activation программы — ревизии v14/v15)** → apply → smoke на Bybit Demo:
+   entry create теперь прикрепляет `tpslMode: "Partial"`; Change 5's admission guard снят — впервые в
+   программе два same-side entry-package на одном symbol от разных trade cycles оба успешно создаются и
+   сосуществуют; третья opposite-side попытка отклоняется; у двух same-side cycles независимая native
+   Partial protection, каждая атрибутирована через свой `parentOrderLinkId`; close одного cycle отменяет
+   именно его attributable protection children и закрывает его долю, второй cycle остаётся нетронутым;
+   `terminal_closed` достигается только после обоих постусловий.
 
 Каждый шаг — самостоятельно принимаемый OpenSpec change с собственным proposal/design/tasks, отдельным
 review и отдельным apply — согласно ограничению не смешивать несколько архитектурных ответственностей

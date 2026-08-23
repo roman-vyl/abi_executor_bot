@@ -17,6 +17,7 @@ import type {
   BybitGetExecutionListPayload,
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
+  BybitGetOrderHistoryForSymbolPayload,
   BybitMarketCloseOrderPayload,
 } from "../../src/exchange/bybitOrderMapper.js";
 
@@ -26,6 +27,7 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
   readonly getOrderHistoryCalls: BybitGetOrderHistoryPayload[] = [];
+  readonly getOrderHistoryForSymbolCalls: BybitGetOrderHistoryForSymbolPayload[] = [];
   readonly getExecutionListCalls: BybitGetExecutionListPayload[] = [];
   // Recorded as "category:symbol" so tests can assert the exact category a
   // call used, not just the symbol.
@@ -44,6 +46,7 @@ export class FakeBybitAdapter implements BybitAdapter {
   openPositionsError: Error | null = null;
   orderByLinkIdResponse: unknown = { retCode: 0, result: { list: [] } };
   orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
+  orderHistoryForSymbolResponse: unknown = { retCode: 0, result: { list: [] } };
   instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
   // Optional per-orderLinkId overrides, checked before the flat default
   // responses above — lets a test express "this specific order looks like
@@ -120,6 +123,11 @@ export class FakeBybitAdapter implements BybitAdapter {
     return withDefaultOrderIdentity(response, payload);
   }
 
+  async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
+    this.getOrderHistoryForSymbolCalls.push(payload);
+    return withDefaultCategoryAndSymbol(this.orderHistoryForSymbolResponse, payload);
+  }
+
   async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
     this.getExecutionListCalls.push(payload);
     if (this.executionListError !== null) {
@@ -158,6 +166,46 @@ export class FakeBybitAdapter implements BybitAdapter {
     }
     return this.setTradingStopResponse;
   }
+}
+
+// Same category/symbol defaulting as withDefaultOrderIdentity below, for a
+// symbol-scoped query that has no single orderLinkId to default rows to —
+// a test fixture is expected to set each row's own orderLinkId/orderId/
+// parentOrderLinkId explicitly (abi-native-partial-protection-attribution-v1).
+function withDefaultCategoryAndSymbol(
+  response: unknown,
+  payload: { category: string; symbol: string },
+): unknown {
+  if (typeof response !== "object" || response === null) {
+    return response;
+  }
+  const responseRecord = response as Record<string, unknown>;
+  const result = responseRecord.result;
+  if (typeof result !== "object" || result === null) {
+    return response;
+  }
+
+  const resultRecord = result as Record<string, unknown>;
+  const nextResult: Record<string, unknown> = { ...resultRecord };
+  if (!("category" in resultRecord)) {
+    nextResult.category = payload.category;
+  }
+
+  const list = resultRecord.list;
+  if (Array.isArray(list)) {
+    nextResult.list = list.map((row) => {
+      if (typeof row !== "object" || row === null) {
+        return row;
+      }
+      const rowRecord = row as Record<string, unknown>;
+      if ("symbol" in rowRecord) {
+        return rowRecord;
+      }
+      return { ...rowRecord, symbol: payload.symbol };
+    });
+  }
+
+  return { ...responseRecord, result: nextResult };
 }
 
 // Fills in `result.category` and each row's `symbol`/`orderLinkId` from the
