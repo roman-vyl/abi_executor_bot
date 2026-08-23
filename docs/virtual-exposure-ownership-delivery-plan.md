@@ -195,6 +195,159 @@
 > отдельная будущая Runtime-side работа наряду с другими Runtime-изменениями этой программы, не
 > проектируется в этом master-plan.
 
+> **Ревизия v10 — согласующий проход для Change 4 (`abi-entry-cycle-recovery-attribution-v1`), Change 3
+> (`abi-pair-scoped-open-position-resolution-v1`) уже applied/архивирован.** Change 4 ниже (как и весь
+> раздел Changes 4–6, см. примечание к v4/v5 выше) всё ещё был написан в терминах v3 — до появления
+> durable `first_fill_at_ms` (v8/v9) и до фактической реализации Change 3. Эта ревизия приводит Change 4
+> в соответствие с тем, что Change 3 реально поставил, и закрывает ранее открытый design-вопрос: может
+> ли recovery переиспользовать Change 3's durable-capture механизм `first_fill_at_ms`, не нарушая
+> "Recovery resolution never causes an exchange side effect" (entry-cycle-recovery-resolution spec,
+> текущий последний Requirement)?
+>
+> **Ответ — да, переиспользует буквально, без второй реализации.** "No exchange side effect" в этом
+> Requirement всегда означал только "не отправляет create/amend/cancel ордера на биржу" (сам текст
+> Requirement это и говорит: "ABI SHALL NOT cancel, amend, or create any order"). Он не говорит и никогда
+> не говорил про read-only GET-запросы или про собственную durable-запись ABI — recovery уже сегодня
+> делает GET-запросы к ордеру и к позиции как часть своей обычной работы. Вызов Bybit
+> `/v5/execution/list` (тот же `resolveFirstAttributableFillAtMs`, что Change 3 уже реализовал и
+> экспортирует из `src/services/entryPackage/packageConfirmation.ts`) — тоже read-only GET, и
+> последующая durable-запись `first_fill_at_ms` в собственный correlation-record ABI — тоже не exchange
+> side effect. Никакого конфликта с этим Requirement нет; текст Requirement уточняется явной scenario,
+> чтобы это больше не читалось как открытый вопрос.
+>
+> **Финальная семантика Change 4** (заменяет весь текст Change 4 ниже, включая "Что меняется"/
+> "Обязательные тесты"/"Зависит от"):
+> 1. **`average_entry_price` для `position_open`** сурсится из **уже полученного** ответа собственного
+>    order-запроса cycle (`getOrderByLinkId`/`getOrderHistory`, `BybitOrderView.avgPrice` —
+>    `src/services/entryPackage/orderQueryResponseDecoder.ts:3-11`) — recovery этот запрос и так делает
+>    каждую попытку для классификации `OrderRecoverySignal`; значение сегодня просто отбрасывается после
+>    классификации. Правка — donести `avgPrice` через `live_with_fill`/`terminal_with_fill` варианты
+>    `OrderRecoverySignal` вместо отдельного запроса. Ни разу больше не сурсится из aggregate
+>    `row.avgPrice`.
+> 2. **`first_fill_at_ms` для `position_open`** переиспользует **тот же самый** durable-capture-once
+>    механизм, что `OpenPositionResolutionService.resolveLiveQueryAdmissible` уже реализует
+>    (`src/services/openPosition/openPositionResolutionService.ts:226-287`): если
+>    `record.first_fill_at_ms` уже durable — переиспользуется без exchange-запроса; если ещё нет —
+>    вызывается `resolveFirstAttributableFillAtMs` и результат durable сохраняется один раз, под тем же
+>    per-pair `KeyedMutex` (та же shared instance, что уже передаётся в
+>    `OpenPositionResolutionService`/`ProtectionApplicationService`/`CloseApplicationService` из
+>    `src/app/server.ts`), чтобы не гоняться с конкурентным `GET .../open-position` за один и тот же
+>    durable-write слот одной и той же пары. `EntryCycleRecoveryResolutionServiceDeps` получает новую
+>    зависимость `mutex: KeyedMutex`. Капча выполняется **только** внутри уже существующего bounded-retry
+>    цикла recovery, только когда own-order evidence уже положительно доказал fill — не спекулятивно.
+> 3. **Aggregate position query остаётся ровно тем, чем он уже является сегодня для `entry_order_live`/
+>    `terminal_without_fill`/`terminal_after_fill`** — dual-positive-confirmation правило для этих трёх
+>    состояний **не меняется** (это НЕ было architecturally сломано shared scope: own order query уже и
+>    так cycle-scoped через `orderLinkId`, единственная поломка была именно в extraction
+>    `firstFillAtMs`/`averageEntryPrice` из aggregate row для `position_open`). Меняется только
+>    **источник фактов** внутри уже resolved `position_open`, не сама dual-query решётка состояний.
+>    Формулировка "aggregate — weak sanity" в п.1 выше относится конкретно к тому, что aggregate больше
+>    никогда не является источником этих двух полей — не к отмене её роли в определении самого
+>    recovery_state.
+> 4. **Обязательные тесты (заменяют список в Change 4 ниже):**
+>    - Регрессия существующего `entryCycleRecoveryResolutionService.test.ts` для всех состояний, кроме
+>      значений полей `first_fill_at_ms`/`average_entry_price` внутри `position_open` (эти значения
+>      теперь могут отличаться от прежних aggregate-based фикстур и должны быть обновлены на
+>      own-order-based).
+>    - `position_open` использует `avgPrice` из own-order response, никогда `row.avgPrice` — тест с
+>      расходящимися own-order/aggregate avgPrice подтверждает, что в ответе именно own-order значение.
+>    - `first_fill_at_ms` уже durable → переиспользуется без вызова `getExecutionList`.
+>    - `first_fill_at_ms` не durable → recovery вызывает `resolveFirstAttributableFillAtMs`, сохраняет
+>      результат durable, следующий `resolve()` (recovery или open-position) переиспользует то же
+>      значение без повторного вызова.
+>    - Capture fails (`no_executions_found`/`ambiguous`) → fail closed (`internal_error`), `position_open`
+>      не резолвится с фиктивным/estimated значением.
+>    - Конкурентный `GET .../recovery-state` и `GET .../open-position` на одну и ту же пару, оба
+>      триггерящие капчу одновременно — сериализуются mutex, никогда не гонятся за одним durable-write
+>      слотом, итоговое значение единственно и совпадает у обоих ответов.
+>    - Multi-owner (синтетические фикстуры, как в Change 1/2/3): recovery для cycle B не путает fill
+>      cycle A с собственным — если у B нет собственного fill-evidence, B резолвится в
+>      `entry_order_live`/`terminal_without_fill`, а не ложно в `position_open`, даже когда aggregate
+>      показывает открытую позицию (это позиция A).
+>    - Legacy `pending_action` guard (spec, "A binding left mid-amend...") продолжает работать без
+>      изменений.
+>    - Новая явная scenario в spec, подтверждающая, что read-only `getExecutionList` GET-запрос и
+>      локальная durable-запись `first_fill_at_ms` НЕ являются exchange side effect по смыслу
+>      "Recovery resolution never causes an exchange side effect".
+> 5. **Зависит от.** Change 1, и теперь явно и жёстко — **Change 3** (уже applied), поскольку Change 4
+>    напрямую переиспользует его экспортированный `resolveFirstAttributableFillAtMs` и его durable
+>    `first_fill_at_ms` контракт на correlation-записи, а не только "тот же принцип" вслед за ним.
+>
+> Everything else in Change 4's original text below (цель, HTTP-контракты не меняются, "Осознанно вне
+> scope") остаётся верным и не переписывается заново.
+
+> **Ревизия v11 — исправление ошибочной premise ревизии v10 (blocker, найден review до apply Change 4).**
+> v10 выше содержит ошибочный вывод (пункт 3): "aggregate query остаётся ровно тем, чем он уже является
+> сегодня для `entry_order_live`/`terminal_without_fill`/`terminal_after_fill` — dual-positive-confirmation
+> правило... не меняется, это НЕ было architecturally сломано shared scope". **Это неверно и отменяется.**
+> Прямая проверка кода (`entryCycleRecoveryResolutionService.ts:220-235`, `resolveRecoveryState`)
+> показывает: `entry_order_live` требует `positionFlat` (aggregate обязан положительно вернуть
+> `no_position`); `terminal_without_fill` требует того же. При shared same-side scope aggregate для scope
+> с уже открытой позицией sibling-cycle **никогда** не вернёт `no_position`, пока эта sibling-позиция
+> открыта — значит cycle B с собственным genuinely `live_unfilled` entry-ордером (fill=0) никогда не
+> сможет резолвить `entry_order_live`, пока sibling A держит scope, хотя own evidence B однозначно это
+> доказывает. Идентичная поломка — для `terminal_without_fill`. Это настоящий, ранее не обнаруженный
+> пробел, а не переформулировка уже исправленного sourcing-бага `first_fill_at_ms`/`average_entry_price`.
+>
+> **Исправленная семантика Change 4** (заменяет п.3 v10 полностью; пп. 1-2 v10 остаются в силе без
+> изменений — sourcing `average_entry_price`/`first_fill_at_ms` не меняется этой ревизией):
+> 1. Каждое из четырёх recovery states резолвится **прежде всего** из own durable/order/execution evidence
+>    конкретного cycle (собственный entry-ордер; и, когда он доказывает fill, собственный close-ордер).
+>    Aggregate position query — **никогда** обязательный co-equal сигнал; только узкий, per-state sanity
+>    check, который может лишь заблокировать resolution, которую own evidence иначе бы дало, но никогда не
+>    может сфабриковать resolution, которую own evidence не поддерживает.
+> 2. `entry_order_live`/`terminal_without_fill` резолвятся из own order signal одного; fail closed —
+>    только если aggregate положительно подтверждает открытую позицию на **противоположной** стороне
+>    (genuine invariant violation, не нормальное shared-scope условие). Sibling той же стороны, aggregate
+>    без позиции, или неудавшийся/inconclusive aggregate query — все совместимы с resolution.
+> 3. `position_open` vs `terminal_after_fill` (once own entry order доказал fill) резолвятся через
+>    собственный close-order identity этого cycle (`close_order_link_id`, уже durable, Change 2), **не**
+>    через aggregate: если close никогда не был durable attempted для этого cycle — `position_open` (own
+>    evidence, aggregate sanity — только existence на matching стороне, как Decision 1 Change 3); если
+>    close был durable attempted — запрашивается собственная судьба **этого** close-ордера через тот же
+>    read-only order-classification primitive, что recovery уже использует для entry-ордера, второй раз, с
+>    другой identity (переиспользование Change 2's `close_order_link_id`, никакой новой close-machinery):
+>    close-ордер подтверждён filled → `terminal_after_fill`, **aggregate вообще не консультируется** для
+>    этого determination — это прямое исправление сценария из п.8 review-запроса: sibling A's aggregate
+>    presence никогда не может заставить B, чей own close уже confirмed, ошибочно вернуться в
+>    `position_open`; close-ордер подтверждён terminal-с-нулевым-fill (rejected) → `position_open` (own
+>    evidence, та же aggregate sanity, что в предыдущем случае); любой другой close-ордер signal (live/
+>    not_found/inconclusive) → fail closed.
+> 4. Legacy `pending_action` guard и durably-closed fast path (`process()`'s код выше dual-query секции) —
+>    не затронуты этой ревизией, сохраняются буквально.
+> 5. Никакой новой close-side machinery: переиспользуется существующий `classifyOrderForRecovery`
+>    (identity-agnostic уже сегодня) второй раз, и существующее durable поле `close_order_link_id` (Change
+>    2) — ни одного нового adapter primitive, decoder, cancel/retry/dispatch пути.
+> 6. Production-поведение (single-owner, `close_order_link_id` всегда `null` для non-durably-closed записи
+>    single-owner close-пути) — идентично сегодняшнему для всех четырёх states, кроме уже известного из v10
+>    `first_fill_at_ms`/`average_entry_price` fix внутри `position_open`.
+>
+> Полная truth table, decision-дерево и обоснование (включая почему `terminal_after_fill` НИКОГДА не
+> консультирует aggregate — design.md Decision 3c) — в design-фазе Change 4 (OpenSpec
+> `abi-entry-cycle-recovery-attribution-v1`), не здесь; этот пункт master-plan фиксирует только исправление
+> ошибочной premise и итоговую архитектуру, не полный design.
+
+> **Ревизия v12 — второй blocker в п.3/п.5 ревизии v11 (найден review до apply Change 4), исправлен.** v11
+> п.3 использовал для close-ордера тот же `classifyOrderForRecovery`, что и для entry-ордера — этот
+> primitive доказывает только **non-zero fill**, не то, что close-ордер закрыл ровно ожидаемое qty.
+> Change 2 (`CloseApplicationService.resolveCloseOrderOutcome`) уже имеет более строгую semantics:
+> terminality + exact qty match (`confirmEntryPackage` + `decimalEquals`) против ожидаемого qty. Reuse
+> только coarse-classifier позволил бы **partial** close-ордер fill ошибочно репортиться как чистый
+> `terminal_after_fill`. Исправлено: п.3 v11 заменяется на: close-ордер classification переиспользует
+> **ровно** Change 2's exact-qty-match strictness через новый **минимальный shared read-only primitive**
+> (`classifyOwnCloseOrderOutcome`, извлечён из single-shot ядра `resolveCloseOrderOutcome` в
+> `packageConfirmation.ts`), который вызывают **оба** — `CloseApplicationService` (thin wrapper вокруг
+> его собственного bounded-retry, поведение байт-в-байт сохранено) и `EntryCycleRecoveryResolutionService`
+> (один раз на свою уже существующую bounded-retry попытку). Итоговая taxonomy для close-attempted fill
+> case: exact qty match → `terminal_after_fill` (aggregate не консультируется, как и раньше); terminal
+> zero-fill (rejected) → `position_open` (та же aggregate sanity, что и no-close-attempted case); terminal
+> **partial**-fill (qty mismatch) → **fail closed** (новое: ни `position_open`, ни `terminal_after_fill` —
+> genuine unresolved partial close, ABI не гадает, какое из двух состояний ближе); live/not_found/
+> inconclusive → fail closed, без изменений. П.5 v11 ("никакой новой close-side machinery... ни одного
+> нового primitive") уточняется: ровно один новый **shared, read-only, single-shot** classification
+> primitive — не duplicate Change 2's логики, не generic OMS, не новый adapter/decoder/cancel/dispatch
+> путь. Остальные пункты v11 (1, 2, 4, 6) остаются в силе без изменений.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope

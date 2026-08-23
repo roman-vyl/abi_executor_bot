@@ -338,6 +338,67 @@ export async function confirmEntryOrderNeutralized(input: {
   return "ambiguous";
 }
 
+export type OwnCloseOrderOutcome =
+  | { kind: "matched" }
+  | { kind: "zero_fill" }
+  | { kind: "qty_mismatch" }
+  | { kind: "not_found" }
+  | { kind: "ambiguous" };
+
+// Single-shot (no internal retry) classification of one close order's own
+// fate against an expected fully-closed quantity: terminal AND cumulative
+// filled qty exactly equals expectedQty -> "matched"; terminal but confirmed
+// zero fill (rejected/never executed) -> "zero_fill"; terminal but filled an
+// amount that does not exactly equal expectedQty -> "qty_mismatch";
+// genuinely absent from both realtime and history -> "not_found"; anything
+// else (still live, or a query/classification failure) -> "ambiguous".
+// Extracted from CloseApplicationService.resolveCloseOrderOutcome's own
+// single-shot core (abi-entry-cycle-recovery-attribution-v1 design.md
+// Decision 3) so CloseApplicationService and
+// EntryCycleRecoveryResolutionService share one implementation of this exact
+// strictness instead of each maintaining their own. Callers own their own
+// retry cadence around this — their existing bounded-retry shapes already
+// differ (different attempt counts, different callers) and baking a retry
+// policy in here would take a decision away from both without benefit.
+export async function classifyOwnCloseOrderOutcome(input: {
+  bybit: BybitAdapter;
+  getCloseOrderPayload: BybitGetOrderByLinkIdPayload;
+  getCloseOrderHistoryPayload: BybitGetOrderHistoryPayload;
+  expectedQty: string;
+}): Promise<OwnCloseOrderOutcome> {
+  const terminality = await classifyEntryOrderTerminality({
+    bybit: input.bybit,
+    getEntryOrderPayload: input.getCloseOrderPayload,
+    getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
+  });
+
+  if (terminality.kind !== "terminal") {
+    return { kind: "ambiguous" };
+  }
+
+  const confirmation = await confirmEntryPackage({
+    bybit: input.bybit,
+    getEntryOrderPayload: input.getCloseOrderPayload,
+    getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
+    expected: { qty: input.expectedQty },
+  });
+
+  if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
+    return decimalEquals(confirmation.observation.cumulative_filled_qty, input.expectedQty)
+      ? { kind: "matched" }
+      : { kind: "qty_mismatch" };
+  }
+  if (confirmation.kind === "terminal_without_fill") {
+    return { kind: "zero_fill" };
+  }
+  if (confirmation.kind === "not_found") {
+    return { kind: "not_found" };
+  }
+  // "ambiguous" despite terminal classification (e.g. a query failure within
+  // confirmEntryPackage's own bounded window).
+  return { kind: "ambiguous" };
+}
+
 export type FirstAttributableFillResolution =
   | { kind: "found"; firstFillAtMs: number }
   | { kind: "no_executions_found" }
