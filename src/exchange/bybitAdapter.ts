@@ -104,6 +104,7 @@ export interface BybitAdapter {
   getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown>;
   getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>;
   getInstrumentInfo(category: string, symbol: string): Promise<unknown>;
+  getOrderPriceLimit(category: string, symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
@@ -278,6 +279,14 @@ export class RestBybitAdapter implements BybitAdapter {
     return readBybitResponse(response);
   }
 
+  async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
+    const params = new URLSearchParams({ category, symbol });
+    const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
+      signal: this.timeoutSignal(),
+    });
+    return readBybitResponse(response);
+  }
+
   async getPosition(symbol: string): Promise<BybitPosition | null> {
     return readOpenPosition(await this.getOpenPositions({ symbol }));
   }
@@ -437,6 +446,10 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
     return stub("getInstrumentInfo", { category, symbol });
+  }
+
+  async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
+    return stub("getOrderPriceLimit", { category, symbol });
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {

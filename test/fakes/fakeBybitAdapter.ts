@@ -32,6 +32,7 @@ export class FakeBybitAdapter implements BybitAdapter {
   // Recorded as "category:symbol" so tests can assert the exact category a
   // call used, not just the symbol.
   readonly getInstrumentInfoCalls: string[] = [];
+  readonly getOrderPriceLimitCalls: Array<{ category: string; symbol: string }> = [];
   readonly getPositionCalls: string[] = [];
   readonly getMarketPriceCalls: string[] = [];
   readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
@@ -48,6 +49,14 @@ export class FakeBybitAdapter implements BybitAdapter {
   orderHistoryResponse: unknown = { retCode: 0, result: { list: [] } };
   orderHistoryForSymbolResponse: unknown = { retCode: 0, result: { list: [] } };
   instrumentInfoResponse: unknown = { retCode: 0, result: { list: [] } };
+  orderPriceLimitResponse: unknown = {
+    retCode: 0,
+    retMsg: "OK",
+    result: { symbol: "BTCUSDT", buyLmt: "105000", sellLmt: "104000", ts: "1750302284491" },
+    time: 1750302285376,
+  };
+  orderPriceLimitResponses: unknown[] = [];
+  orderPriceLimitError: Error | null = null;
   // Optional per-orderLinkId overrides, checked before the flat default
   // responses above — lets a test express "this specific order looks like
   // X while every other query still uses the shared default."
@@ -142,6 +151,17 @@ export class FakeBybitAdapter implements BybitAdapter {
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
     this.getInstrumentInfoCalls.push(`${category}:${symbol}`);
     return this.instrumentInfoResponse;
+  }
+
+  async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
+    this.getOrderPriceLimitCalls.push({ category, symbol });
+    if (this.orderPriceLimitError !== null) {
+      throw this.orderPriceLimitError;
+    }
+    if (this.orderPriceLimitResponses.length > 0) {
+      return this.orderPriceLimitResponses.shift();
+    }
+    return this.orderPriceLimitResponse;
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
