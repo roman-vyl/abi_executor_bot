@@ -5,7 +5,7 @@ import type {
   BindingHistoryEntry,
   EntryPackageExecutionRecord,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
@@ -278,10 +278,20 @@ export class EntryPackageApplicationService {
     const claim = await this.deps.scopeMutex.withKeyLock(
       positionScopeKey(identity.category, identity.symbol),
       async (): Promise<"claimed" | "conflict"> => {
-        const owner = this.deps.correlationRepository.findOwnerByScope(identity.category, identity.symbol);
-        const ownedByAnotherActivePair =
-          owner !== undefined && !isOwnedBySamePair(owner, command) && !isDurablyClosedEntryPackageStatus(owner.status);
-        if (ownedByAnotherActivePair) {
+        const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(identity.category, identity.symbol);
+        const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
+
+        // TEMPORARY, per abi-same-side-virtual-exposure-ownership-v1 (Change 5):
+        // entry-package's own entry-order creation attaches position-level
+        // tpslMode: "Full" protection (bybitOrderMapper.ts) — a second
+        // same-side owner's own entry order would silently clobber the first
+        // owner's protection the instant it is placed, before pair-owned
+        // protection (Changes 6-8) exists to prevent that. Real same-side
+        // admission is therefore gated here until Change 8 (once pair-owned
+        // protection has replaced position-level TP/SL writes) removes this
+        // block and lets `classification` decide admission on its own — every
+        // outcome but "empty" conflicts for now, including "same_side".
+        if (classification !== "empty") {
           return "conflict";
         }
 
@@ -736,6 +746,41 @@ function isMetadataOnlyChange(a: DesiredEntryDto, b: DesiredEntryDto): boolean {
 
 function isOwnedBySamePair(owner: EntryPackageExecutionRecord, command: EntryPackageCommand): boolean {
   return owner.strategy_instance_id === command.strategyInstanceId && owner.trade_cycle_id === command.tradeCycleId;
+}
+
+// The real, permanent classification createOrder()'s scope-claim guard is
+// built on (abi-same-side-virtual-exposure-ownership-v1 design.md
+// Decision 1) — exported so it can be proven correct in isolation, against
+// synthetic multi-owner fixtures, independent of the temporary production
+// guard the caller currently wraps it in (see createOrder()). Excludes the
+// requesting pair's own active record first: without this, a pair's own
+// retry would otherwise be compared against itself once more than one
+// active record can exist for a scope, which is exactly the self-conflict
+// bug the architecture review found in the old findOwnerByScope()-based
+// check. A `null` desired_entry on any other active record is a structural
+// contradiction no current write path produces — classified as "corrupt"
+// rather than silently excluded or guessed through.
+export type ScopeAdmissionClassification = "empty" | "same_side" | "opposite_side" | "corrupt";
+
+export function classifyScopeAdmission(
+  activeRecords: EntryPackageExecutionRecord[],
+  command: EntryPackageCommand,
+  requestedSide: DesiredEntryDto["side"],
+): ScopeAdmissionClassification {
+  const otherActiveRecords = activeRecords.filter((record) => !isOwnedBySamePair(record, command));
+
+  for (const other of otherActiveRecords) {
+    if (other.desired_entry === null) {
+      return "corrupt";
+    }
+  }
+
+  if (otherActiveRecords.length === 0) {
+    return "empty";
+  }
+
+  const allSameSide = otherActiveRecords.every((other) => other.desired_entry?.side === requestedSide);
+  return allSameSide ? "same_side" : "opposite_side";
 }
 
 function closeBindingFrom(

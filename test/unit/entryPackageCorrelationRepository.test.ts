@@ -420,7 +420,7 @@ test("replay resolves a scope handed off between pairs without a false-positive 
   });
 });
 
-test("replay fails closed when two different pairs' latest records both hold the same scope", async () => {
+test("replay fails closed when two different pairs' latest records hold the same scope on opposite sides", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
     const a = makeRecord({
@@ -428,14 +428,72 @@ test("replay fails closed when two different pairs' latest records both hold the
       tradeCycleId: "cycle-A1",
       orderLinkId: "link-a1",
       status: "applied",
+      desiredEntry: { side: "long" },
     });
     const b = makeRecord({
       strategyInstanceId: "instance-B",
       tradeCycleId: "cycle-B1",
       orderLinkId: "link-b1",
       status: "pending_create",
+      desiredEntry: { side: "short" },
     });
     await writeFile(path, `${JSON.stringify(a)}\n${JSON.stringify(b)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.equal(result.ok, false);
+  });
+});
+
+// abi-same-side-virtual-exposure-ownership-v1 design.md Decision 3: two or
+// more active records on the same scope sharing the same side is no longer,
+// by itself, a readiness conflict — replay reconstructs both as active. This
+// fixture is synthetic (two real pairs' records seeded directly, bypassing
+// EntryPackageApplicationService's own admission guard, which still admits
+// at most one active owner per scope through real PUT .../entry-package
+// traffic) — proving the replay mechanism itself is correct and ready, per
+// this change's foundation-only scope.
+test("replay succeeds and reconstructs both pairs when two different pairs' latest records hold the same scope on the same side", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const a = makeRecord({
+      strategyInstanceId: "instance-A",
+      tradeCycleId: "cycle-A1",
+      orderLinkId: "link-a1",
+      status: "applied",
+      desiredEntry: { side: "long" },
+    });
+    const b = makeRecord({
+      strategyInstanceId: "instance-B",
+      tradeCycleId: "cycle-B1",
+      orderLinkId: "link-b1",
+      status: "pending_create",
+      desiredEntry: { side: "long" },
+    });
+    await writeFile(path, `${JSON.stringify(a)}\n${JSON.stringify(b)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+    assert.equal(active.length, 2);
+    assert.deepEqual(
+      active.map((r) => r.strategy_instance_id).sort(),
+      ["instance-A", "instance-B"],
+    );
+  });
+});
+
+// design.md Decision 3: an active record with a null desired_entry fails
+// readiness closed, the same treatment a missing exchange binding already
+// gets — a structural contradiction no current write path produces.
+test("replay fails closed on a non-durably-closed record with no usable desired_entry.side", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const record = makeRecord({ orderLinkId: "link-1", status: "applied", desiredEntry: null });
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
 
     const repo = new EntryPackageCorrelationRepository(path);
     const result = await repo.replay();
@@ -737,6 +795,13 @@ function makeRecord(
     exchangeSymbol: string;
     pendingAction: StoredEntryPackagePendingAction;
     earlyExecutionObservation: EarlyExecutionObservation;
+    // abi-same-side-virtual-exposure-ownership-v1: replay now reads
+    // desired_entry.side for every active record (Decision 3) — null
+    // remains available via desiredEntry: null for tests that specifically
+    // want that shape, but every other test gets a real side by default so
+    // this fixture matches what every current write path actually produces
+    // for an active record.
+    desiredEntry: { side: "long" | "short" } | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -747,7 +812,17 @@ function makeRecord(
     exchange_category: "linear",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
-    desired_entry: null,
+    desired_entry:
+      overrides.desiredEntry === null
+        ? null
+        : {
+            side: overrides.desiredEntry?.side ?? "long",
+            source_plan_bar_open_time_ms: 1785000000000,
+            planned_entry_price: "100000",
+            initial_stop_price: "99000",
+            initial_take_price: "103000",
+            locked_exit_profile: "runner",
+          },
     risk_multiplier: "1",
     calculated_quantity: null,
     order_link_id: overrides.orderLinkId ?? null,

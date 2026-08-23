@@ -141,10 +141,19 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
-  // The pair, if any, currently holding this physical scope. Callers
-  // acquiring a new scope binding must serialize this read together with
-  // the durable write that claims it under the scope-level KeyedMutex —
-  // this method itself performs no locking.
+  // The most recent non-durably-closed writer of this physical scope, if
+  // any — a single-pointer index, `byScope.set(scope, record)` on every
+  // such write. Correct at what it actually promises (the latest writer),
+  // but NOT a valid primitive for any ownership/admission decision as of
+  // abi-same-side-virtual-exposure-ownership-v1: it cannot represent more
+  // than one active owner, so it cannot answer "is pair X one of this
+  // scope's active owners" once more than one can exist. Both remaining
+  // production call sites that used to ask that question
+  // (EntryPackageApplicationService.createOrder()'s scope-claim guard,
+  // ProtectionApplicationService's ownership re-verification) have moved to
+  // findActiveRecordsForScope() below. Kept only as a cheap,
+  // non-authoritative existence check — do not add a new decision-making
+  // caller of this method.
   findOwnerByScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord | undefined {
     return this.byScope.get(positionScopeKey(category, symbol));
   }
@@ -153,13 +162,18 @@ export class EntryPackageCorrelationRepository {
   // scope, regardless of which pair holds it. A plain scan over
   // byCompositeKey (already the authoritative "latest record per pair"
   // collection) rather than a second maintained index — nothing here can
-  // drift out of sync with it. In production this can only ever return zero
-  // or one record today: EntryPackageApplicationService.createOrder()'s
-  // scope-claim guard is unchanged by this method's existence and still
-  // enforces single ownership. This exists so a repository-level test can
-  // seed multiple same-side records directly (bypassing that guard) and
-  // prove the repository layer itself has no single-owner assumption baked
-  // in — see virtual-exposure-state spec.md.
+  // drift out of sync with it. This is the canonical multi-owner-aware
+  // ownership lookup — EntryPackageApplicationService.createOrder()'s
+  // scope-claim guard and ProtectionApplicationService's ownership
+  // re-verification both use it. In production this can still only ever
+  // return zero or one record today: createOrder()'s own admission
+  // classification is gated by a temporary guard
+  // (abi-same-side-virtual-exposure-ownership-v1) that keeps single
+  // ownership in effect until a later change removes it. This also exists
+  // so a repository-level test can seed multiple same-side records
+  // directly (bypassing that guard) and prove the repository layer itself
+  // has no single-owner assumption baked in — see virtual-exposure-state
+  // spec.md.
   findActiveRecordsForScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord[] {
     const targetScope = positionScopeKey(category, symbol);
     const results: EntryPackageExecutionRecord[] = [];
@@ -267,6 +281,12 @@ export class EntryPackageCorrelationRepository {
   // durable state, not a sequencing artifact.
   private rebuildScopeIndexFromReplay(): string | undefined {
     this.byScope.clear();
+    // Local to this one replay pass, discarded on return — not a new
+    // persisted index. Tracks the side already seen active for each scope
+    // so two or more same-side active records no longer fail readiness by
+    // themselves (abi-same-side-virtual-exposure-ownership-v1 design.md
+    // Decision 3); only a genuine mixed-side conflict does.
+    const activeSideByScope = new Map<string, "long" | "short">();
 
     for (const record of this.byCompositeKey.values()) {
       if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
@@ -305,14 +325,28 @@ export class EntryPackageCorrelationRepository {
       }
 
       const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
-      const existingOwner = this.byScope.get(scope);
-      if (existingOwner !== undefined) {
+
+      const side = record.desired_entry?.side;
+      if (side === undefined) {
+        // Same contradiction class as the missing-exchange-binding checks
+        // above: a non-durably-closed record with no usable desired_entry
+        // is a state no current write path produces, but replay must fail
+        // closed rather than silently exclude it from ownership if it ever
+        // does.
         return (
-          `conflicting scope ownership for ${scope}: both ` +
-          `${correlationRecordKey(existingOwner.strategy_instance_id, existingOwner.trade_cycle_id)} and ` +
-          `${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} are durably open`
+          `record for ${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} is active but ` +
+          `has no usable desired_entry.side`
         );
       }
+
+      const existingSide = activeSideByScope.get(scope);
+      if (existingSide !== undefined && existingSide !== side) {
+        return (
+          `conflicting scope ownership for ${scope}: mixed sides among active records ` +
+          `(saw both "${existingSide}" and "${side}")`
+        );
+      }
+      activeSideByScope.set(scope, side);
       this.byScope.set(scope, record);
     }
 

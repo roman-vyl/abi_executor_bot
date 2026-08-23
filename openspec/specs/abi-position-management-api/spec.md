@@ -172,6 +172,7 @@ Both endpoints SHALL use the closed error envelope `{ error: { code, message, de
 | 422 | `unsupported_exchange_scope` | both |
 | 422 | `position_not_open` | protection only |
 | 422 | `close_execution_incomplete` | close only |
+| 422 | `shared_scope_protection_unsupported` | protection only |
 | 500 | `internal_error` | both |
 
 No response SHALL include internal exception, stack, or raw exchange details, and no failure SHALL be serialized as success.
@@ -185,6 +186,12 @@ No response SHALL include internal exception, stack, or raw exchange details, an
   `Content-Type` other than `application/json`
 - **THEN** ABI returns `malformed_json` or `unsupported_media_type` respectively, the same as
   `PUT .../protection` already does for the same conditions
+
+#### Scenario: A shared-scope protection request is rejected with its own distinct code
+- **WHEN** `PUT .../protection` is requested for a pair that actively and legitimately owns its
+  scope, but that scope currently has more than one active owner
+- **THEN** ABI returns HTTP `422` with `error.code` `shared_scope_protection_unsupported`
+- **AND** this code is never returned by `POST .../close`
 
 ### Requirement: OpenAPI describes only the external contract
 ABI SHALL provide an OpenAPI 3.1 operation for each endpoint, matching the method, route, request/response DTOs, nullability, and HTTP mappings in this capability. It SHALL NOT define internal application interfaces, order-attribution mechanics, or exchange adapter shapes.

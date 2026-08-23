@@ -11,6 +11,7 @@ import {
   isNumericallyEqualExactDecimal,
   positionNotOpenResult,
   serializeProtectionApplied,
+  sharedScopeProtectionUnsupportedResult,
   unknownTradeCycleBindingResult,
   unsupportedExchangeScopeResult,
 } from "../../domain/positionManagementApi.js";
@@ -90,15 +91,35 @@ export class ProtectionApplicationService {
       return internalErrorResult();
     }
 
-    const owner = this.deps.correlationRepository.findOwnerByScope(category, record.exchange_symbol);
-    if (
-      owner === undefined ||
-      owner.strategy_instance_id !== command.strategyInstanceId ||
-      owner.trade_cycle_id !== command.tradeCycleId
-    ) {
-      // Should be unreachable while scope ownership is internally
-      // consistent — re-verified independently rather than assumed.
+    // Multi-owner-aware re-verification (abi-same-side-virtual-exposure-
+    // ownership-v1): findOwnerByScope()'s single-pointer answer cannot
+    // represent more than one active owner, so it is no longer a valid
+    // primitive for this check — findActiveRecordsForScope() is.
+    const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
+    const selfIsActive = activeRecords.some(
+      (active) =>
+        active.strategy_instance_id === command.strategyInstanceId && active.trade_cycle_id === command.tradeCycleId,
+    );
+    if (!selfIsActive) {
+      // Unreachable by construction: findActiveRecordsForScope() is scanned
+      // using this same record's own exchange_category/exchange_symbol, so
+      // a non-durably-closed record with a valid category always finds
+      // itself. Kept as defensive verification rather than an assumption —
+      // the same discipline this codebase applies to every other
+      // "structurally impossible, verify anyway" check.
       return internalErrorResult();
+    }
+    if (activeRecords.length > 1) {
+      // This scope currently has more than one active owner — PUT
+      // .../protection's single position-level write cannot be safely
+      // attributed to just one of them. Fails closed before the
+      // live-position check and before any exchange call. Structurally
+      // unreachable in production today: EntryPackageApplicationService's
+      // own admission guard never lets a second active owner come to exist
+      // (abi-same-side-virtual-exposure-ownership-v1) — this check is real
+      // and tested ahead of the change that will eventually make it
+      // reachable, not something protection itself needs to gate further.
+      return sharedScopeProtectionUnsupportedResult();
     }
 
     const determination = await this.deps.openPositionResolutionService.determine(record);
