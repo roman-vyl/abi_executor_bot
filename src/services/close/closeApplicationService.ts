@@ -6,6 +6,7 @@ import type { EntryPackageCorrelationRepository } from "../../correlation/entryP
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
+import { compareDecimal } from "../../domain/exactDecimal.js";
 import type { CloseCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
   closeExecutionIncompleteResult,
@@ -16,54 +17,34 @@ import {
 } from "../../domain/positionManagementApi.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { BybitMarketCloseOrderPayload } from "../../exchange/bybitOrderMapper.js";
-import { mapPositionSideToCloseSide, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
+import { readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import { cancelEntryOrder, executeMarketCloseOrder } from "../../execution/execution.js";
 import {
   classifyEntryOrderTerminality,
   classifyOwnCloseOrderOutcome,
   confirmEntryOrderNeutralized,
   confirmEntryPackage,
+  FILLED_STATUSES,
+  TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
+import type { AttachedProtectionResolution } from "../protection/nativeProtectionAttribution.js";
+import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
 
-// Bounded final verification that the live position has settled at zero
-// after a close order — a market close, unlike a position-level protection
-// write, is not guaranteed to settle by the time the placement call
-// returns. Each attempt also re-checks entry-order terminality; that fact is
-// monotonic once established, so this is a cheap single re-check per attempt,
-// not a second bounded sub-loop.
-const FINAL_VERIFY_ATTEMPTS = 3;
-const FINAL_VERIFY_RETRY_DELAY_MS = 300;
+const BOUNDED_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 300;
 
 export type CloseApplicationServiceDeps = {
   config: AbiConfig;
   bybit: BybitAdapter;
   correlationRepository: EntryPackageCorrelationRepository;
-  // The same per-pair lock entry-package and protection already use. Not the
-  // scope-level lock: this service never claims a scope, only releases its
-  // own pair's, as a side effect of the durable terminal write.
   mutex: KeyedMutex;
 };
 
-// Executes an already-validated POST .../close command (exposure_fraction
-// "1" — see positionManagementApi.ts): classify the pair, neutralize its
-// current entry order, close its resolved exposure, verify fresh, and
-// durably terminalize as terminal_closed before releasing the pair's
-// physical scope (or, for a scope shared with other active cycles, its own
-// membership in that scope's active-owner set).
-//
-// Single-owner (findActiveRecordsForScope returns exactly this pair's own
-// record — today's only production-reachable state) is handled entirely by
-// processSingleOwnerClose(), byte-for-byte unchanged from this capability's
-// original close-execution behavior. Multi-owner (more than one active
-// record — reachable today only via synthetically seeded correlation state,
-// pending abi-same-side-virtual-exposure-ownership-v1) is handled by
-// processMultiOwnerClose(), which dispatches its own reduce-only order under
-// a stable, attributable identity (close_order_link_id) durably recorded
-// before the exchange call, and gates success on that order's own confirmed
-// execution — never on a live-aggregate-position comparison, which cannot
-// distinguish this request's own effect from a sibling record's concurrent
-// activity. See docs/virtual-exposure-ownership-delivery-plan.md Change 2
-// and its OpenSpec (abi-pair-scoped-close-execution-v1) for the full design.
+// One close algorithm for every owner count. The safety ordering is strict:
+// entry neutralization -> final own exposure -> exact own protection
+// neutralization -> aggregate veto -> stable own close -> fresh terminal
+// verification. No market-close write is reachable while own protection is
+// active, ambiguous, or not freshly confirmed neutralized.
 export class CloseApplicationService {
   private readonly deps: CloseApplicationServiceDeps;
 
@@ -86,242 +67,109 @@ export class CloseApplicationService {
 
   private async process(command: CloseCommand): Promise<PositionManagementHttpResult> {
     const record = this.deps.correlationRepository.get(command.strategyInstanceId, command.tradeCycleId);
-
     if (record === undefined) {
       return unknownTradeCycleBindingResult();
     }
 
-    // Already the permanent, non-resurrectable state this pipeline exists
-    // to produce — a pure no-write, no-exchange-call shortcut.
     if (record.status === "terminal_closed") {
       return closedResult(command);
     }
 
-    // absent and terminal_unfilled both already durably prove zero exposure
-    // and no live order, but neither itself durably records that Runtime
-    // asked to end the trade cycle via a close request — entry-package
-    // execution's own null-desired-entry handling can otherwise resurrect
-    // either one with a later entry. No exchange call is needed to justify
-    // the promotion; the write itself is not optional.
     if (record.status === "absent" || record.status === "terminal_unfilled") {
-      await this.deps.correlationRepository.save({
-        ...record,
-        status: "terminal_closed",
-        pending_action: null,
-        updated_at: new Date().toISOString(),
-      });
-      return closedResult(command);
+      return this.persistTerminal(command, record);
     }
 
     const category = record.exchange_category;
     if (category !== "linear" && category !== "spot") {
-      // Unreachable while correlation replay's scope invariant holds —
-      // re-verified independently rather than assumed, mirroring
-      // protectionApplicationService's identical defensive check.
       return internalErrorResult();
     }
-
-    // Ownership reconfirmation is against the scope's currently active
-    // records (virtual-exposure-state's findActiveRecordsForScope), not
-    // findOwnerByScope/byScope: byScope is a single pointer per scope and
-    // cannot represent more than one active owner, so it cannot correctly
-    // answer "is this pair one of this scope's active owners" once more
-    // than one exists (today only via synthetic fixtures). A record
-    // reaching this point is already known non-durably-closed, so its own
-    // membership is guaranteed by construction; the check is retained as a
-    // defensive assertion (mirrors this method's own category re-check
-    // above), and its count is what the next branch decides on.
-    const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
-    const selfKey = correlationRecordKey(command.strategyInstanceId, command.tradeCycleId);
-    const selfIsActive = activeRecords.some(
-      (active) => correlationRecordKey(active.strategy_instance_id, active.trade_cycle_id) === selfKey,
-    );
-    if (!selfIsActive) {
-      return internalErrorResult();
-    }
-
-    if (activeRecords.length > 1) {
-      // Defensive: same-side-only is the claim policy's own invariant
-      // (unchanged by this pipeline) — unreachable in production until
-      // abi-same-side-virtual-exposure-ownership-v1 activates multi-owner,
-      // re-verified rather than assumed, same style as the checks above.
-      const sides = new Set(activeRecords.map((active) => active.desired_entry?.side ?? null));
-      if (sides.size > 1) {
-        return internalErrorResult();
-      }
-    }
-
     if (category !== "linear") {
       return unsupportedExchangeScopeResult();
     }
 
-    // A non-durably-closed record is always expected to carry a current
-    // entry order identity — a missing one here is contradictory correlation,
-    // not "nothing to neutralize".
+    const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
+    const selfKey = correlationRecordKey(command.strategyInstanceId, command.tradeCycleId);
+    if (!activeRecords.some((active) => correlationRecordKey(active.strategy_instance_id, active.trade_cycle_id) === selfKey)) {
+      return internalErrorResult();
+    }
+    const activeSides = new Set(activeRecords.map((active) => active.desired_entry?.side ?? null));
+    if (activeSides.size !== 1 || activeSides.has(null) || record.desired_entry === null || !activeSides.has(record.desired_entry.side)) {
+      return internalErrorResult();
+    }
+
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
       return internalErrorResult();
     }
 
     const symbol = record.exchange_symbol;
-    const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
-    const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
-
-    const initialTerminality = await classifyEntryOrderTerminality({
-      bybit: this.deps.bybit,
-      getEntryOrderPayload,
-      getEntryOrderHistoryPayload,
-    });
-
-    if (initialTerminality.kind !== "terminal") {
-      const cancelResult = await cancelEntryOrder({
-        config: this.deps.config,
-        bybit: this.deps.bybit,
-        payload: { category, symbol, orderLinkId },
-      });
-
-      if (cancelResult.status === "skipped_live_execution") {
-        return internalErrorResult();
-      }
-
-      const neutralizationOutcome = await confirmEntryOrderNeutralized({
-        bybit: this.deps.bybit,
-        getEntryOrderPayload,
-        getEntryOrderHistoryPayload,
-      });
-
-      if (neutralizationOutcome === "ambiguous") {
-        return internalErrorResult();
-      }
-    }
-
-    if (activeRecords.length > 1) {
-      return this.processMultiOwnerClose(command, record, category, symbol);
-    }
-
-    // Single-owner: unchanged from this capability's original behavior.
-    // reduceOnly qty is always the live aggregate's exact current size,
-    // never a quantity ABI itself calculated or recorded.
-    const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
-    if (positionQuery.kind === "failure") {
+    const entryQuery = { category, symbol, orderLinkId, limit: "1" as const };
+    if (!(await this.neutralizeEntry(entryQuery))) {
       return internalErrorResult();
     }
 
-    if (positionQuery.kind === "position") {
-      const row = positionQuery.row;
-      const closePayload: BybitMarketCloseOrderPayload = {
-        category,
-        symbol,
-        side: mapPositionSideToCloseSide(row.side),
-        orderType: "Market",
-        qty: row.size,
-        reduceOnly: true,
-        positionIdx: 0,
-      };
-
-      const closeResult = await executeMarketCloseOrder({
-        config: this.deps.config,
-        bybit: this.deps.bybit,
-        payload: closePayload,
-      });
-
-      if (closeResult.status === "skipped_live_execution") {
-        return internalErrorResult();
-      }
-    }
-
-    const verified = await this.verifyBothPostconditions({ category, symbol, getEntryOrderPayload, getEntryOrderHistoryPayload });
-    if (!verified) {
+    const ownExposure = await this.resolveOwnExposure(record);
+    if (ownExposure === undefined) {
       return internalErrorResult();
     }
 
-    await this.deps.correlationRepository.save({
-      ...record,
-      status: "terminal_closed",
-      pending_action: null,
-      updated_at: new Date().toISOString(),
-    });
+    // MASTER-PLAN SAFETY GATE: protection is neutralized before aggregate
+    // inspection, close identity recovery, dispatch, or resend.
+    if (!(await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure))) {
+      return internalErrorResult();
+    }
 
-    return closedResult(command);
+    if (!(await this.aggregateIsCompatible(record, ownExposure))) {
+      return internalErrorResult();
+    }
+
+    if (compareDecimal(ownExposure, "0") === 0) {
+      if (!(await this.verifyTerminalPostconditions(record, ownExposure))) {
+        return internalErrorResult();
+      }
+      return this.persistTerminal(command, record);
+    }
+
+    return this.closePositiveExposure(command, record, ownExposure);
   }
 
-  private async verifyBothPostconditions(input: {
+  private async neutralizeEntry(entryQuery: {
     category: "linear";
     symbol: string;
-    getEntryOrderPayload: Parameters<typeof classifyEntryOrderTerminality>[0]["getEntryOrderPayload"];
-    getEntryOrderHistoryPayload: Parameters<typeof classifyEntryOrderTerminality>[0]["getEntryOrderHistoryPayload"];
+    orderLinkId: string;
+    limit: "1";
   }): Promise<boolean> {
-    for (let attempt = 0; attempt < FINAL_VERIFY_ATTEMPTS; attempt += 1) {
-      // Sequential, not concurrent: every other Bybit call in this pipeline
-      // is already sequential, and there is no efficiency requirement here
-      // that would justify two in-flight requests against the exchange at
-      // once.
-      const positionQuery = await this.deps.bybit.queryPositionForInstrument({
-        category: input.category,
-        symbol: input.symbol,
-      });
-      const terminality = await classifyEntryOrderTerminality({
-        bybit: this.deps.bybit,
-        getEntryOrderPayload: input.getEntryOrderPayload,
-        getEntryOrderHistoryPayload: input.getEntryOrderHistoryPayload,
-      });
+    const initial = await classifyEntryOrderTerminality({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload: entryQuery,
+      getEntryOrderHistoryPayload: entryQuery,
+    });
 
-      if (positionQuery.kind === "no_position" && terminality.kind === "terminal") {
-        return true;
-      }
-
-      if (attempt < FINAL_VERIFY_ATTEMPTS - 1) {
-        await sleep(FINAL_VERIFY_RETRY_DELAY_MS);
-      }
+    if (initial.kind === "terminal") {
+      return true;
     }
 
-    return false;
-  }
-
-  // Multi-owner close: Step 1 (ensure a close order is dispatched for this
-  // generation — a no-op if one already is) always falls straight through
-  // into Step 2 (always resolve and gate on the dispatched identity's own
-  // fate) within this same request — the two are sequential steps of one
-  // flow, not alternate branches a request selects between once. See
-  // abi-pair-scoped-close-execution-v1 design.md Decision 4 for the full
-  // crash-window analysis this structure satisfies.
-  private async processMultiOwnerClose(
-    command: CloseCommand,
-    record: EntryPackageExecutionRecord,
-    category: "linear",
-    symbol: string,
-  ): Promise<PositionManagementHttpResult> {
-    let current = record;
-
-    if (current.close_order_link_id === null) {
-      const resolvedQty = await this.resolveOwnExposure(current);
-      if (resolvedQty === undefined) {
-        return internalErrorResult();
-      }
-
-      // The entry order is terminal and immutable, so a zero-exposure
-      // outcome is stable across any number of retries — this cycle
-      // contributed nothing to close, and no identity is ever needed for it.
-      if (resolvedQty === "0") {
-        return this.finalizeMultiOwnerClose(command, current);
-      }
-
-      const dispatched = await this.dispatchMultiOwnerCloseOrder(command, current, category, symbol, resolvedQty);
-      if (dispatched === undefined) {
-        return internalErrorResult();
-      }
-      current = dispatched;
+    const cancelResult = await cancelEntryOrder({
+      config: this.deps.config,
+      bybit: this.deps.bybit,
+      payload: {
+        category: entryQuery.category,
+        symbol: entryQuery.symbol,
+        orderLinkId: entryQuery.orderLinkId,
+      },
+    });
+    if (cancelResult.status === "skipped_live_execution" || !isAcknowledged(cancelResult.bybitResponse)) {
+      return false;
     }
 
-    return this.resolveMultiOwnerCloseFate(command, current, category, symbol);
+    const outcome = await confirmEntryOrderNeutralized({
+      bybit: this.deps.bybit,
+      getEntryOrderPayload: entryQuery,
+      getEntryOrderHistoryPayload: entryQuery,
+    });
+    return outcome !== "ambiguous";
   }
 
-  // Resolves the requested cycle's own currently-owned exposure from its
-  // own entry order's fill facts. Transient/read-only: the result is used
-  // only in memory for this request and is never written to
-  // early_execution_observation — close is not one of virtual-exposure-
-  // state's existing durable observation-writing points. Returns undefined
-  // on any contradiction or inconclusive exchange answer (internal_error).
   private async resolveOwnExposure(record: EntryPackageExecutionRecord): Promise<string | undefined> {
     const calculatedQuantity = record.calculated_quantity;
     const orderLinkId = record.order_link_id;
@@ -330,11 +178,10 @@ export class CloseApplicationService {
       return undefined;
     }
 
-    const symbol = record.exchange_symbol;
     const confirmation = await confirmEntryPackage({
       bybit: this.deps.bybit,
-      getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" as const },
-      getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" as const },
+      getEntryOrderPayload: { category, symbol: record.exchange_symbol, orderLinkId, limit: "1" },
+      getEntryOrderHistoryPayload: { category, symbol: record.exchange_symbol, orderLinkId, limit: "1" },
       expected: { qty: calculatedQuantity },
     });
 
@@ -344,152 +191,177 @@ export class CloseApplicationService {
     if (confirmation.kind === "terminal_without_fill") {
       return "0";
     }
-    // "not_found" / "ambiguous" / "pending_confirmed": unreachable in
-    // practice (this is always called after neutralization has already
-    // confirmed the entry order terminal), but not assumed away.
     return undefined;
   }
 
-  // Computes this generation's close-order identity if `record` doesn't
-  // already carry one, durably records it before the exchange call, and
-  // sends the reduce-only close order. Reused both for a fresh dispatch and
-  // for the one case proven safe to resend under the same identity (a
-  // fresh query finding it genuinely never created). Returns the updated
-  // record, or undefined on any failure (the durable identity write, once
-  // made, is never reverted on failure — the caller's next attempt resolves
-  // its fate via resolveMultiOwnerCloseFate rather than blindly resending).
-  private async dispatchMultiOwnerCloseOrder(
-    command: CloseCommand,
-    record: EntryPackageExecutionRecord,
+  private async neutralizeOwnProtection(
     category: "linear",
     symbol: string,
-    resolvedQty: string,
-  ): Promise<EntryPackageExecutionRecord | undefined> {
-    const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
-    if (positionQuery.kind !== "position") {
-      // A query failure, or a live aggregate that has already gone to zero
-      // while this cycle's own resolved exposure is still positive, is an
-      // unexplained pre-dispatch contradiction either way.
-      return undefined;
+    entryOrderLinkId: string,
+    ownExposure: string,
+  ): Promise<boolean> {
+    let resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId });
+
+    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
+      if (isProtectionNeutralized(resolution, ownExposure)) {
+        return true;
+      }
+      if (resolution.kind === "ambiguous") {
+        return false;
+      }
+
+      if (resolution.kind === "attributed") {
+        const active = [resolution.stop, resolution.take].find((leg) => !isTerminalOrderStatus(leg.orderStatus));
+        if (active === undefined) {
+          return true;
+        }
+
+        const cancelResult = await cancelEntryOrder({
+          config: this.deps.config,
+          bybit: this.deps.bybit,
+          payload: { category, symbol, orderId: active.orderId },
+        });
+        if (cancelResult.status === "skipped_live_execution" || !isAcknowledged(cancelResult.bybitResponse)) {
+          return false;
+        }
+      }
+
+      if (attempt < BOUNDED_ATTEMPTS - 1) {
+        await sleep(RETRY_DELAY_MS);
+        resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId });
+      }
     }
 
+    return false;
+  }
+
+  private async aggregateIsCompatible(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
+    const result = await this.deps.bybit.queryPositionForInstrument({ category: "linear", symbol: record.exchange_symbol });
+    const ownIsZero = compareDecimal(ownExposure, "0") === 0;
+
+    if (result.kind === "failure") {
+      return false;
+    }
+    if (result.kind === "no_position") {
+      return ownIsZero;
+    }
+
+    const expectedSide = record.desired_entry?.side === "long" ? "Buy" : "Sell";
+    if (result.row.side !== expectedSide) {
+      return false;
+    }
+    if (ownIsZero) {
+      return true;
+    }
+    return compareDecimal(result.row.size, ownExposure) >= 0;
+  }
+
+  private async closePositiveExposure(
+    command: CloseCommand,
+    record: EntryPackageExecutionRecord,
+    ownExposure: string,
+  ): Promise<PositionManagementHttpResult> {
+    let current = record;
+
+    if (current.close_order_link_id === null) {
+      const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
+      if (dispatched === undefined) {
+        return internalErrorResult();
+      }
+      current = dispatched;
+    }
+
+    const closeOrderLinkId = current.close_order_link_id;
+    if (closeOrderLinkId === null) {
+      return internalErrorResult();
+    }
+
+    const outcome = await this.resolveCloseOrderOutcome("linear", current.exchange_symbol, closeOrderLinkId, ownExposure);
+    if (outcome === "incomplete") {
+      return closeExecutionIncompleteResult();
+    }
+    if (outcome === "ambiguous") {
+      return internalErrorResult();
+    }
+    if (outcome === "not_found") {
+      const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
+      if (dispatched === undefined) {
+        return internalErrorResult();
+      }
+      const resentOutcome = await this.resolveCloseOrderOutcome(
+        "linear",
+        current.exchange_symbol,
+        closeOrderLinkId,
+        ownExposure,
+      );
+      if (resentOutcome === "incomplete") {
+        return closeExecutionIncompleteResult();
+      }
+      if (resentOutcome !== "matched") {
+        return internalErrorResult();
+      }
+      current = dispatched;
+    }
+
+    if (!(await this.verifyTerminalPostconditions(current, ownExposure))) {
+      return internalErrorResult();
+    }
+    return this.persistTerminal(command, current);
+  }
+
+  private async dispatchCloseOrder(
+    command: CloseCommand,
+    record: EntryPackageExecutionRecord,
+    ownExposure: string,
+  ): Promise<EntryPackageExecutionRecord | undefined> {
     const closeOrderLinkId =
       record.close_order_link_id ??
       buildEntryPackageOrderLinkId(command.strategyInstanceId, command.tradeCycleId, "close", record.generation);
 
-    let current: EntryPackageExecutionRecord = {
-      ...record,
-      close_order_link_id: closeOrderLinkId,
-      close_order_id: null,
-    };
-    await this.deps.correlationRepository.save(current);
+    let current = record;
+    if (record.close_order_link_id === null) {
+      current = { ...record, close_order_link_id: closeOrderLinkId, close_order_id: null };
+      await this.deps.correlationRepository.save(current);
+    }
 
     const closePayload: BybitMarketCloseOrderPayload = {
-      category,
-      symbol,
-      side: mapPositionSideToCloseSide(positionQuery.row.side),
+      category: "linear",
+      symbol: record.exchange_symbol,
+      side: record.desired_entry?.side === "long" ? "Sell" : "Buy",
       orderType: "Market",
-      qty: resolvedQty,
+      qty: ownExposure,
       reduceOnly: true,
       positionIdx: 0,
       orderLinkId: closeOrderLinkId,
     };
 
-    let closeResult;
+    let result;
     try {
-      closeResult = await executeMarketCloseOrder({
-        config: this.deps.config,
-        bybit: this.deps.bybit,
-        payload: closePayload,
-      });
+      result = await executeMarketCloseOrder({ config: this.deps.config, bybit: this.deps.bybit, payload: closePayload });
     } catch {
-      // close_order_link_id is already durably recorded above and is left
-      // exactly as it is — the next attempt resolves its fate rather than
-      // resending blindly.
+      return undefined;
+    }
+    if (result.status === "skipped_live_execution") {
       return undefined;
     }
 
-    if (closeResult.status === "skipped_live_execution") {
-      return undefined;
-    }
-
-    current = { ...current, close_order_id: readBybitOrderId(closeResult.bybitResponse) };
-    return current;
+    return { ...current, close_order_id: readBybitOrderId(result.bybitResponse) };
   }
 
-  // Always resolves and gates on the dispatched close order's own fate —
-  // run unconditionally, whether the identity was just dispatched in this
-  // same request or found already dispatched from an earlier one.
-  private async resolveMultiOwnerCloseFate(
-    command: CloseCommand,
-    record: EntryPackageExecutionRecord,
-    category: "linear",
-    symbol: string,
-  ): Promise<PositionManagementHttpResult> {
-    const closeOrderLinkId = record.close_order_link_id;
-    if (closeOrderLinkId === null) {
-      return internalErrorResult();
-    }
-
-    const resolvedQty = await this.resolveOwnExposure(record);
-    if (resolvedQty === undefined || resolvedQty === "0") {
-      // The entry order's fill facts are immutable once final — a
-      // zero/undefined re-resolution here contradicts the positive value
-      // that caused a close order to be dispatched for this generation in
-      // the first place.
-      return internalErrorResult();
-    }
-
-    const outcome = await this.resolveCloseOrderOutcome(category, symbol, closeOrderLinkId, resolvedQty);
-
-    if (outcome === "matched") {
-      return this.finalizeMultiOwnerClose(command, record);
-    }
-
-    if (outcome === "incomplete") {
-      return closeExecutionIncompleteResult();
-    }
-
-    if (outcome === "not_found") {
-      // Genuinely never created — the one case proven safe to resend under
-      // the same identity (shouldResendPendingAction's identical precedent
-      // for entry). Re-resolves fate after the resend rather than assuming
-      // success.
-      const dispatched = await this.dispatchMultiOwnerCloseOrder(command, record, category, symbol, resolvedQty);
-      if (dispatched === undefined) {
-        return internalErrorResult();
-      }
-      return this.resolveMultiOwnerCloseFate(command, dispatched, category, symbol);
-    }
-
-    return internalErrorResult();
-  }
-
-  // Bounded resolution of one close order's own fate, keyed by its own
-  // identity — never by the live aggregate. Delegates each attempt's
-  // single-shot classification to classifyOwnCloseOrderOutcome
-  // (packageConfirmation.ts, shared with EntryCycleRecoveryResolutionService
-  // — abi-entry-cycle-recovery-attribution-v1 design.md Decision 3), keeping
-  // this method's own bounded-retry loop and collapsing that shared
-  // primitive's richer outcome back to this method's own existing contract:
-  // "zero_fill" and "qty_mismatch" both mean this close order did not fully
-  // close the requested quantity ("incomplete") — this method has never
-  // needed to tell those two apart, unlike recovery.
   private async resolveCloseOrderOutcome(
     category: "linear",
     symbol: string,
     closeOrderLinkId: string,
-    resolvedQty: string,
+    ownExposure: string,
   ): Promise<"matched" | "incomplete" | "not_found" | "ambiguous"> {
-    const getCloseOrderPayload = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
-    const getCloseOrderHistoryPayload = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
+    const query = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
 
-    for (let attempt = 0; attempt < FINAL_VERIFY_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
       const outcome = await classifyOwnCloseOrderOutcome({
         bybit: this.deps.bybit,
-        getCloseOrderPayload,
-        getCloseOrderHistoryPayload,
-        expectedQty: resolvedQty,
+        getCloseOrderPayload: query,
+        getCloseOrderHistoryPayload: query,
+        expectedQty: ownExposure,
       });
 
       if (outcome.kind === "matched") {
@@ -501,18 +373,60 @@ export class CloseApplicationService {
       if (outcome.kind === "not_found") {
         return "not_found";
       }
-      // "ambiguous" (still live, or a query/classification failure): retry
-      // the outer loop rather than giving up on the first blip.
-
-      if (attempt < FINAL_VERIFY_ATTEMPTS - 1) {
-        await sleep(FINAL_VERIFY_RETRY_DELAY_MS);
+      if (attempt < BOUNDED_ATTEMPTS - 1) {
+        await sleep(RETRY_DELAY_MS);
       }
     }
-
     return "ambiguous";
   }
 
-  private async finalizeMultiOwnerClose(
+  private async verifyTerminalPostconditions(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
+    const orderLinkId = record.order_link_id;
+    if (orderLinkId === null) {
+      return false;
+    }
+    const entryQuery = {
+      category: "linear" as const,
+      symbol: record.exchange_symbol,
+      orderLinkId,
+      limit: "1" as const,
+    };
+
+    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
+      const entry = await classifyEntryOrderTerminality({
+        bybit: this.deps.bybit,
+        getEntryOrderPayload: entryQuery,
+        getEntryOrderHistoryPayload: entryQuery,
+      });
+      const protection = await resolveOwnAttachedProtection({
+        bybit: this.deps.bybit,
+        category: "linear",
+        symbol: record.exchange_symbol,
+        entryOrderLinkId: orderLinkId,
+      });
+
+      let closeMatched = compareDecimal(ownExposure, "0") === 0;
+      if (!closeMatched && record.close_order_link_id !== null) {
+        closeMatched =
+          (await this.resolveCloseOrderOutcome(
+            "linear",
+            record.exchange_symbol,
+            record.close_order_link_id,
+            ownExposure,
+          )) === "matched";
+      }
+
+      if (entry.kind === "terminal" && isProtectionNeutralized(protection, ownExposure) && closeMatched) {
+        return true;
+      }
+      if (attempt < BOUNDED_ATTEMPTS - 1) {
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+    return false;
+  }
+
+  private async persistTerminal(
     command: CloseCommand,
     record: EntryPackageExecutionRecord,
   ): Promise<PositionManagementHttpResult> {
@@ -524,6 +438,31 @@ export class CloseApplicationService {
     });
     return closedResult(command);
   }
+}
+
+function isProtectionNeutralized(resolution: AttachedProtectionResolution, ownExposure: string): boolean {
+  if (resolution.kind === "none") {
+    // No-fill entries never materialize native Partial children. For a
+    // positive own fill, clean none is not proof of terminal protection.
+    return compareDecimal(ownExposure, "0") === 0;
+  }
+  if (resolution.kind === "ambiguous") {
+    return false;
+  }
+  return isTerminalOrderStatus(resolution.stop.orderStatus) && isTerminalOrderStatus(resolution.take.orderStatus);
+}
+
+function isTerminalOrderStatus(orderStatus: string): boolean {
+  return FILLED_STATUSES.has(orderStatus) || TERMINAL_WITHOUT_FILL_STATUSES.has(orderStatus);
+}
+
+function isAcknowledged(response: unknown): boolean {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    "retCode" in response &&
+    (response as Record<string, unknown>).retCode === 0
+  );
 }
 
 function closedResult(command: CloseCommand): PositionManagementHttpResult {

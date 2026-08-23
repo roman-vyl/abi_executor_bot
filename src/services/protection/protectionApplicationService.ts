@@ -1,35 +1,23 @@
-import { setTimeout as sleep } from "node:timers/promises";
-
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
-import { classifyExactDecimalText } from "../../domain/entryPackageApi.js";
 import type { ProtectionCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
   internalErrorResult,
-  isNumericallyEqualExactDecimal,
   positionNotOpenResult,
   serializeProtectionApplied,
-  sharedScopeProtectionUnsupportedResult,
   unknownTradeCycleBindingResult,
   unsupportedExchangeScopeResult,
 } from "../../domain/positionManagementApi.js";
-import type { BybitAdapter, ValidatedOpenPositionRow } from "../../exchange/bybitAdapter.js";
+import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { InstrumentTradingRulesProvider } from "../../exchange/instrumentTradingRulesProvider.js";
-import { executeProtectionUpdate } from "../../execution/execution.js";
 import { getLiveExecutionMode } from "../../execution/liveGuard.js";
 import { confirmEntryPackage, isFillFactFinal } from "../entryPackage/packageConfirmation.js";
 import type { OpenPositionResolutionService } from "../openPosition/openPositionResolutionService.js";
 import type { DesiredProtectionState, ReconciliationOutcome } from "./nativeProtectionReconciliation.js";
 import { computeSurrogateTakePrice, reconcileNativePartialProtection } from "./nativeProtectionReconciliation.js";
-
-// Reuses the same bounded-retry shape packageConfirmation.ts already uses
-// elsewhere in ABI: a small fixed number of fresh re-reads, never a repeated
-// write.
-const READ_BACK_ATTEMPTS = 2;
-const READ_BACK_RETRY_DELAY_MS = 300;
 
 export type ProtectionApplicationServiceDeps = {
   config: AbiConfig;
@@ -43,23 +31,13 @@ export type ProtectionApplicationServiceDeps = {
   // Reused for the live-position gate so Bybit position-envelope validation,
   // category restriction, and side matching are defined exactly once.
   openPositionResolutionService: OpenPositionResolutionService;
-  // Only consumed by reconcileNativePartial() (this change's own
-  // non-production-decision method) — process()/apply() never reads this.
-  // Optional so every existing caller/test constructing
-  // ProtectionApplicationServiceDeps without it keeps compiling unchanged.
-  tradingRules?: InstrumentTradingRulesProvider;
+  tradingRules: InstrumentTradingRulesProvider;
 };
 
-type ReadBackMatch = {
-  confirmedStopPrice: string;
-  confirmedTakePrice: string | null;
-};
-
-// Executes an already-validated PUT .../protection command: durable-absence
-// shortcut, independent scope-ownership re-verification, the shared
-// live-position gate, and either an already-satisfied short-circuit (no
-// exchange write) or the Bybit write followed by a bounded read-back,
-// before reporting success. Writes nothing to the correlation store.
+// Executes an already-validated PUT .../protection command through one
+// production lifecycle: durable-absence shortcut, active-membership and
+// live-position checks, live guard, then exact-parent native Partial
+// reconciliation with fresh read-back. Writes nothing to correlation.
 export class ProtectionApplicationService {
   private readonly deps: ProtectionApplicationServiceDeps;
 
@@ -72,39 +50,20 @@ export class ProtectionApplicationService {
     return this.deps.mutex.withKeyLock(key, () => this.applyLocked(command));
   }
 
-  // Additive, non-production-decision sibling to apply()/process() (design.md
-  // Decision 11): reuses the same per-pair mutex.withKeyLock discipline, but
-  // reconciles this cycle's desired protection state against its actually
-  // attributable native Partial protection children via in-place amend only
-  // (nativeProtectionReconciliation.ts), never through
-  // /v5/position/trading-stop. process()/apply() are not modified or called
-  // from here, and nothing in this codebase's production paths calls this
-  // method — it exists for this change's own tests, and
-  // abi-native-partial-protection-cutover-v1's future production wiring.
-  async reconcileNativePartial(command: ProtectionCommand): Promise<ReconciliationOutcome> {
-    const key = correlationRecordKey(command.strategyInstanceId, command.tradeCycleId);
-    return this.deps.mutex.withKeyLock(key, () => this.reconcileNativePartialLocked(command));
-  }
-
-  private async reconcileNativePartialLocked(command: ProtectionCommand): Promise<ReconciliationOutcome> {
-    const record = this.deps.correlationRepository.get(command.strategyInstanceId, command.tradeCycleId);
-    if (
-      record === undefined ||
-      record.order_link_id === null ||
-      record.desired_entry === null ||
-      (record.exchange_category !== "linear" && record.exchange_category !== "spot") ||
-      this.deps.tradingRules === undefined
-    ) {
+  private async reconcileOwnProtection(command: ProtectionCommand, record: EntryPackageExecutionRecord): Promise<ReconciliationOutcome> {
+    if (record.order_link_id === null || record.desired_entry === null) {
       return { kind: "fail_closed", reason: "attribution_lost" };
     }
     const category = record.exchange_category;
-    const tradingRules = this.deps.tradingRules;
+    if (category !== "linear" && category !== "spot") {
+      return { kind: "fail_closed", reason: "attribution_lost" };
+    }
 
     const desiredResult = await resolveDesiredProtectionState({
       command,
       record,
       bybit: this.deps.bybit,
-      tradingRules,
+      tradingRules: this.deps.tradingRules,
     });
 
     if (!desiredResult.ok) {
@@ -167,17 +126,9 @@ export class ProtectionApplicationService {
       // "structurally impossible, verify anyway" check.
       return internalErrorResult();
     }
-    if (activeRecords.length > 1) {
-      // This scope currently has more than one active owner — PUT
-      // .../protection's single position-level write cannot be safely
-      // attributed to just one of them. Fails closed before the
-      // live-position check and before any exchange call. Structurally
-      // unreachable in production today: EntryPackageApplicationService's
-      // own admission guard never lets a second active owner come to exist
-      // (abi-same-side-virtual-exposure-ownership-v1) — this check is real
-      // and tested ahead of the change that will eventually make it
-      // reachable, not something protection itself needs to gate further.
-      return sharedScopeProtectionUnsupportedResult();
+    const activeSides = new Set(activeRecords.map((active) => active.desired_entry?.side ?? null));
+    if (activeSides.size !== 1 || activeSides.has(null) || !activeSides.has(record.desired_entry?.side ?? null)) {
+      return internalErrorResult();
     }
 
     const determination = await this.deps.openPositionResolutionService.determine(record);
@@ -192,87 +143,24 @@ export class ProtectionApplicationService {
       return internalErrorResult();
     }
 
-    // Already-satisfied short-circuit: the same live-position query that
-    // just confirmed the position is open also reports its current
-    // stop/take. If that already numerically matches what's requested,
-    // no exchange write is needed or attempted — reuses the identical
-    // match/zero-leg semantics the post-write read-back uses below, so
-    // there is exactly one definition of "matches the request".
-    const alreadySatisfied = evaluateReadBack(
-      { stopLoss: determination.confirmedStopLoss, takeProfit: determination.confirmedTakeProfit },
-      command.stopPrice,
-      command.takePrice,
-    );
-
-    if (alreadySatisfied !== undefined) {
-      // The already-satisfied path must not bypass the live-execution
-      // guard: if live writes are currently disallowed, this endpoint
-      // must still fail closed rather than hand back a real-looking
-      // acknowledgement of exchange state.
-      if (!getLiveExecutionMode(this.deps.config).canExecuteLive) {
-        return internalErrorResult();
-      }
-
-      return serializeProtectionApplied({
-        strategyInstanceId: command.strategyInstanceId,
-        tradeCycleId: command.tradeCycleId,
-        acceptedStopPrice: command.stopPrice,
-        acceptedTakePrice: command.takePrice,
-        confirmedStopPrice: alreadySatisfied.confirmedStopPrice,
-        confirmedTakePrice: alreadySatisfied.confirmedTakePrice,
-        verificationSucceeded: true,
-      });
-    }
-
-    const writeResult = await executeProtectionUpdate({
-      config: this.deps.config,
-      bybit: this.deps.bybit,
-      payload: {
-        category,
-        symbol: record.exchange_symbol,
-        stopLoss: command.stopPrice,
-        // "0" is Bybit's own convention for "remove this leg" on
-        // /v5/position/trading-stop.
-        takeProfit: command.takePrice ?? "0",
-      },
-    });
-
-    if (writeResult.status === "skipped_live_execution") {
+    if (!getLiveExecutionMode(this.deps.config).canExecuteLive) {
       return internalErrorResult();
     }
 
-    return this.confirmByReadBack(command, category, record.exchange_symbol);
-  }
-
-  private async confirmByReadBack(
-    command: ProtectionCommand,
-    category: "linear" | "spot",
-    symbol: string,
-  ): Promise<PositionManagementHttpResult> {
-    for (let attempt = 0; attempt < READ_BACK_ATTEMPTS; attempt += 1) {
-      const queryResult = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
-
-      if (queryResult.kind === "position") {
-        const match = evaluateReadBack(queryResult.row, command.stopPrice, command.takePrice);
-        if (match !== undefined) {
-          return serializeProtectionApplied({
-            strategyInstanceId: command.strategyInstanceId,
-            tradeCycleId: command.tradeCycleId,
-            acceptedStopPrice: command.stopPrice,
-            acceptedTakePrice: command.takePrice,
-            confirmedStopPrice: match.confirmedStopPrice,
-            confirmedTakePrice: match.confirmedTakePrice,
-            verificationSucceeded: true,
-          });
-        }
-      }
-
-      if (attempt < READ_BACK_ATTEMPTS - 1) {
-        await sleep(READ_BACK_RETRY_DELAY_MS);
-      }
+    const outcome = await this.reconcileOwnProtection(command, record);
+    if (outcome.kind === "fail_closed") {
+      return internalErrorResult();
     }
 
-    return internalErrorResult();
+    return serializeProtectionApplied({
+      strategyInstanceId: command.strategyInstanceId,
+      tradeCycleId: command.tradeCycleId,
+      acceptedStopPrice: command.stopPrice,
+      acceptedTakePrice: command.takePrice,
+      confirmedStopPrice: command.stopPrice,
+      confirmedTakePrice: command.takePrice,
+      verificationSucceeded: true,
+    });
   }
 }
 
@@ -368,7 +256,7 @@ export async function resolveDesiredProtectionState(input: {
     // getRules() throws on a transport/decode failure (see
     // BybitInstrumentTradingRulesProvider) — this is an ordinary reconciler
     // dependency failure, not a bug, so it must resolve to a typed
-    // fail-closed outcome rather than reject reconcileNativePartial()'s
+    // fail-closed outcome rather than reject the production reconciliation
     // returned Promise.
     let rules: Awaited<ReturnType<InstrumentTradingRulesProvider["getRules"]>>;
     try {
@@ -390,32 +278,4 @@ export async function resolveDesiredProtectionState(input: {
       take: { triggerPrice: takeTriggerPrice, qty: qtyResult.qty },
     },
   };
-}
-
-// A confirmed leg reading as numeric zero satisfies an accepted
-// take_price: null — Bybit reports an unset leg as a numeric zero (e.g.
-// "0.00"), not necessarily the string the write used. Returns undefined
-// when this attempt does not yet confirm the accepted values, so the caller
-// can retry within its bounded budget.
-function evaluateReadBack(
-  row: Pick<ValidatedOpenPositionRow, "stopLoss" | "takeProfit">,
-  acceptedStopPrice: string,
-  acceptedTakePrice: string | null,
-): ReadBackMatch | undefined {
-  if (row.stopLoss === undefined || !isNumericallyEqualExactDecimal(row.stopLoss, acceptedStopPrice)) {
-    return undefined;
-  }
-
-  if (acceptedTakePrice === null) {
-    if (row.takeProfit === undefined || !classifyExactDecimalText(row.takeProfit).zero) {
-      return undefined;
-    }
-    return { confirmedStopPrice: row.stopLoss, confirmedTakePrice: null };
-  }
-
-  if (row.takeProfit === undefined || !isNumericallyEqualExactDecimal(row.takeProfit, acceptedTakePrice)) {
-    return undefined;
-  }
-
-  return { confirmedStopPrice: row.stopLoss, confirmedTakePrice: row.takeProfit };
 }

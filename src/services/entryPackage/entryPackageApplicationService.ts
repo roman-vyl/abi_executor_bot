@@ -373,17 +373,12 @@ export class EntryPackageApplicationService {
         const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(identity.category, identity.symbol);
         const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
 
-        // TEMPORARY, per abi-same-side-virtual-exposure-ownership-v1 (Change 5):
-        // entry-package's own entry-order creation attaches position-level
-        // tpslMode: "Full" protection (bybitOrderMapper.ts) — a second
-        // same-side owner's own entry order would silently clobber the first
-        // owner's protection the instant it is placed, before pair-owned
-        // protection (Changes 6-8) exists to prevent that. Real same-side
-        // admission is therefore gated here until Change 8 (once pair-owned
-        // protection has replaced position-level TP/SL writes) removes this
-        // block and lets `classification` decide admission on its own — every
-        // outcome but "empty" conflicts for now, including "same_side".
-        if (classification !== "empty") {
+        // Native Partial protection and pair-scoped close are now the only
+        // production paths. A same-side sibling can therefore claim this
+        // scope without sharing or overwriting another cycle's lifecycle;
+        // opposite-side and structurally corrupt ownership still fail closed
+        // before the provisional durable write or any exchange write.
+        if (classification !== "empty" && classification !== "same_side") {
           return "conflict";
         }
 

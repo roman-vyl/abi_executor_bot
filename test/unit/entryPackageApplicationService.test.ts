@@ -946,13 +946,9 @@ test("a failing first request releases the mutex so a subsequent request for the
 
 // -- abi-same-side-virtual-exposure-ownership-v1: classifyScopeAdmission --
 //
-// Pure, synthetic tests of the real, permanent admission classification
-// createOrder()'s temporary production guard currently wraps (design.md
-// Decision 1) — proven correct here independent of that guard, which
-// currently collapses every non-"empty" outcome into a conflict. Active
-// records are hand-built, never produced via two real service.apply()
-// calls, since the guard makes that impossible to observe from outside
-// today (see design.md's own regression analysis).
+// Pure tests of the permanent side-aware admission classification used by
+// the production claim gate. Service-level tests below additionally prove
+// the same-side path through genuine apply() calls.
 
 test("classifyScopeAdmission: no other active records classifies as empty", () => {
   const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
@@ -1017,7 +1013,7 @@ test("classifyScopeAdmission: multiple other active records all sharing the requ
 // as the real model, not as an incidental same-instance case
 // (position-scope-exclusivity design.md; two cycles sharing one instance
 // is explicitly not ABI's responsibility to additionally forbid).
-test("two different pairs racing the same scope: exactly one is claimed, the other fails closed before any exchange write", async () => {
+test("two genuine same-side pairs racing the same scope are both claimed with canonical Partial entries", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
@@ -1026,14 +1022,55 @@ test("two different pairs racing the same scope: exactly one is claimed, the oth
       service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" })),
     ]);
 
-    const results = [first, second];
-    const succeeded = results.filter((result) => result.statusCode === 200);
-    const failed = results.filter((result) => result.statusCode !== 200);
+    assertApplied(first, "0.001");
+    assertApplied(second, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2);
+    assert.equal(bybit.createOrderCalls.every((call) => "tpslMode" in call && call.tpslMode === "Partial"), true);
+  });
+});
 
-    assert.equal(succeeded.length, 1, "exactly one pair claims the scope");
-    assert.equal(failed.length, 1);
-    assertInternalError(failed[0]!);
-    assert.equal(bybit.createOrderCalls.length, 1, "the losing pair never reaches the exchange");
+test("a sequential same-side join succeeds and a retry of the first pair does not create again", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const first = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
+    const second = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
+    const retry = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
+
+    assertApplied(first, "0.001");
+    assertApplied(second, "0.001");
+    assertApplied(retry, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2);
+    assert.equal(repo.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+  });
+});
+
+test("opposite-side and corrupt scope ownership fail before correlation or exchange write", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    assertApplied(
+      await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" })),
+      "0.001",
+    );
+    const callsBefore = bybit.createOrderCalls.length;
+    const opposite = await service.apply(
+      makeCommand({
+        strategyInstanceId: "instance-B",
+        tradeCycleId: "cycle-B1",
+        desiredEntry: makeDesiredEntry({ side: "short" }),
+      }),
+    );
+    assertInternalError(opposite);
+    assert.equal(bybit.createOrderCalls.length, callsBefore);
+    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
+  });
+
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save({ ...makeActiveRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1", side: "long" }), desired_entry: null });
+    const corrupt = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
+    assertInternalError(corrupt);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
   });
 });
 
@@ -1088,7 +1125,7 @@ test("a durably terminal-without-fill pair releases its scope for a different pa
   });
 });
 
-test("a crash between the scope claim and the exchange call keeps the scope held, blocking a different pair", async () => {
+test("an ambiguous same-side owner does not block another owner, while each write still fails independently", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.createOrder = async () => {
       throw new Error("transport failure");
@@ -1101,7 +1138,7 @@ test("a crash between the scope claim and the exchange call keeps the scope held
       makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
     );
     assertInternalError(otherPair);
-    assert.equal(bybit.createOrderCalls.length, 0, "neither pair ever reached a working exchange call yet");
+    assert.equal(bybit.createOrderCalls.length, 0, "the throwing override records no accepted exchange writes");
 
     bybit.createOrder = async (payload) => {
       bybit.createOrderCalls.push(payload);
@@ -1114,7 +1151,7 @@ test("a crash between the scope claim and the exchange call keeps the scope held
   });
 });
 
-test("liveness: a mix of same-scope and different-scope pairs, each its own strategy instance, completes without deadlock", async () => {
+test("liveness: many same-side same-scope and different-scope pairs all complete without deadlock", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
@@ -1136,11 +1173,11 @@ test("liveness: a mix of same-scope and different-scope pairs, each its own stra
 
     const results = await Promise.all(requests);
     assert.equal(results.length, 10);
-    assert.equal(bybit.createOrderCalls.length, 2, "exactly one winner per scope (BTCUSDT, ETHUSDT)");
+    assert.equal(bybit.createOrderCalls.length, 10);
   });
 });
 
-test("scope ownership survives restart: a held-status record blocks a different pair after replay", async () => {
+test("scope ownership survives restart: a replayed same-side owner permits another independent owner", async () => {
   const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-held-"));
   try {
     const path = join(dir, "correlation.jsonl");
@@ -1156,8 +1193,37 @@ test("scope ownership survives restart: a held-status record blocks a different 
       makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
     );
 
-    assertInternalError(result.httpResult);
-    assert.equal(result.bybit.createOrderCalls.length, 0, "the other pair never reaches the exchange after restart");
+    assertApplied(result.httpResult, "0.001");
+    assert.equal(result.bybit.createOrderCalls.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("scope ownership survives restart with multiple same-side owners and admits a third", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-multi-same-side-"));
+  try {
+    const path = join(dir, "correlation.jsonl");
+    const before = new EntryPackageCorrelationRepository(path);
+    await before.save(makeScopeTestRecord());
+    await before.save({
+      ...makeScopeTestRecord(),
+      strategy_instance_id: "instance-B",
+      trade_cycle_id: "cycle-B1",
+      order_link_id: "restart-link-2",
+      order_id: "restart-order-2",
+    });
+
+    const after = new EntryPackageCorrelationRepository(path);
+    assert.deepEqual(await after.replay(), { ok: true });
+    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+
+    const result = await runServiceAgainstRepository(
+      after,
+      makeCommand({ strategyInstanceId: "instance-C", tradeCycleId: "cycle-C1" }),
+    );
+    assertApplied(result.httpResult, "0.001");
+    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
