@@ -45,12 +45,25 @@ removal, no close integration.
   exists yet.
 - `InstrumentTradingRules` (`src/exchange/instrumentTradingRulesResponseDecoder.ts:3-7`) currently decodes
   only `minOrderQty`, `qtyStep`, `minNotionalValue` from `/v5/market/instruments-info`'s `lotSizeFilter` —
-  no `priceFilter` field (`tickSize`, `minPrice`, `maxPrice`) is decoded anywhere in this codebase today.
-  `BybitInstrumentTradingRulesProvider` (`src/exchange/instrumentTradingRulesProvider.ts`) already
-  fetches and caches the underlying response per `(category, symbol)`; adding fields to what it decodes
-  needs no new Bybit query. `minPrice`/`maxPrice` (Bybit's own accepted price bounds for the instrument)
-  are what let this change's surrogate TAKE formula (Decision 5) be exchange-valid by construction,
-  instead of by an unverified assumption about one instrument.
+  no `priceFilter` field is decoded anywhere in this codebase today. `BybitInstrumentTradingRulesProvider`
+  (`src/exchange/instrumentTradingRulesProvider.ts`) already fetches and caches the underlying response per
+  `(category, symbol)`; adding `tickSize` to what it decodes (Decision 3) needs no new Bybit query. This
+  change does **not** add `minPrice`/`maxPrice` here, or anywhere else — an earlier version of this design
+  did, and used them to claim the surrogate TAKE was "exchange-valid by construction." That claim is
+  retracted (Decision 5): a static instrument price filter is a different semantic object from a dynamic
+  order-price band, and neither was ever shown to bound a native Partial TP `triggerPrice` specifically.
+- `CurrentOrderPriceLimitsProvider` (`src/exchange/orderPriceLimits/{types,provider,decoder}.ts`,
+  `abi-current-order-price-limits-v1`, applied and archived — archive commit
+  `6ec349fcd02e0b908020a5eb74881cb79b6b949f`, canonical capability
+  `openspec/specs/order-price-limits/spec.md`) — a fresh, read-only, per-call query of Bybit's current
+  `/v5/market/price-limit`, returning `{ buyLimit, sellLimit, observedAtMs }` for one explicitly requested
+  `(category, symbol)`, uncached (a new query every call, matching this change's own no-caching
+  discipline for attribution). The canonical spec is explicit that the capability carries **no protection
+  or trading policy**: "SHALL NOT map position side to either limit, calculate surrogate prices, clamp a
+  desired price, interpret TP/SL or protection state." This change consumes it as an **injected, read-only
+  exchange dependency** rather than building its own provider/decoder for dynamic price boundaries — see
+  Decision 5 for exactly what is, and is not, assumed about what `buyLimit`/`sellLimit` mean for a native
+  Partial TP `triggerPrice` amend (that mapping is `NOT PROVEN`).
 - `ProtectionCommand` (`src/domain/positionManagementApi.ts:10-15`): `{ strategyInstanceId,
   tradeCycleId, stopPrice: string, takePrice: string | null }` — unchanged by this proposal.
 - `ProtectionApplicationService`'s existing `evaluateReadBack()`/`isNumericallyEqualExactDecimal()`
@@ -65,10 +78,11 @@ removal, no close integration.
 **Goals:**
 - Given a trade cycle's desired protection state, reconcile the actually attributable native Partial
   children to match it using only `amend` — never `create`, never `cancel`.
-- Represent `take_price = null` as a deterministic, tick-valid, far-away dormant surrogate TAKE, computed
-  from this cycle's own stable `planned_entry_price`, clamped into the instrument's own exchange-valid
-  price bounds, never from fluctuating current market price and never from a value that can move on its
-  own as later fills accumulate.
+- Keep `take_price = null` → deterministic, far-away dormant surrogate TAKE as this program's accepted
+  architectural decision — a full attributable `STOP + TAKE` pair always materialized, never a missing
+  leg, never derived from fluctuating current market price. This proposal fixes that architecture; it does
+  **not** fix the concrete surrogate price formula or its exchange-validity mechanism — see Decision 5 and
+  the blocking evidence task (tasks.md task 0).
 - Never act on stale evidence: re-read attributable state immediately before amending, and independently
   re-verify with a fresh read after.
 - Treat any classifier outcome other than `none`/`attributed` (including anything a future multi-fill
@@ -82,11 +96,11 @@ removal, no close integration.
   cutover-v1`.
 - Proving OCO-after-amend — stays `NOT PROVEN`, a `abi-native-partial-protection-cutover-v1` precondition
   only if that change's own design ends up depending on it.
-- A dynamic, mark-price-relative max-deviation guard Bybit may separately enforce beyond the static
-  `minPrice`/`maxPrice` instrument bounds — Decision 5 clamps against the static bounds only; a live
-  guard beyond that, if one exists, is an accepted residual gap (Risks section), not something this
-  design checks (checking it would require exactly the live-market-price dependency this design forbids
-  itself from taking).
+- Claiming the surrogate TAKE price is "exchange-valid by construction." Task 0's closed Demo evidence
+  (Decision 5) shows Bybit's current order-price limits (`buyLimit`/`sellLimit`, `order-price-limits`
+  capability) do not constrain a native Partial TP `triggerPrice` amend, and no other proven bound exists
+  for this V1 — the shipped formula makes no exchange-validity claim; validity is enforced only by Bybit's
+  own amend-time acceptance or rejection (Decision 7's existing `amend_rejected` fail-closed path).
 - Any real multi-fill materialization behavior (auto-resize, additional pairs) — Decision 8 explains why
   this change needs no special-case logic for it regardless of which shape Bybit actually produces.
 - Partial close / `exposure_fraction < 1` — outside this program's current scope (see master plan's
@@ -177,10 +191,15 @@ response it already fetches and caches. New failure reasons (`missing_price_filt
 existing fields.
 
 New `floorToStep(valueText: string, stepText: string): string` alongside the existing `ceilToStep`
-(`src/domain/exactDecimal.ts:85`) — same shape, opposite rounding direction. Needed because the surrogate
-TAKE (Decision 5) must round **away from the reference price** in both directions: up (ceil) for a LONG
-surrogate above entry, down (floor) for a SHORT surrogate below entry — a single rounding direction cannot
-serve both without sometimes rounding a surrogate closer to entry than intended.
+(`src/domain/exactDecimal.ts:85`) — same shape, opposite rounding direction. Needed so that whatever
+surrogate TAKE price Decision 5 eventually fixes can be tick-normalized in either direction: up (ceil)
+for a LONG surrogate above entry, down (floor) for a SHORT surrogate below entry — a single rounding
+direction cannot serve both without sometimes rounding a surrogate closer to entry than intended.
+
+`tickSize` is a static instrument-rule fact used only to normalize whatever `triggerPrice` this change
+ends up amending to — it says nothing about what that `triggerPrice` is allowed to be. Decision 5 records
+why no such allowed-range fact is used by this change at all (task 0's closed evidence ruled out the one
+candidate source this design considered).
 
 ### 4. Desired protection state resolution
 
@@ -262,97 +281,96 @@ the same pair-wide invariant `effective stop coverage == effective take coverage
 the master plan states, applied identically whether the take leg is the caller's real desired price or a
 computed surrogate.
 
-### 5. Surrogate TAKE price: stable reference, exchange-valid bounds by clamping
+### 5. Surrogate TAKE price: task 0 evidence closed — order-price-limits not applicable, formula fixed without a clamp
 
-**Reference: `desired_entry.planned_entry_price`, not `average_entry_price`.** The prior version of this
-design anchored the surrogate to `early_execution_observation.avg_execution_price`. That is wrong: a
-cumulative average execution price is defined to change on every additional partial fill of the same
-entry order — anchoring to it would make a *repeated, unchanged* `take_price: null` intent compute a
-*different* surrogate after a later fill, silently violating this section's own idempotency requirement
-and Decision 9's already-satisfied short-circuit (a later fill would make an already-reconciled surrogate
-look stale even though the caller's logical intent never changed). `desired_entry.planned_entry_price` has
-no such problem: per the Context section's own grep-confirmed invariant, it is set once when the entry is
-first bound and never rewritten in place for the life of one generation, through partial fills, through
-the eventual full fill, for as long as any own exposure from that generation remains live. It is therefore
-the correct stable, cycle-owned reference — same cycle, same generation, same number, no matter how many
-partial fills have landed by the time a given `PUT .../protection` call reconciles.
+**Task 0 evidence (closed 2026-08-19, Bybit Demo, linear `ETHUSDT`).** Following tasks.md task 0.1's exact
+procedure: a fresh `CurrentOrderPriceLimitsProvider.getCurrent({ category: "linear", symbol: "ETHUSDT" })`
+snapshot was obtained (`buyLimit: "2127.50"`, `sellLimit: "2044.06"`); a Market-entry conditional order with
+`tpslMode: "Partial"` filled, materializing an attributable native Partial `STOP + TAKE` pair
+(`orderLinkId: "abi-task0-mt0fc2f8"`); the exact TAKE child's `orderId`
+(`dccebe66-ec90-4281-a8bf-a2533afc371d`) was amended twice via `POST /v5/order/amend`, each followed by an
+independent fresh read-back (not reusing pre-amend evidence, per Decision 7 discipline):
 
-**Structure:**
+1. `triggerPrice: "2195.00"` (inside a plausible normal range) → `{ retCode: 0, retMsg: "OK" }`; read-back
+   confirmed `triggerPrice: "2195"`, `orderStatus: "Untriggered"`, same `orderId`/role/`parentOrderLinkId`.
+2. `triggerPrice: "3191.25"` (`1.5 × buyLimit`, well beyond the `buyLimit: "2127.50"` boundary from the
+   snapshot above) → **also** `{ retCode: 0, retMsg: "OK" }`; read-back confirmed `triggerPrice: "3191.25"`
+   actually applied, same `orderId`/role/`parentOrderLinkId`, no rejection, no different order state.
+
+Both amends were accepted identically regardless of the `buyLimit` boundary. Position and orders were then
+closed/cancelled by exact identity; final residual state was empty (no leftover orders or positions).
+
+**Determination (tasks.md task 0.1.7):** `/v5/market/price-limit`'s band does **not** constrain a native
+Partial TP child's `triggerPrice` amend — Bybit accepted a `triggerPrice` 50% beyond `buyLimit` with no
+different outcome than a normal-range amend. Per task 0.2's own caveat, this is evidence from **one
+instrument** (`ETHUSDT`, linear) — genuine doubt about cross-instrument applicability is not resolved by a
+single check, but the direction of the answer (not applicable, not a partial/direction-dependent
+applicability) leaves no reason to expect a different qualitative answer per-instrument, and no bound was
+found to even attempt to map `buyLimit`/`sellLimit` to LONG vs SHORT.
+
+**Revision (task 0.1.7c) — `CurrentOrderPriceLimitsProvider` dependency dropped from the surrogate
+formula.** The evidence rules out the only clamp-boundary source this design had proposed. No different,
+separately-proven boundary source exists for this V1 (task 0.1.7c explicitly forbids silently keeping the
+retracted mapping or inventing a replacement without its own evidence). The formula below therefore carries
+**no exchange-validity claim by construction** — it is a deterministic, tick-normalized offset from
+`planned_entry_price` with no clamp step and no dependency on `CurrentOrderPriceLimitsProvider` at all.
+Validity is enforced the same way this design already enforces it for every other amend in the write-plan
+(Decision 7): Bybit's own `retCode` on the `amendOrder` call is the actual gate — a rejection (whatever the
+reason, including a guard this design has no visibility into) fails that reconciliation attempt closed via
+the existing `amend_rejected` path, no different than any other amend rejection. This is a stated, accepted
+risk (see Risks below), not a silent one.
 
 ```
 reference = record's own desired_entry.planned_entry_price   // stable for the life of this generation
 
 if side == "long":
-  raw = reference * (1 + SURROGATE_TAKE_DISTANCE_RATIO)
-  candidate = ceilToStep(raw, tickSize)          // round further away from reference
+  raw = reference * (1 + SURROGATE_TAKE_DISTANCE_RATIO)   // SURROGATE_TAKE_DISTANCE_RATIO = 0.5
+  surrogateTakePrice = ceilToStep(raw, tickSize)           // round further away from reference
 else:
   raw = reference * (1 - SURROGATE_TAKE_DISTANCE_RATIO)
-  candidate = floorToStep(raw, tickSize)         // round further away from reference
-
-surrogateTakePrice = clampToInstrumentBounds(candidate, minPrice, maxPrice, tickSize, side)
+  surrogateTakePrice = floorToStep(raw, tickSize)          // round further away from reference
 ```
 
-**Exchange-valid by construction, via clamping — not by an unverified constant.** Change 7 already
-extends `InstrumentTradingRules` with `tickSize` (Decision 3); this design extends that same addition to
-also decode `priceFilter.minPrice` and `priceFilter.maxPrice` from the same already-fetched
-`/v5/market/instruments-info` response (no new Bybit query — same reasoning as `tickSize` itself). Given
-those, `clampToInstrumentBounds` guarantees a **provably in-range** result without ever having verified
-one specific instrument's behavior as a stand-in for all instruments:
+Deterministic (pure function of `reference`, `side`, `tickSize`, and the fixed ratio); anchored to a
+stable, truly immutable cycle-owned reference; correctly directional; tick-normalized; idempotent (the same
+`(planned_entry_price, side, tickSize)` always produces the same surrogate, so a repeated identical
+`take_price: null` intent never moves the surrogate, matching Decision 9, and never moves because of a
+later fill either, since the reference does not move with fills).
 
-```
-function clampToInstrumentBounds(candidate, minPrice, maxPrice, tickSize, side): Result<string, "surrogate_unrepresentable"> {
-  if (side == "long") {
-    if (candidate <= maxPrice) return ok(candidate);
-    clamped = floorToStep(maxPrice, tickSize);          // pull back inside the ceiling, stay tick-valid
-  } else {
-    if (candidate >= minPrice) return ok(candidate);
-    clamped = ceilToStep(minPrice, tickSize);            // pull up inside the floor, stay tick-valid
-  }
-  if (clamped == reference) return err("surrogate_unrepresentable");  // no room left to be a dormant TAKE at all
-  return ok(clamped);
-}
-```
+**What this revision removes, not carries forward as a "provisional default":** the retracted
+`clampToInstrumentBounds` function, `InstrumentTradingRules.minPrice`/`maxPrice` (already removed per the
+prior correction), and now also the `CurrentOrderPriceLimitsProvider` dependency in the surrogate path
+described in the previous revision of this Decision — `take.triggerPrice` resolution (Decision 4) no
+longer queries it at all, on either the null-take or the real-take path, and `computeSurrogateTakePrice`
+no longer returns a `surrogate_unrepresentable` failure (there is no bound left to make a candidate
+unrepresentable against).
 
-The 50%-distance preference (`SURROGATE_TAKE_DISTANCE_RATIO = 0.5`, unchanged from the prior version, kept
-as a named documented constant — task 4.1) is retained as the **preferred** distance precisely because it
-is now only a preference, not a claim: when `reference * 1.5` (long) / `reference * 0.5` (short) already
-falls inside `[minPrice, maxPrice]`, it is used as-is; when it does not, clamping pulls it back to the
-nearest tick-valid price still inside the instrument's own accepted range, which by definition Bybit
-itself defines as acceptable for that instrument — no live verification of any single instrument's
-tolerance is needed to trust that outcome. `surrogate_unrepresentable` (clamping would leave the surrogate
-exactly at the reference price, i.e. no room exists for *any* distinct dormant TAKE on this instrument's
-current bounds) is a new, explicit fail-closed reconciliation outcome — an edge case, expected to be rare
-to never in practice for real trading instruments, but named and handled rather than silently producing a
-surrogate indistinguishable from the entry price.
+**Original architecture kept (unchanged from revision v17).** `take_price = null` stays the logical HTTP
+semantics "strategy take disabled"; the exchange representation stays a full attributable `STOP + TAKE`
+pair, with TAKE materialized as a deterministic, far-away, dormant surrogate — never a missing leg
+(Context, Goals). This is an accepted, not-hidden V1 compromise: a surrogate is not claimed mathematically
+equivalent to no-TAKE.
 
-This satisfies every remaining policy requirement: deterministic (pure function of `reference`, `side`,
-`tickSize`, `minPrice`, `maxPrice`, and the fixed ratio — no current-price input at all); anchored to a
-stable, truly immutable cycle-owned reference; correctly directional (multiplicatively above for long,
-below for short — never produces a non-positive price for short, unlike a purely additive offset that
-could exceed 100%); tick-normalized; provably exchange-valid from static instrument data alone; and
-idempotent — the same `(planned_entry_price, side, tickSize, minPrice, maxPrice)` always produces the
-same surrogate, so a repeated identical `take_price: null` intent never moves the surrogate on a later
-reconcile call, matching Decision 9's already-satisfied short-circuit, and — because the reference no
-longer moves with later fills — never moves it *because of* a later fill either.
-
-**No live-Demo verification task is needed before this reaches production-reachable code.** The prior
-version gated the shipped constant on a bounded Bybit Demo check (formerly `tasks.md` task 4.2) because a
-single Demo instrument's acceptance of `reference * 1.5` was, at best, evidence about that one instrument,
-never a general proof. Clamping against `minPrice`/`maxPrice` removes the need for that evidence entirely:
-the result is in-range by construction for whichever instrument's own decoded bounds are used, for every
-instrument, without per-instrument verification. What clamping does **not** rule out — a dynamic,
-mark-price-relative maximum-deviation guard Bybit might separately enforce at order-placement time,
-beyond its static `minPrice`/`maxPrice` — is called out explicitly as a residual, accepted gap in Risks
-below, not silently assumed away.
+**What this design still fixes (unchanged from revision v17).** `take_price = null` stays the logical
+HTTP semantics "strategy take disabled"; the exchange representation stays a full attributable
+`STOP + TAKE` pair, with TAKE materialized as a deterministic, far-away, dormant surrogate — never a
+missing leg (Context, Goals). This is an accepted, not-hidden V1 compromise: a surrogate is not claimed
+mathematically equivalent to no-TAKE.
 
 **Rejected: a purely additive offset (`reference ± fixed_amount`).** Fails the "correctly directional,
 never produces a non-positive price" requirement for instruments trading at low absolute prices, and does
 not scale with the instrument's own price level the way a ratio does.
 
 **Rejected: deriving the surrogate from live current market price.** Explicitly disallowed by the master
-plan — a moving reference breaks idempotency (the same logical intent would compute a different surrogate
-depending on when it happens to reconcile), and reintroduces exactly the "fluctuating price" dependency
-this design otherwise avoids entirely by anchoring to `planned_entry_price` instead.
+plan — a moving reference breaks idempotency, and reintroduces exactly the "fluctuating price" dependency
+this design otherwise avoids by anchoring to `planned_entry_price`.
+
+**Rejected: clamping against `CurrentOrderPriceLimitsProvider`'s `buyLimit`/`sellLimit`.** This was the
+prior revision's proposed replacement for the retracted static `minPrice`/`maxPrice` clamp. Task 0's
+closed evidence (above) shows Bybit does not enforce this band against a native Partial TP child's
+`triggerPrice` amend at all, so clamping against it would add a dependency and a failure mode
+(`order_price_limits_unavailable`) that protects against nothing real, while doing nothing to establish
+actual exchange validity. Dropped entirely, not kept as an inert no-op check.
 
 ### 6. Reconciliation write-plan: qty travels in at most one amend call, STOP is always the qty carrier
 
@@ -478,10 +496,11 @@ own precondition if it turns out to need one) and does not assume OCO already ha
 ### 11. `ProtectionApplicationService` integration: additive, not wired to `process()`
 
 A new public method, `reconcileNativePartial(command: ProtectionCommand): Promise<ReconciliationOutcome>`,
-added to `ProtectionApplicationService`, following the flow Decision 4 now specifies: resolve this cycle's
-current authoritative own filled qty (reuse-if-final, else fresh `confirmEntryPackage()`, fail closed on
-`no_authoritative_qty`) → resolve desired state (Decision 4/5, including surrogate computation) →
-`reconcileNativePartialProtection()` (Decisions 1-9).
+added to `ProtectionApplicationService`, following the flow Decisions 4/5 now specify: resolve this
+cycle's current authoritative own filled qty (reuse-if-final, else fresh `confirmEntryPackage()`, fail
+closed on `no_authoritative_qty`) → resolve desired state, including `computeSurrogateTakePrice(...)`
+when `command.takePrice` is `null` (Decision 5 — no exchange dependency, pure function of
+`planned_entry_price`/`side`/`tickSize`) → `reconcileNativePartialProtection()` (Decisions 1-9).
 `process()` (the method `apply()`/the production HTTP path actually calls) is **not modified** — this is
 a sibling method, called only by this change's own tests and, later, by
 `abi-native-partial-protection-cutover-v1`'s production-decision switch. Locking: reuses the same
@@ -491,14 +510,15 @@ will.
 
 ## Risks / Trade-offs
 
-- [Bybit may enforce a dynamic, mark-price-relative maximum price-deviation guard for conditional/TP-SL
-  order placement, beyond its static `minPrice`/`maxPrice` instrument bounds — this design's clamping
-  (Decision 5) only guarantees validity against the static bounds, and checking a dynamic guard would
-  require exactly the live-market-price dependency this design deliberately avoids] → Accepted as an
-  explicit, stated gap, not a silent one: if such a guard exists and rejects a clamped-but-still-far
-  surrogate, the reconciliation attempt fails closed via the ordinary `amend_rejected` path (Decision 7)
-  — no silent fallback, no retry with a different distance. Closing this gap for real, if it ever proves
-  necessary, is `abi-native-partial-protection-cutover-v1`'s concern, not this change's.
+- [The surrogate TAKE formula (Decision 5) carries no exchange-validity claim by construction — task 0's
+  closed Demo evidence shows Bybit does not enforce `/v5/market/price-limit`'s band against a native
+  Partial TP `triggerPrice` amend, and no other proven boundary source exists for this V1, so the formula
+  is an unclamped tick-normalized offset from `planned_entry_price`] → Accepted as an explicit, stated
+  gap, not a silent one: if Bybit ever rejects a computed surrogate for any reason (a guard this evidence
+  did not surface, a future exchange-side change, or anything else), the reconciliation attempt fails
+  closed via the ordinary `amend_rejected` path (Decision 7) — no silent fallback, no retry with a
+  different distance. A separately-proven boundary source, if one is ever needed, is future work, not
+  invented here without its own evidence.
 - [At most two `amendOrder` calls per reconciliation attempt is not atomic — a partial failure between
   the two leaves one leg amended and one not] → Accepted, matching this codebase's established pattern
   for multi-step exchange writes (e.g. `CloseApplicationService`'s cancel-then-close sequence): Decision 7
@@ -519,6 +539,8 @@ will.
 Purely additive: no field on `EntryPackageExecutionRecord` changes shape or is added; no existing route,
 DTO, or on-disk record shape is touched; `ProtectionApplicationService.process()`'s existing behavior is
 unchanged. The only new runtime behavior is (a) one new adapter method nothing production calls yet, (b)
-one new decoded field on an already-fetched response, (c) one new pure step-rounding function, (d) one new
-reconciliation primitive, (e) one new, non-production-decision service method. Rollback is a plain revert;
-no data becomes unreadable in either direction.
+one new decoded field (`tickSize`) on an already-fetched response, (c) one new pure step-rounding
+function, (d) one new reconciliation primitive, (e) one new, non-production-decision service method.
+`CurrentOrderPriceLimitsProvider` (`abi-current-order-price-limits-v1`) is not consumed by this change —
+task 0's evidence ruled it out as the surrogate formula's boundary source. Rollback is a plain revert; no
+data becomes unreadable in either direction.

@@ -19,11 +19,13 @@ import type {
   BybitGetOrderHistoryPayload,
   BybitGetOrderHistoryForSymbolPayload,
   BybitMarketCloseOrderPayload,
+  BybitAmendOrderPayload,
 } from "../../src/exchange/bybitOrderMapper.js";
 
 export class FakeBybitAdapter implements BybitAdapter {
   readonly createOrderCalls: Array<BybitCreateOrderPayload | BybitMarketCloseOrderPayload> = [];
   readonly cancelOrderCalls: BybitCancelOrderPayload[] = [];
+  readonly amendOrderCalls: BybitAmendOrderPayload[] = [];
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
   readonly getOrderHistoryCalls: BybitGetOrderHistoryPayload[] = [];
@@ -66,6 +68,12 @@ export class FakeBybitAdapter implements BybitAdapter {
   marketPrice = "61000.0";
   setTradingStopResponse: unknown = { retCode: 0, result: {} };
   setTradingStopError: Error | null = null;
+  amendOrderResponse: unknown = { retCode: 0, result: {} };
+  amendOrderError: Error | null = null;
+  // Optional per-orderId overrides, checked before the flat default
+  // response above — lets a test express "this specific amend call fails
+  // while every other amend call in the same attempt still succeeds."
+  amendOrderResponseByOrderId = new Map<string, unknown>();
   // Queue of responses returned in call order (shifted on each call); when
   // exhausted, falls back to executionListResponse — lets a test express an
   // exact multi-page sequence (pagination) or a single steady-state answer.
@@ -113,6 +121,14 @@ export class FakeBybitAdapter implements BybitAdapter {
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {
     this.cancelOrderCalls.push(payload);
     return { retCode: 0, result: { orderLinkId: payload.orderLinkId } };
+  }
+
+  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
+    this.amendOrderCalls.push(payload);
+    if (this.amendOrderError !== null) {
+      throw this.amendOrderError;
+    }
+    return this.amendOrderResponseByOrderId.get(payload.orderId) ?? this.amendOrderResponse;
   }
 
   async cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown> {

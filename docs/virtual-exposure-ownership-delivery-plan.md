@@ -601,6 +601,39 @@
 > Полная surrogate-formula, её design decisions и требуемые тесты — design-фаза Change 7 (после этой
 > ревизии), не здесь.
 
+> **Ревизия v18 — Change 7 переиспользует archived `order-price-limits` capability вместо того, чтобы
+> самому проектировать получение dynamic price boundaries; applicability к TP triggerPrice остаётся
+> evidence-gated, не предполагается.** Отдельный generic OpenSpec change
+> `abi-current-order-price-limits-v1` (implementation + archive commit `6ec349fcd02e0b908020a5eb74881cb79b6b949f`,
+> canonical capability `openspec/specs/order-price-limits/spec.md`) уже реализован и заархивирован —
+> read-only `CurrentOrderPriceLimitsProvider` поверх свежего `/v5/market/price-limit`, отдающий
+> `{ buyLimit, sellLimit, observedAtMs }` без какой-либо protection/trading policy внутри себя.
+>
+> **Что это меняет в Change 7.** Design-вопрос 1 (surrogate TAKE distance, см. ревизию v17) больше не
+> предполагает, что Change 7 сам получает/декодирует dynamic price boundaries — эта exchange-dependency
+> уже существует отдельно и переиспользуется как injected read-only зависимость. Design-фаза Change 7
+> обязана явно ссылаться на archive/commit `6ec349f`, а не заново описывать provider/decoder/query для
+> этих limits.
+>
+> **Что явно НЕ утверждается.** `buyLimit`/`sellLimit` из `order-price-limits` описывают Bybit's current
+> order-price band — семантику **обычного** order placement. Применимость этой же семантики к amend
+> `triggerPrice` native Partial TP-ноги (объект amend Change 7) **не доказана** и не предполагается этой
+> ревизией: связь между "current order-price limits" и "допустимый диапазон triggerPrice для native
+> Partial TP" — отдельный evidence-вопрос, который Change 7's design-фаза обязана закрыть bounded
+> Demo-проверкой до того, как design зафиксирует любой mapping между `buyLimit`/`sellLimit` и
+> LONG/SHORT surrogate TAKE. До результата этой проверки design НЕ утверждает, что эти limits уже
+> являются допустимыми/exchange-valid границами для surrogate TP triggerPrice.
+>
+> **Remaining evidence question для design-фазы Change 7:** "Are Bybit current order-price limits
+> applicable to native Partial TP triggerPrice, and if so, which limit maps to which protection
+> direction?" — ответ не придумывается этим документом.
+>
+> **Что не меняется этой ревизией.** Никакого отдельного "Change 6.5" в §2 sequencing не добавляется —
+> `abi-current-order-price-limits-v1` уже реализован и заархивирован вне явной нумерации этой таблицы,
+> как самостоятельная generic capability, на которую Change 7 теперь ссылается как на dependency.
+> Остальная reconciliation-модель Change 7 (amend-only, own cumulative qty, fresh read-back, fail-closed
+> discipline, Change 8 как единственная activation) не меняется.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope

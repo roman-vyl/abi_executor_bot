@@ -11,6 +11,7 @@ import type {
   BybitGetOrderHistoryPayload,
   BybitGetOrderHistoryForSymbolPayload,
   BybitMarketCloseOrderPayload,
+  BybitAmendOrderPayload,
 } from "./bybitOrderMapper.js";
 
 export type BybitOrderSide = "Buy" | "Sell";
@@ -94,6 +95,10 @@ export interface BybitAdapter {
   queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult>;
   createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown>;
   cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown>;
+  // In-place order amend, scoped by orderId — the only Bybit write
+  // abi-native-partial-protection-lifecycle-v1 introduces. Not wired to any
+  // production caller; see nativeProtectionReconciliation.ts.
+  amendOrder(payload: BybitAmendOrderPayload): Promise<unknown>;
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
@@ -195,6 +200,10 @@ export class RestBybitAdapter implements BybitAdapter {
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {
     return this.signedPost("/v5/order/cancel", payload);
+  }
+
+  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
+    return this.signedPost("/v5/order/amend", payload);
   }
 
   async cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown> {
@@ -422,6 +431,10 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown> {
     return stub("cancelOrder", payload);
+  }
+
+  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
+    return stub("amendOrder", payload);
   }
 
   async cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown> {

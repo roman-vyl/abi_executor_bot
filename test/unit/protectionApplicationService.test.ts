@@ -26,6 +26,7 @@ type Ctx = {
   service: ProtectionApplicationService;
   bybit: FakeBybitAdapter;
   repo: EntryPackageCorrelationRepository;
+  tradingRules: FakeInstrumentTradingRulesProvider;
 };
 
 test("unknown pair fails closed without any exchange call", async () => {
@@ -560,6 +561,7 @@ async function withService(
       bybit,
       mutex,
     });
+    const tradingRules = new FakeInstrumentTradingRulesProvider();
 
     const service = new ProtectionApplicationService({
       config,
@@ -567,9 +569,10 @@ async function withService(
       correlationRepository: repo,
       mutex,
       openPositionResolutionService,
+      tradingRules,
     });
 
-    await fn({ service, bybit, repo });
+    await fn({ service, bybit, repo, tradingRules });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -660,6 +663,143 @@ function closedResponse(symbol = "BTCUSDT", category = "linear"): unknown {
     result: { category, list: [{ symbol, side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }] },
   };
 }
+
+// ---- reconcileNativePartial() (task 9.10) ----
+
+function childRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    symbol: "BTCUSDT",
+    orderLinkId: "",
+    orderId: "order-1",
+    parentOrderLinkId: "link-1",
+    stopOrderType: "PartialStopLoss",
+    createType: "CreateByPartialStopLoss",
+    orderStatus: "Untriggered",
+    triggerPrice: "99000",
+    qty: "0.001",
+    leavesQty: "0.001",
+    ...overrides,
+  };
+}
+
+function attributedPairResponse(overrides: { stop?: Record<string, unknown>; take?: Record<string, unknown> } = {}): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [
+        childRow({ orderId: "stop-1", stopOrderType: "PartialStopLoss", triggerPrice: "99000", qty: "10", ...overrides.stop }),
+        childRow({
+          orderId: "take-1",
+          stopOrderType: "PartialTakeProfit",
+          createType: "CreateByPartialTakeProfit",
+          triggerPrice: "103000",
+          qty: "10",
+          ...overrides.take,
+        }),
+      ],
+    },
+  };
+}
+
+// Wires amendOrder to mutate the same mutable rows setUpAttributedPair
+// installed on bybit.activeOrdersResponse, so a post-amend fresh read-back
+// actually observes the applied change — mirrors
+// nativeProtectionReconciliation.test.ts's own attributedPair helper.
+function makeAmendApplyBybit(bybit: FakeBybitAdapter, stopOverrides: Record<string, unknown> = {}, takeOverrides: Record<string, unknown> = {}): void {
+  const stopRow = childRow({ orderId: "stop-1", stopOrderType: "PartialStopLoss", triggerPrice: "99000", qty: "10", ...stopOverrides });
+  const takeRow = childRow({
+    orderId: "take-1",
+    stopOrderType: "PartialTakeProfit",
+    createType: "CreateByPartialTakeProfit",
+    triggerPrice: "103000",
+    qty: "10",
+    ...takeOverrides,
+  });
+  bybit.activeOrdersResponse = { retCode: 0, result: { category: "linear", list: [stopRow, takeRow] } };
+  bybit.orderHistoryForSymbolResponse = { retCode: 0, result: { category: "linear", list: [] } };
+
+  const originalAmendOrder = bybit.amendOrder.bind(bybit);
+  bybit.amendOrder = async (payload) => {
+    const response = await originalAmendOrder(payload);
+    const target = [stopRow, takeRow].find((row) => row.orderId === payload.orderId);
+    if (target !== undefined) {
+      if (payload.triggerPrice !== undefined) {
+        target.triggerPrice = payload.triggerPrice;
+      }
+      if (payload.qty !== undefined) {
+        stopRow.qty = payload.qty;
+        takeRow.qty = payload.qty;
+      }
+    }
+    return response;
+  };
+}
+
+test("reconcileNativePartial: a live, still-partial entry order with an available partial_fill observation reconciles toward that partial's cumulative_filled_qty, not blocked and not failed closed", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ earlyExecutionObservation: null }));
+    bybit.orderByLinkIdResponse = {
+      retCode: 0,
+      result: { category: "linear", list: [{ symbol: "BTCUSDT", orderStatus: "PartiallyFilled", qty: "0.001", cumExecQty: "0.0004", avgPrice: "99500" }] },
+    };
+    bybit.activeOrdersResponse = attributedPairResponse({ stop: { qty: "0.0004" }, take: { qty: "0.0004" } });
+    bybit.orderHistoryForSymbolResponse = { retCode: 0, result: { category: "linear", list: [] } };
+
+    const result = await service.reconcileNativePartial(
+      makeCommand({ stopPrice: "99000", takePrice: "103000" }),
+    );
+
+    assert.deepEqual(result, { kind: "already_satisfied" });
+  });
+});
+
+test("reconcileNativePartial: no fill evidence obtainable at all fails closed with no_authoritative_qty before any attribution/amend call", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ earlyExecutionObservation: null }));
+    bybit.orderByLinkIdResponse = { retCode: 0, result: { category: "linear", list: [] } };
+    bybit.orderHistoryResponse = { retCode: 0, result: { category: "linear", list: [] } };
+
+    const result = await service.reconcileNativePartial(makeCommand());
+
+    assert.deepEqual(result, { kind: "fail_closed", reason: "no_authoritative_qty" });
+    assert.equal(bybit.amendOrderCalls.length, 0);
+  });
+});
+
+test("reconcileNativePartial: final fill facts + take_price: null computes a surrogate desired state and reconciles it", async () => {
+  await withService(async ({ service, bybit, repo, tradingRules }) => {
+    tradingRules.defaultRules = { minOrderQty: "0.001", qtyStep: "0.001", minNotionalValue: "5", tickSize: "0.5" };
+    await repo.save(makeRecord());
+    makeAmendApplyBybit(bybit, { qty: "0.001", triggerPrice: "99000" }, { qty: "0.001", triggerPrice: "999" });
+
+    const result = await service.reconcileNativePartial(makeCommand({ stopPrice: "99000", takePrice: null }));
+
+    assert.deepEqual(result, { kind: "reconciled" });
+    assert.equal(bybit.amendOrderCalls.length, 1);
+    assert.equal(bybit.amendOrderCalls[0].orderId, "take-1");
+    // desired_entry.planned_entry_price is 100000, long side -> 150000
+    assert.equal(bybit.amendOrderCalls[0].triggerPrice, "150000");
+  });
+});
+
+test("reconcileNativePartial: existing apply()/process() regression, including the multi-owner guard-rejection test, is unaffected by this method's addition", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }));
+
+    const result = await service.apply(makeCommand());
+
+    assert.equal(result.statusCode, 422);
+    assert.deepEqual(result.body, {
+      error: {
+        code: "shared_scope_protection_unsupported",
+        message: "this scope currently has more than one active owner; protection is not yet supported for it",
+      },
+    });
+    assert.equal(bybit.setTradingStopCalls.length, 0);
+  });
+});
 
 function positionResponse(
   input: { side: "Buy" | "Sell"; stopLoss?: string; takeProfit?: string },

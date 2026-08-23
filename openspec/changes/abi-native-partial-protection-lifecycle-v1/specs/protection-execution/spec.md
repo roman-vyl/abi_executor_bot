@@ -25,14 +25,14 @@ SHALL NOT attempt to represent "take disabled" as the absence of an attached tak
 client's desired take is disabled, ABI SHALL compute a deterministic surrogate take-profit price from
 that trade cycle's own immutable planned entry price — a reference fixed once for the life of the trade
 cycle's current generation and never affected by any later partial fill — placed on the side of that
-price consistent with the trade cycle's own direction and within that instrument's own valid price
-bounds, and SHALL NOT derive it from current market price.
+price consistent with the trade cycle's own direction, and SHALL NOT derive it from current market price.
+This requirement does not assert that the resulting price is proven valid against any particular
+exchange price-bound mechanism; that determination is a separate, evidence-gated concern.
 
 #### Scenario: A disabled take reconciles to a surrogate, not a missing leg
 - **WHEN** a trade cycle's desired protection state has its take disabled
 - **THEN** ABI reconciles the take-profit child to a deterministic surrogate price derived from that
-  trade cycle's own immutable planned entry price, valid within that instrument's own accepted price
-  range
+  trade cycle's own immutable planned entry price
 - **AND** ABI does not attempt to leave the take-profit child absent, cancelled, or otherwise removed as
   a way of representing the disabled take
 
