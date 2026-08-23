@@ -16,7 +16,12 @@ import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInst
 import type { ExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
 import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
 import { BybitInstrumentTradingRulesProvider } from "../../src/exchange/instrumentTradingRulesProvider.js";
-import { EntryPackageApplicationService } from "../../src/services/entryPackage/entryPackageApplicationService.js";
+import {
+  classifyScopeAdmission,
+  EntryPackageApplicationService,
+} from "../../src/services/entryPackage/entryPackageApplicationService.js";
+import { BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS } from "../../src/services/entryPackage/ambiguousCreateAbsence.js";
+import { EntryCycleRecoveryResolutionService } from "../../src/services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
 import { makeTestConfig } from "../fixtures/config.js";
@@ -185,6 +190,68 @@ test("a fill discovered while confirming a desired-entry-change cancel fails saf
     const record = repo.get("instance-1", "cycle-1");
     assert.equal(record?.status, "applied");
     assert.equal(record?.order_link_id, firstOrderLinkId, "old binding is untouched, not replaced");
+  });
+});
+
+// abi-pair-scoped-close-execution-v1 design.md Decision 8: a durably
+// unresolved close-order identity (close_order_link_id set, status not
+// terminal_closed) is protected from a conflicting entry-package mutation
+// entirely by this existing, unmodified fill-evidence check — not by any
+// new guard. Simulates CloseApplicationService's durable side effect
+// (writing close_order_link_id before dispatch) directly at the repository
+// level, since this test only needs to prove entry-package's own admission
+// path, not close's.
+test("a cancel-intent request during an unresolved close does not transition the pair to absent or touch its close identity", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.orderByLinkIdResponseByLinkId.set(
+      orderLinkId,
+      orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]),
+    );
+
+    const beforeClose = repo.get("instance-1", "cycle-1");
+    assert.ok(beforeClose);
+    await repo.save({ ...beforeClose, close_order_link_id: "abi-ep-close-in-flight" });
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied", "never transitions to absent while the entry order shows a fill");
+    assert.equal(record?.close_order_link_id, "abi-ep-close-in-flight", "the durably recorded close identity is untouched");
+  });
+});
+
+test("a new non-null entry-package request during an unresolved close does not corrupt its close identity", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.orderByLinkIdResponseByLinkId.set(
+      orderLinkId,
+      orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]),
+    );
+
+    const beforeClose = repo.get("instance-1", "cycle-1");
+    assert.ok(beforeClose);
+    await repo.save({ ...beforeClose, close_order_link_id: "abi-ep-close-in-flight" });
+
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({ side: "short", initial_stop_price: "101000", initial_take_price: "97000" }),
+      }),
+    );
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.order_link_id, orderLinkId, "old binding is untouched, not replaced by a new generation");
+    assert.equal(record?.close_order_link_id, "abi-ep-close-in-flight");
   });
 });
 
@@ -389,6 +456,151 @@ test("create accepted but confirmation ambiguous returns a safe error", async ()
   });
 });
 
+test("corrective CANCEL turns a fresh full-budget ambiguous CREATE absence into durable EntryPackageAbsent", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    const applyResult = await service.apply(makeCommand());
+    assertInternalError(applyResult);
+
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.equal(ambiguous?.status, "unknown");
+    assert.equal(ambiguous?.pending_action, "create");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+    const orderReadsBefore = bybit.getOrderByLinkIdCalls.length;
+    const executionReadsBefore = bybit.getExecutionListCalls.length;
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(bybit.getOrderByLinkIdCalls.length - orderReadsBefore, 3);
+    assert.equal(bybit.getExecutionListCalls.length - executionReadsBefore, 3);
+    const absent = repo.get("instance-1", "cycle-1");
+    assert.equal(absent?.status, "absent");
+    assert.equal(absent?.pending_action, null);
+    assert.equal(absent?.order_link_id, null);
+    assert.equal(absent?.binding_history.length, 1);
+  });
+});
+
+test("same-side sibling aggregate exposure does not block corrective ambiguous-CREATE absence", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = openPositionResponse("Buy");
+    bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(result);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  });
+});
+
+test("corrective ambiguous-CREATE CANCEL fails closed when the completed evidence is aged out", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    const boundaryMs = Date.parse(ambiguous.current_binding_started_at) + BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS;
+    bybit.serverTimeResponse = serverTimeAfter(0, Math.ceil(boundaryMs / 1000) * 1000);
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    const stillAmbiguous = repo.get("instance-1", "cycle-1");
+    assert.equal(stillAmbiguous?.status, "unknown");
+    assert.equal(stillAmbiguous?.pending_action, "create");
+    assert.notEqual(stillAmbiguous?.order_link_id, null);
+  });
+});
+
+// Before abi-entry-cycle-recovery-convergence-v1, a recovery GET's
+// entry_order_not_found observation was purely diagnostic and could not
+// durably authorize anything — a later corrective CANCEL always had to
+// re-run its own full ambiguous-CREATE gate from scratch, independent of
+// what any prior GET had seen. Convergence changes this deliberately: a
+// recovery GET's entry_order_not_found observation is itself gated by the
+// exact same bounded/freshness evidence the corrective CANCEL path uses, so
+// once it resolves while genuinely fresh, ABI now durably converges the
+// record to `status:"absent"` immediately — the same "a positively
+// confirmed fact becomes durably trusted" pattern already used elsewhere
+// for a confirmed CANCEL. This does not weaken the corrective-CANCEL path's
+// own independent staleness check (see "corrective ambiguous-CREATE CANCEL
+// fails closed when the completed evidence is aged out" above, unaffected
+// by this change): a genuinely stale attempt with no prior durable
+// convergence still fails closed exactly as before. This test proves the
+// new, intended interaction for a GET that resolves while still fresh.
+test("a fresh recovery GET durably converges ambiguous-CREATE absence, so a later corrective CANCEL past the boundary trivially confirms it", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([]);
+    await service.apply(makeCommand());
+    const ambiguous = repo.get("instance-1", "cycle-1");
+    assert.ok(ambiguous?.current_binding_started_at);
+    const startedAtMs = Date.parse(ambiguous.current_binding_started_at);
+    bybit.openPositionsResponse = flatPositionResponse();
+    bybit.serverTimeResponse = serverTimeAfter(startedAtMs, 2000);
+    const recovery = new EntryCycleRecoveryResolutionService({
+      correlationRepository: repo,
+      bybit,
+      mutex: new KeyedMutex(),
+    });
+
+    const observation = await recovery.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+    assert.equal((observation.body as { recovery_state?: string }).recovery_state, "entry_order_not_found");
+
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "absent");
+    assert.equal(converged?.pending_action, null);
+    assert.equal(converged?.order_link_id, null);
+
+    const boundaryMs = startedAtMs + BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS;
+    bybit.serverTimeResponse = serverTimeAfter(0, Math.ceil(boundaryMs / 1000) * 1000);
+    const cancelResult = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertAbsent(cancelResult);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  });
+});
+
+test("positive own fill execution and opposite-side aggregate evidence each block corrective absence", async () => {
+  for (const setup of [
+    (bybit: FakeBybitAdapter) => {
+      bybit.executionListResponse = executionListResponse(Date.now());
+      bybit.openPositionsResponse = flatPositionResponse();
+    },
+    (bybit: FakeBybitAdapter) => {
+      bybit.openPositionsResponse = openPositionResponse("Sell");
+    },
+  ]) {
+    await withService(async ({ service, bybit, repo }) => {
+      bybit.orderByLinkIdResponse = orderList([]);
+      bybit.orderHistoryResponse = orderList([]);
+      await service.apply(makeCommand());
+      const ambiguous = repo.get("instance-1", "cycle-1");
+      assert.ok(ambiguous?.current_binding_started_at);
+      setup(bybit);
+      bybit.serverTimeResponse = serverTimeAfter(Date.parse(ambiguous.current_binding_started_at), 2000);
+
+      const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+      assertInternalError(result);
+      assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
+    });
+  }
+});
+
 test("create accepted but confirmation malformed never fabricates success: internal_error, status unknown, pending_action preserved", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = malformedResponse();
@@ -547,6 +759,8 @@ test("a legacy amend pending_action never resends CREATE, even when the exchange
       calculated_quantity: "0.001",
       order_link_id: "legacy-link-1",
       order_id: "legacy-order-1",
+      close_order_link_id: null,
+      close_order_id: null,
       generation: 1,
       status: "unknown",
       early_execution_observation: null,
@@ -750,6 +964,65 @@ test("a failing first request releases the mutex so a subsequent request for the
   });
 });
 
+// -- abi-same-side-virtual-exposure-ownership-v1: classifyScopeAdmission --
+//
+// Pure tests of the permanent side-aware admission classification used by
+// the production claim gate. Service-level tests below additionally prove
+// the same-side path through genuine apply() calls.
+
+test("classifyScopeAdmission: no other active records classifies as empty", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const classification = classifyScopeAdmission([self], makeCommand(), "long");
+  assert.equal(classification, "empty");
+});
+
+// The specific bug the architecture review found: without excluding the
+// requesting pair's own record first, a pair retrying while it is the
+// scope's only active owner would be classified as conflicting with
+// itself — turning a legitimate self-retry into a false conflict once the
+// temporary guard (which conflicts on anything but "empty") is applied.
+test("classifyScopeAdmission: the requesting pair's own record is excluded — sole self-ownership classifies as empty, not same_side", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const classification = classifyScopeAdmission(
+    [self],
+    makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
+    "long",
+  );
+  assert.equal(classification, "empty");
+});
+
+test("classifyScopeAdmission: the requesting pair's own record is excluded even alongside a genuinely different same-side sibling", () => {
+  const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
+  const sibling = makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" });
+  const classification = classifyScopeAdmission(
+    [self, sibling],
+    makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
+    "long",
+  );
+  assert.equal(classification, "same_side");
+});
+
+test("classifyScopeAdmission: another active record on the opposite side classifies as opposite_side", () => {
+  const other = makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "short" });
+  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  assert.equal(classification, "opposite_side");
+});
+
+test("classifyScopeAdmission: another active record with no usable desired_entry classifies as corrupt", () => {
+  const other = { ...makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }), desired_entry: null };
+  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  assert.equal(classification, "corrupt");
+});
+
+test("classifyScopeAdmission: multiple other active records all sharing the requested side classify as same_side", () => {
+  const others = [
+    makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }),
+    makeActiveRecord({ strategyInstanceId: "instance-3", tradeCycleId: "cycle-3", side: "long" }),
+  ];
+  const classification = classifyScopeAdmission(others, makeCommand(), "long");
+  assert.equal(classification, "same_side");
+});
+
 // Cross-pair scope tests deliberately vary both strategy_instance_id and
 // trade_cycle_id, not trade_cycle_id alone: the target V1 model is
 // "instance-A/cycle-A1 vs. instance-B/cycle-B1 both wanting BTCUSDT" —
@@ -760,7 +1033,7 @@ test("a failing first request releases the mutex so a subsequent request for the
 // as the real model, not as an incidental same-instance case
 // (position-scope-exclusivity design.md; two cycles sharing one instance
 // is explicitly not ABI's responsibility to additionally forbid).
-test("two different pairs racing the same scope: exactly one is claimed, the other fails closed before any exchange write", async () => {
+test("two genuine same-side pairs racing the same scope are both claimed with canonical Partial entries", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
@@ -769,14 +1042,55 @@ test("two different pairs racing the same scope: exactly one is claimed, the oth
       service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" })),
     ]);
 
-    const results = [first, second];
-    const succeeded = results.filter((result) => result.statusCode === 200);
-    const failed = results.filter((result) => result.statusCode !== 200);
+    assertApplied(first, "0.001");
+    assertApplied(second, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2);
+    assert.equal(bybit.createOrderCalls.every((call) => "tpslMode" in call && call.tpslMode === "Partial"), true);
+  });
+});
 
-    assert.equal(succeeded.length, 1, "exactly one pair claims the scope");
-    assert.equal(failed.length, 1);
-    assertInternalError(failed[0]!);
-    assert.equal(bybit.createOrderCalls.length, 1, "the losing pair never reaches the exchange");
+test("a sequential same-side join succeeds and a retry of the first pair does not create again", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const first = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
+    const second = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
+    const retry = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" }));
+
+    assertApplied(first, "0.001");
+    assertApplied(second, "0.001");
+    assertApplied(retry, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 2);
+    assert.equal(repo.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+  });
+});
+
+test("opposite-side and corrupt scope ownership fail before correlation or exchange write", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    assertApplied(
+      await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1" })),
+      "0.001",
+    );
+    const callsBefore = bybit.createOrderCalls.length;
+    const opposite = await service.apply(
+      makeCommand({
+        strategyInstanceId: "instance-B",
+        tradeCycleId: "cycle-B1",
+        desiredEntry: makeDesiredEntry({ side: "short" }),
+      }),
+    );
+    assertInternalError(opposite);
+    assert.equal(bybit.createOrderCalls.length, callsBefore);
+    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
+  });
+
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save({ ...makeActiveRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A1", side: "long" }), desired_entry: null });
+    const corrupt = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
+    assertInternalError(corrupt);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
   });
 });
 
@@ -831,7 +1145,7 @@ test("a durably terminal-without-fill pair releases its scope for a different pa
   });
 });
 
-test("a crash between the scope claim and the exchange call keeps the scope held, blocking a different pair", async () => {
+test("an ambiguous same-side owner does not block another owner, while each write still fails independently", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.createOrder = async () => {
       throw new Error("transport failure");
@@ -844,7 +1158,7 @@ test("a crash between the scope claim and the exchange call keeps the scope held
       makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
     );
     assertInternalError(otherPair);
-    assert.equal(bybit.createOrderCalls.length, 0, "neither pair ever reached a working exchange call yet");
+    assert.equal(bybit.createOrderCalls.length, 0, "the throwing override records no accepted exchange writes");
 
     bybit.createOrder = async (payload) => {
       bybit.createOrderCalls.push(payload);
@@ -857,7 +1171,7 @@ test("a crash between the scope claim and the exchange call keeps the scope held
   });
 });
 
-test("liveness: a mix of same-scope and different-scope pairs, each its own strategy instance, completes without deadlock", async () => {
+test("liveness: many same-side same-scope and different-scope pairs all complete without deadlock", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
@@ -879,11 +1193,11 @@ test("liveness: a mix of same-scope and different-scope pairs, each its own stra
 
     const results = await Promise.all(requests);
     assert.equal(results.length, 10);
-    assert.equal(bybit.createOrderCalls.length, 2, "exactly one winner per scope (BTCUSDT, ETHUSDT)");
+    assert.equal(bybit.createOrderCalls.length, 10);
   });
 });
 
-test("scope ownership survives restart: a held-status record blocks a different pair after replay", async () => {
+test("scope ownership survives restart: a replayed same-side owner permits another independent owner", async () => {
   const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-held-"));
   try {
     const path = join(dir, "correlation.jsonl");
@@ -899,8 +1213,37 @@ test("scope ownership survives restart: a held-status record blocks a different 
       makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }),
     );
 
-    assertInternalError(result.httpResult);
-    assert.equal(result.bybit.createOrderCalls.length, 0, "the other pair never reaches the exchange after restart");
+    assertApplied(result.httpResult, "0.001");
+    assert.equal(result.bybit.createOrderCalls.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("scope ownership survives restart with multiple same-side owners and admits a third", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "abi-scope-restart-multi-same-side-"));
+  try {
+    const path = join(dir, "correlation.jsonl");
+    const before = new EntryPackageCorrelationRepository(path);
+    await before.save(makeScopeTestRecord());
+    await before.save({
+      ...makeScopeTestRecord(),
+      strategy_instance_id: "instance-B",
+      trade_cycle_id: "cycle-B1",
+      order_link_id: "restart-link-2",
+      order_id: "restart-order-2",
+    });
+
+    const after = new EntryPackageCorrelationRepository(path);
+    assert.deepEqual(await after.replay(), { ok: true });
+    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+
+    const result = await runServiceAgainstRepository(
+      after,
+      makeCommand({ strategyInstanceId: "instance-C", tradeCycleId: "cycle-C1" }),
+    );
+    assertApplied(result.httpResult, "0.001");
+    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -974,6 +1317,8 @@ function makeScopeTestRecord(
     calculated_quantity: orderLinkId === null ? null : "0.001",
     order_link_id: orderLinkId,
     order_id: orderLinkId === null ? null : "restart-order-1",
+    close_order_link_id: null,
+    close_order_id: null,
     generation: 1,
     status: overrides.status ?? "applied",
     early_execution_observation: null,
@@ -1000,6 +1345,8 @@ function makeTerminalClosedRecord(): EntryPackageExecutionRecord {
     calculated_quantity: "0.001",
     order_link_id: "closed-link-1",
     order_id: "closed-order-1",
+    close_order_link_id: null,
+    close_order_id: null,
     generation: 1,
     status: "terminal_closed",
     early_execution_observation: null,
@@ -1062,6 +1409,36 @@ function makeDesiredEntry(overrides: Partial<DesiredEntryDto> = {}): DesiredEntr
   };
 }
 
+function makeActiveRecord(overrides: {
+  strategyInstanceId: string;
+  tradeCycleId: string;
+  side: "long" | "short";
+}): EntryPackageExecutionRecord {
+  return {
+    strategy_instance_id: overrides.strategyInstanceId,
+    trade_cycle_id: overrides.tradeCycleId,
+    ticker: "BTCUSDT.P",
+    exchange_symbol: "BTCUSDT",
+    exchange_category: "linear",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    desired_entry: makeDesiredEntry({ side: overrides.side }),
+    risk_multiplier: "1",
+    calculated_quantity: "0.001",
+    order_link_id: "link-1",
+    order_id: "order-1",
+    close_order_link_id: null,
+    close_order_id: null,
+    generation: 1,
+    status: "applied",
+    early_execution_observation: null,
+    binding_history: [],
+    pending_action: null,
+    current_binding_started_at: "2026-01-01T00:00:00.000Z",
+    first_fill_at_ms: null,
+  };
+}
+
 function liveOrder(
   overrides: Partial<{
     orderStatus: string;
@@ -1083,6 +1460,41 @@ function liveOrder(
 
 function orderList(items: unknown[]): unknown {
   return { retCode: 0, result: { list: items } };
+}
+
+function flatPositionResponse(): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }],
+    },
+  };
+}
+
+function openPositionResponse(side: "Buy" | "Sell"): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", side, size: "0.001", positionIdx: 0, avgPrice: "100000", openTime: 1 }],
+    },
+  };
+}
+
+function executionListResponse(execTimeMs: number): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", execType: "Trade", execTime: String(execTimeMs) }],
+      nextPageCursor: "",
+    },
+  };
+}
+
+function serverTimeAfter(baseMs: number, deltaMs: number): unknown {
+  return { retCode: 0, result: { timeSecond: String(Math.ceil((baseMs + deltaMs) / 1000)) } };
 }
 
 // The preflight query before a resent cancel (and the cancel-only replace

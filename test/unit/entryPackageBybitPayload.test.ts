@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { mapEntryPackageToBybit } from "../../src/exchange/bybitOrderMapper.js";
@@ -19,7 +20,9 @@ test("long package produces Buy side, falls_to trigger, and always includes take
 
   assert.equal(payloads.createEntryOrder.side, "Buy");
   assert.equal(payloads.createEntryOrder.triggerDirection, 2);
-  assert.equal(payloads.createEntryOrder.tpslMode, "Full");
+  assert.equal(payloads.createEntryOrder.tpslMode, "Partial");
+  assert.equal(payloads.createEntryOrder.tpOrderType, "Market");
+  assert.equal(payloads.createEntryOrder.slOrderType, "Market");
   assert.equal(payloads.createEntryOrder.qty, "0.001");
   assert.equal(payloads.createEntryOrder.stopLoss, "99000");
   assert.equal(payloads.createEntryOrder.takeProfit, "103000");
@@ -43,6 +46,7 @@ test("short package produces Sell side and rises_to trigger", () => {
 
   assert.equal(payloads.createEntryOrder.side, "Sell");
   assert.equal(payloads.createEntryOrder.triggerDirection, 1);
+  assert.equal(payloads.createEntryOrder.tpslMode, "Partial");
   assert.equal(payloads.createEntryOrder.takeProfit, "97000");
 });
 
@@ -63,4 +67,12 @@ test("category comes from the input identity, not global config, across all four
   assert.equal(payloads.cancelEntryOrder.category, "spot");
   assert.equal(payloads.getEntryOrder.category, "spot");
   assert.equal(payloads.getEntryOrderHistory.category, "spot");
+});
+
+test("canonical production mapper contains no Full mode, alternate Partial builder, or owner-count switch", () => {
+  const source = readFileSync(new URL("../../src/exchange/bybitOrderMapper.ts", import.meta.url), "utf8");
+
+  assert.equal(source.includes('tpslMode: "Full"'), false);
+  assert.equal(source.includes("buildPartialProtectionEntryOrderPayload"), false);
+  assert.equal(/ownerCount|activeRecords\.length/.test(source), false);
 });

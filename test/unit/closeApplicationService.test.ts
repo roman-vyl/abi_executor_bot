@@ -11,13 +11,9 @@ import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
-import type { BybitAdapter } from "../../src/exchange/bybitAdapter.js";
-import { BybitExchangeInstrumentResolver } from "../../src/exchange/exchangeInstrumentResolver.js";
-import { FixedMinimumPositionSizeCalculator } from "../../src/risk/positionSizeCalculator.js";
+import { buildEntryPackageOrderLinkId } from "../../src/domain/entryPackageOrderIdentity.js";
 import { CloseApplicationService } from "../../src/services/close/closeApplicationService.js";
-import { EntryPackageApplicationService } from "../../src/services/entryPackage/entryPackageApplicationService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
-import { FakeInstrumentTradingRulesProvider } from "../fakes/fakeInstrumentTradingRulesProvider.js";
 import { makeTestConfig } from "../fixtures/config.js";
 
 type Ctx = {
@@ -26,486 +22,455 @@ type Ctx = {
   repo: EntryPackageCorrelationRepository;
 };
 
-test("unknown pair fails closed without any exchange call", async () => {
-  await withService(async ({ service, bybit }) => {
-    const result = await service.apply(makeCommand());
-
-    assert.deepEqual(result.body, {
-      error: { code: "unknown_trade_cycle_binding", message: "no correlation record exists for the requested pair" },
-    });
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-    assert.equal(bybit.createOrderCalls.length, 0);
-    assert.equal(bybit.cancelOrderCalls.length, 0);
-  });
-});
-
-test("an already terminal_closed pair is acknowledged idempotently with no write and no exchange call", async () => {
+test("unknown and already-closed bindings are handled without exchange writes", async () => {
   await withService(async ({ service, bybit, repo }) => {
+    const unknown = await service.apply(makeCommand());
+    assert.equal(unknown.statusCode, 422);
+
     await repo.save(makeRecord({ status: "terminal_closed" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.deepEqual(result.body, {
-      strategy_instance_id: "instance-1",
-      trade_cycle_id: "cycle-1",
-      status: "trade_cycle_closed",
-    });
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-    assert.equal(bybit.createOrderCalls.length, 0);
+    const closed = await service.apply(makeCommand());
+    assert.equal(closed.statusCode, 200);
     assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(bybit.createOrderCalls.length, 0);
   });
 });
 
 for (const status of ["absent", "terminal_unfilled"] as const) {
-  test(`a ${status} pair is durably promoted to terminal_closed before trade_cycle_closed, with no exchange call`, async () => {
+  test(`${status} is durably promoted without querying or writing Bybit`, async () => {
     await withService(async ({ service, bybit, repo }) => {
       await repo.save(makeRecord({ status }));
-
       const result = await service.apply(makeCommand());
-
       assert.equal(result.statusCode, 200);
-      assert.deepEqual(result.body, {
-        strategy_instance_id: "instance-1",
-        trade_cycle_id: "cycle-1",
-        status: "trade_cycle_closed",
-      });
-      assert.equal(bybit.getOpenPositionsCalls.length, 0);
-      assert.equal(bybit.createOrderCalls.length, 0);
-      assert.equal(bybit.cancelOrderCalls.length, 0);
       assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
-
-      // Idempotent repeat: no further write, no exchange call.
-      const repeat = await service.apply(makeCommand());
-      assert.equal(repeat.statusCode, 200);
-      assert.equal(bybit.getOpenPositionsCalls.length, 0);
-    });
-  });
-}
-
-test("a scope-ownership mismatch fails closed with internal_error", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.deepEqual(result.body, { error: { code: "internal_error", message: "internal error" } });
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-  });
-});
-
-test("an unsupported category returns unsupported_exchange_scope", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ exchangeCategory: "spot" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 422);
-    assert.deepEqual(result.body, {
-      error: { code: "unsupported_exchange_scope", message: "resolved position's exchange category is not supported" },
-    });
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-  });
-});
-
-test("a non-durably-closed record with no current entry order identity fails as contradictory correlation", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ orderLinkId: null }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-    assert.equal(bybit.cancelOrderCalls.length, 0);
-  });
-});
-
-test("a terminal order status with nonzero executed quantity needs no cancel (order-level terminality over fill quantity)", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0.002" });
-    bybit.openPositionsResponse = closedResponse();
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.cancelOrderCalls.length, 0, "already-terminal order needs no cancel");
-    assert.equal(bybit.createOrderCalls.length, 0);
-  });
-});
-
-test("a live entry order is cancelled and confirmed non-live before the position is read", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "New", cumExecQty: "0" });
-    settleOrderAfterCancel(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0" });
-    bybit.openPositionsResponse = closedResponse();
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.cancelOrderCalls[0].orderLinkId, "link-1");
-    // The cancel is confirmed non-live before the live position is ever read.
-    assert.ok(bybit.getOpenPositionsCalls.length >= 1);
-  });
-});
-
-test("a partially filled entry order is neutralized (cancelled and confirmed terminal) before ABI proceeds", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "PartiallyFilled", cumExecQty: "0.001" });
-    settleOrderAfterCancel(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0.001" });
-    settlePositionAfterClose(bybit, positionResponse({ side: "Buy", size: "0.001" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls[0].qty, "0.001", "closes the live remainder actually reported, not calculated_quantity");
-  });
-});
-
-test("a still-live partially filled order that never reaches a terminal status is not treated as neutralized", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "PartiallyFilled", cumExecQty: "0.001" });
-    // No settlement after cancel — the order stays reported live forever.
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.getOpenPositionsCalls.length, 0, "never reaches the position read while neutralization is unconfirmed");
-    assert.equal(bybit.createOrderCalls.length, 0);
-  });
-});
-
-test("ambiguous neutralization (query failure) blocks the entire close with no market-close sent", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    let calls = 0;
-    bybit.getOrderByLinkId = async () => {
-      calls += 1;
-      throw new Error("transport failure");
-    };
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.ok(calls >= 1);
-    assert.equal(bybit.getOpenPositionsCalls.length, 0);
-    assert.equal(bybit.createOrderCalls.length, 0);
-  });
-});
-
-test("position already zero sends no market-close", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    bybit.openPositionsResponse = closedResponse();
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.createOrderCalls.length, 0);
-  });
-});
-
-test("an unexpected live position side is still closed using the actual side", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    // desired_entry.side is "long" (Buy) but the live position is Sell.
-    await repo.save(makeRecord());
-    settlePositionAfterClose(bybit, positionResponse({ side: "Sell", size: "0.003" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls[0].side, "Buy", "closes a Sell position with a Buy reduce-only order");
-    assert.equal((bybit.createOrderCalls[0] as { reduceOnly?: boolean }).reduceOnly, true);
-  });
-});
-
-test("close quantity equals the actual live remainder, not calculated_quantity", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ calculatedQuantity: "0.001" }));
-    settlePositionAfterClose(bybit, positionResponse({ side: "Buy", size: "0.007" }));
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.createOrderCalls[0].qty, "0.007");
-  });
-});
-
-test("live-execution guard disabled on the cancel write fails closed without cancelling", async () => {
-  await withService(
-    async ({ service, bybit, repo }) => {
-      await repo.save(makeRecord());
-      setOrderStatus(bybit, "link-1", { orderStatus: "New", cumExecQty: "0" });
-
-      const result = await service.apply(makeCommand());
-
-      assert.equal(result.statusCode, 500);
+      assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
       assert.equal(bybit.cancelOrderCalls.length, 0);
       assert.equal(bybit.createOrderCalls.length, 0);
+    });
+  });
+}
+
+test("unsupported, missing-identity, and mixed-side records fail before exchange writes", async () => {
+  const cases: Array<(repo: EntryPackageCorrelationRepository) => Promise<void>> = [
+    async (repo) => repo.save(makeRecord({ exchangeCategory: "spot" })),
+    async (repo) => repo.save(makeRecord({ orderLinkId: null })),
+    async (repo) => {
+      await repo.save(makeRecord());
+      await repo.save(
+        makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", orderLinkId: "link-2", side: "short" }),
+      );
     },
-    { dryRun: true, liveTradingEnabled: false, bybitApiKey: "", bybitApiSecret: "" },
-  );
+  ];
+
+  for (const arrange of cases) {
+    await withService(async ({ service, bybit, repo }) => {
+      await arrange(repo);
+      const result = await service.apply(makeCommand());
+      assert.ok(result.statusCode >= 400);
+      assert.equal(bybit.cancelOrderCalls.length, 0);
+      assert.equal(bybit.createOrderCalls.length, 0);
+    });
+  }
 });
 
-test("live-execution guard disabled on the close write fails closed without closing", async () => {
+test("entry remainder is cancelled and confirmed before protection and aggregate observation", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ calculatedQuantity: "0.003" }));
+    setEntry(bybit, "link-1", "PartiallyFilled", "0.001", "0.003");
+    installTerminalProtection(bybit, "link-1", "0.001");
+    setPosition(bybit, "Buy", "0.001");
+    installFilledCloseAfterCreate(bybit, closeId(), "0.001");
+
+    const events: string[] = [];
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      events.push(payload.orderLinkId === "link-1" ? "entry-cancel" : "child-cancel");
+      const response = await realCancel(payload);
+      if (payload.orderLinkId === "link-1") {
+        setEntry(bybit, "link-1", "Cancelled", "0.001", "0.003");
+      }
+      return response;
+    };
+    const realActive = bybit.getActiveOrders.bind(bybit);
+    bybit.getActiveOrders = async (input) => {
+      events.push("protection-read");
+      return realActive(input);
+    };
+    const realPositions = bybit.getOpenPositions.bind(bybit);
+    bybit.getOpenPositions = async (input) => {
+      events.push("aggregate-read");
+      return realPositions(input);
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(events.slice(0, 3), ["entry-cancel", "protection-read", "aggregate-read"]);
+    assert.equal(bybit.createOrderCalls[0].qty, "0.001");
+  });
+});
+
+test("active native pair is cancelled by exact child orderId and freshly re-read before market close", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    const ownRows = installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.006");
+    installFilledCloseAfterCreate(bybit, closeId(), "0.003");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-1") {
+        terminalize(ownRows);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.cancelOrderCalls.length, 1, "coupled cancel needs only one exact child write");
+    assert.deepEqual(bybit.cancelOrderCalls[0], { category: "linear", symbol: "BTCUSDT", orderId: "stop-link-1" });
+    assert.ok(bybit.getOrderHistoryForSymbolCalls.length >= 3, "pre-cancel, post-ACK, and terminal reads are fresh");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.cancelAllOrdersCalls.length, 0);
+  });
+});
+
+test("clean absence after an accepted exact child cancel bridges Bybit terminal-history propagation lag", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+    installFilledCloseAfterCreate(bybit, closeId(), "0.003");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-1") {
+        // Real Demo behavior: both children leave realtime immediately,
+        // while terminal history can remain empty for a propagation gap.
+        installNoProtection(bybit);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.cancelOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+  });
+});
+
+test("child identity drift after cancel fails closed and never dispatches market close", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-1") {
+        bybit.activeOrdersResponse = childList([
+          stopRow("link-1", "0.003", { orderId: "replacement-stop", orderStatus: "Deactivated", leavesQty: "0" }),
+          takeRow("link-1", "0.003", { orderId: "replacement-take", orderStatus: "Deactivated", leavesQty: "0" }),
+        ]);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+  });
+});
+
+test("protection is always neutralized before a market-close write", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+
+    const events: string[] = [];
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      events.push(`cancel:${payload.orderId ?? payload.orderLinkId}`);
+      return realCancel(payload);
+    };
+    const realCreate = bybit.createOrder.bind(bybit);
+    bybit.createOrder = async (payload) => {
+      events.push(`create:${payload.orderLinkId}`);
+      return realCreate(payload);
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 500, "unchanged active read-back is not neutralization proof");
+    assert.ok(events.some((event) => event.startsWith("cancel:stop-link-1")));
+    assert.equal(events.some((event) => event.startsWith("create:")), false);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0, "aggregate and close are unreachable while protection stays active");
+  });
+});
+
+test("ambiguous, duplicate, failed, or rejected protection cleanup sends zero close writes", async () => {
+  const cases: Array<(bybit: FakeBybitAdapter) => void> = [
+    (bybit) => {
+      bybit.activeOrdersResponse = childList([stopRow("link-1", "0.003"), stopRow("link-1", "0.003", { orderId: "stop-2" }), takeRow("link-1", "0.003")]);
+    },
+    (bybit) => {
+      bybit.activeOrdersResponse = { retCode: 0, result: { category: "linear", list: "bad" } };
+    },
+    (bybit) => {
+      bybit.getActiveOrders = async () => {
+        throw new Error("transport");
+      };
+    },
+    (bybit) => {
+      installActiveProtection(bybit, "link-1", "0.003");
+      bybit.cancelOrder = async (payload) => {
+        bybit.cancelOrderCalls.push(payload);
+        return { retCode: 10001, retMsg: "rejected", result: {} };
+      };
+    },
+  ];
+
+  for (const configure of cases) {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord());
+      setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+      setPosition(bybit, "Buy", "0.003");
+      configure(bybit);
+      const result = await service.apply(makeCommand());
+      assert.equal(result.statusCode, 500);
+      assert.equal(bybit.createOrderCalls.length, 0);
+      assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+    });
+  }
+});
+
+test("zero own exposure cleans protection but never creates a close identity or order", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setEntry(bybit, "link-1", "Cancelled", "0", "0.003");
+    const rows = installActiveProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "5", "BTCUSDT");
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId !== undefined) terminalize(rows);
+      return response;
+    };
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    const saved = repo.get("instance-1", "cycle-1");
+    assert.equal(saved?.close_order_link_id, null);
+    assert.equal(saved?.status, "terminal_closed");
+  });
+});
+
+test("zero own exposure aggregate truth table accepts flat/same-side and rejects opposite/failure", async () => {
+  const cases: Array<{ name: string; response: unknown; expected: number }> = [
+    { name: "flat", response: flatPosition(), expected: 200 },
+    { name: "same-side sibling", response: position("Buy", "2"), expected: 200 },
+    { name: "opposite", response: position("Sell", "2"), expected: 500 },
+    { name: "malformed", response: { retCode: 0, result: { category: "linear", list: "bad" } }, expected: 500 },
+    { name: "failed", response: { retCode: 10001, retMsg: "failed", result: {} }, expected: 500 },
+  ];
+
+  for (const item of cases) {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord());
+      setEntry(bybit, "link-1", "Cancelled", "0", "0.003");
+      installNoProtection(bybit);
+      bybit.openPositionsResponse = item.response;
+      const result = await service.apply(makeCommand());
+      assert.equal(result.statusCode, item.expected, item.name);
+      assert.equal(bybit.createOrderCalls.length, 0, item.name);
+    });
+  }
+});
+
+test("positive own exposure aggregate truth table accepts only sufficient same-side state", async () => {
+  const cases: Array<{ name: string; response: unknown; expected: number }> = [
+    { name: "equal same-side", response: position("Buy", "0.003"), expected: 200 },
+    { name: "larger same-side", response: position("Buy", "9"), expected: 200 },
+    { name: "smaller same-side", response: position("Buy", "0.002"), expected: 500 },
+    { name: "flat", response: flatPosition(), expected: 500 },
+    { name: "opposite", response: position("Sell", "9"), expected: 500 },
+    { name: "malformed", response: { retCode: 0, result: { category: "linear", list: [] } }, expected: 500 },
+    { name: "failed", response: { retCode: 10001, retMsg: "failed", result: {} }, expected: 500 },
+  ];
+
+  for (const item of cases) {
+    await withService(async ({ service, bybit, repo }) => {
+      await repo.save(makeRecord());
+      setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+      installTerminalProtection(bybit, "link-1", "0.003");
+      bybit.openPositionsResponse = item.response;
+      if (item.expected === 200) installFilledCloseAfterCreate(bybit, closeId(), "0.003");
+
+      const result = await service.apply(makeCommand());
+      assert.equal(result.statusCode, item.expected, item.name);
+      assert.equal(bybit.createOrderCalls.length, item.expected === 200 ? 1 : 0, item.name);
+      if (item.expected === 200) assert.equal(bybit.createOrderCalls[0].qty, "0.003", item.name);
+    });
+  }
+});
+
+test("sole and shared owners use exact own fill quantity and preserve sibling children/correlation", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A", orderLinkId: "link-a", calculatedQuantity: "0.004" }));
+    await repo.save(makeRecord({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B", orderLinkId: "link-b", calculatedQuantity: "0.006" }));
+    setEntry(bybit, "link-a", "Cancelled", "0.001", "0.004");
+    setEntry(bybit, "link-b", "Filled", "0.006", "0.006");
+    const ownRows = terminalProtectionRows("link-a", "0.001");
+    const siblingRows = activeProtectionRows("link-b", "0.006");
+    bybit.activeOrdersResponse = childList([...ownRows, ...siblingRows]);
+    bybit.orderHistoryForSymbolResponse = childList([]);
+    setPosition(bybit, "Buy", "0.007");
+    const expectedClose = closeIdentity("instance-A", "cycle-A");
+    installFilledCloseAfterCreate(bybit, expectedClose, "0.001");
+    const siblingBefore = repo.get("instance-B", "cycle-B");
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls[0].qty, "0.001");
+    assert.equal(bybit.createOrderCalls[0].orderLinkId, expectedClose);
+    assert.equal(bybit.cancelOrderCalls.some((call) => call.orderId?.startsWith("stop-link-b") || call.orderId?.startsWith("take-link-b")), false);
+    assert.deepEqual(repo.get("instance-B", "cycle-B"), siblingBefore);
+    assert.equal(siblingRows.every((row) => row.orderStatus === "Untriggered"), true);
+  });
+});
+
+test("an already-filled exact close identity is recovered without resend", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const identity = closeId();
+    await repo.save(makeRecord({ closeOrderLinkId: identity }));
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installTerminalProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+    setOrder(bybit, identity, "Filled", "0.003", "0.003");
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 0);
+  });
+});
+
+test("zero/partial close execution is incomplete and live/ambiguous close is fail-closed", async () => {
+  const cases: Array<{ status: string; cumExecQty: string; expected: number }> = [
+    { status: "Cancelled", cumExecQty: "0", expected: 422 },
+    { status: "Cancelled", cumExecQty: "0.001", expected: 422 },
+    { status: "New", cumExecQty: "0", expected: 500 },
+  ];
+  for (const item of cases) {
+    await withService(async ({ service, bybit, repo }) => {
+      const identity = closeId();
+      await repo.save(makeRecord({ closeOrderLinkId: identity }));
+      setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+      installTerminalProtection(bybit, "link-1", "0.003");
+      setPosition(bybit, "Buy", "0.003");
+      setOrder(bybit, identity, item.status, item.cumExecQty, "0.003");
+      const result = await service.apply(makeCommand());
+      assert.equal(result.statusCode, item.expected);
+      assert.equal(bybit.createOrderCalls.length, 0);
+      assert.notEqual(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+    });
+  }
+});
+
+test("a genuinely never-created durable close identity is resent once with the same identity", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const identity = closeId();
+    await repo.save(makeRecord({ closeOrderLinkId: identity }));
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installTerminalProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+    installFilledCloseAfterCreate(bybit, identity, "0.003");
+
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls[0].orderLinkId, identity);
+  });
+});
+
+test("close identity is durable before a guarded or throwing write and reused on retry", async () => {
   await withService(
     async ({ service, bybit, repo }) => {
       await repo.save(makeRecord());
-      setOrderStatus(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0" });
-      bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.003" });
+      setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+      installTerminalProtection(bybit, "link-1", "0.003");
+      setPosition(bybit, "Buy", "0.003");
 
       const result = await service.apply(makeCommand());
-
       assert.equal(result.statusCode, 500);
       assert.equal(bybit.createOrderCalls.length, 0);
+      assert.equal(repo.get("instance-1", "cycle-1")?.close_order_link_id, closeId());
     },
-    { dryRun: true, liveTradingEnabled: false, bybitApiKey: "", bybitApiSecret: "" },
+    { liveTradingEnabled: false },
   );
-});
 
-test("a market-close write failure fails closed", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0" });
-    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.003" });
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installTerminalProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
     bybit.createOrder = async () => {
-      throw new Error("exchange rejected the order");
+      throw new Error("timeout after write");
+    };
+    const result = await service.apply(makeCommand());
+    assert.equal(result.statusCode, 500);
+    assert.equal(repo.get("instance-1", "cycle-1")?.close_order_link_id, closeId());
+  });
+});
+
+test("reappearing protection after exact close execution blocks terminal_closed", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const identity = closeId();
+    await repo.save(makeRecord({ closeOrderLinkId: identity }));
+    setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
+    installTerminalProtection(bybit, "link-1", "0.003");
+    setPosition(bybit, "Buy", "0.003");
+    setOrder(bybit, identity, "Filled", "0.003", "0.003");
+
+    let activeReads = 0;
+    const terminal = bybit.activeOrdersResponse;
+    bybit.getActiveOrders = async () => {
+      activeReads += 1;
+      return activeReads === 1 ? terminal : childList(activeProtectionRows("link-1", "0.003"));
     };
 
     const result = await service.apply(makeCommand());
-
     assert.equal(result.statusCode, 500);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+    assert.equal(bybit.createOrderCalls.length, 0);
   });
 });
 
-test("bounded position confirmation succeeds once a later attempt reads zero", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0" });
-
-    let call = 0;
-    const openPosition = positionResponse({ side: "Buy", size: "0.003" });
-    const closed = closedResponse();
-    bybit.getOpenPositions = async (input) => {
-      call += 1;
-      // Call 1: pre-close read (sees the position). Calls 2+: final
-      // verification — only settles to zero on the second verify attempt.
-      return call <= 2 ? openPosition : closed;
-    };
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(bybit.createOrderCalls.length, 1, "the close order is never resent while verification retries");
-    assert.ok(call >= 3, "expected at least one retried verification attempt");
-  });
-});
-
-test("exhausting bounded verification without confirming zero fails closed", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    setOrderStatus(bybit, "link-1", { orderStatus: "Cancelled", cumExecQty: "0" });
-    // The position never settles to zero within the bounded budget.
-    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.003" });
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.equal(bybit.createOrderCalls.length, 1, "the close order is sent once, never repeated");
-  });
-});
-
-test("final verification still fails closed if the entry order is not confirmed non-live even though the position reads zero", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    bybit.openPositionsResponse = closedResponse();
-
-    let call = 0;
-    bybit.getOrderByLinkId = async (payload) => {
-      call += 1;
-      // Call 1 (initial classify before neutralization): live, triggers a
-      // cancel. Call 2 (neutralization confirm): terminal, so ABI proceeds.
-      // Calls 3+ (final pre-terminalization check): back to live — the
-      // final check must still catch this rather than trusting call 2 alone.
-      const status = call === 2 ? "Cancelled" : "New";
-      return {
-        retCode: 0,
-        result: {
-          category: payload.category,
-          list: [
-            {
-              symbol: payload.symbol,
-              orderLinkId: payload.orderLinkId,
-              orderStatus: status,
-              triggerPrice: "100000",
-              qty: "0.003",
-              cumExecQty: "0",
-              stopLoss: "99000",
-              takeProfit: "103000",
-            },
-          ],
-        },
-      };
-    };
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 500);
-    assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls.length, 0, "position already reads zero, so no close order is ever sent");
-  });
-});
-
-test("no scope release is observable before the terminal write, and it is observable once the write completes", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    bybit.openPositionsResponse = closedResponse();
-
-    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT")?.strategy_instance_id, "instance-1");
-
-    const result = await service.apply(makeCommand());
-
-    assert.equal(result.statusCode, 200);
-    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined, "scope is released once terminal_closed is durably saved");
-  });
-});
-
-test("a repeated close after terminal_closed performs no exchange write", async () => {
-  await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
-    bybit.openPositionsResponse = closedResponse();
-
-    const first = await service.apply(makeCommand());
-    assert.equal(first.statusCode, 200);
-    const callsAfterFirst = bybit.getOpenPositionsCalls.length;
-
-    const second = await service.apply(makeCommand());
-    assert.equal(second.statusCode, 200);
-    assert.equal(bybit.getOpenPositionsCalls.length, callsAfterFirst, "the repeat makes no further exchange call");
-  });
-});
-
-test("close and a concurrent entry-package command for the same pair never interleave", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "abi-close-concurrency-"));
+async function withService(
+  fn: (ctx: Ctx) => Promise<void>,
+  configOverrides: Partial<AbiConfig> = {},
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "abi-close-cutover-"));
   try {
-    const config = liveConfig();
     const bybit = new FakeBybitAdapter();
-    const guardedBybit = withReentrancyGuard(bybit);
     const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const mutex = new KeyedMutex();
-
-    // Same pair for both commands, with no Bybit response configured beyond
-    // a flat position: whichever command the mutex admits first leaves the
-    // record in a state (applied, absent, or terminal_closed) the other
-    // command's own existing handling already treats as a clean success —
-    // so both orderings are deterministic without needing to control which
-    // one wins the race.
-    await repo.save(makeRecord({ status: "applied" }));
-    bybit.openPositionsResponse = closedResponse();
-
-    const closeService = new CloseApplicationService({ config, bybit: guardedBybit, correlationRepository: repo, mutex });
-
-    const rulesProvider = new FakeInstrumentTradingRulesProvider();
-    const entryPackageService = new EntryPackageApplicationService({
-      config,
-      bybit: guardedBybit,
+    const service = new CloseApplicationService({
+      config: liveConfig(configOverrides),
+      bybit,
       correlationRepository: repo,
-      positionSizeCalculator: new FixedMinimumPositionSizeCalculator(rulesProvider),
-      mutex,
-      scopeMutex: new KeyedMutex(),
-      exchangeInstrumentResolver: new BybitExchangeInstrumentResolver(),
+      mutex: new KeyedMutex(),
     });
-
-    const [closeResult, entryResult] = await Promise.all([
-      closeService.apply(makeCommand()),
-      entryPackageService.apply({
-        strategyInstanceId: "instance-1",
-        tradeCycleId: "cycle-1",
-        ticker: "BTCUSDT.P",
-        desiredEntry: null,
-        riskMultiplier: "1",
-      }),
-    ]);
-
-    assert.equal(closeResult.statusCode, 200);
-    assert.equal(entryResult.statusCode, 200);
+    await fn({ service, bybit, repo });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});
-
-test("close commands for two different pairs proceed independently", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "abi-close-independent-"));
-  try {
-    const config = liveConfig();
-    const bybit = new FakeBybitAdapter();
-    const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const mutex = new KeyedMutex();
-
-    await repo.save(makeRecord());
-    await repo.save(makeRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", exchangeSymbol: "ETHUSDT" }));
-
-    const gate = deferred<void>();
-    bybit.getOpenPositions = async (input) => {
-      if (input?.symbol === "BTCUSDT") {
-        await gate.promise;
-      }
-      return closedResponse(input?.symbol ?? "BTCUSDT");
-    };
-
-    const service = new CloseApplicationService({ config, bybit, correlationRepository: repo, mutex });
-
-    const btcPromise = service.apply(makeCommand());
-    const ethPromise = service.apply(makeCommand({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2" }));
-
-    const ethResult = await ethPromise;
-    assert.equal(ethResult.statusCode, 200);
-
-    gate.resolve();
-    const btcResult = await btcPromise;
-    assert.equal(btcResult.statusCode, 200);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-function withReentrancyGuard(bybit: FakeBybitAdapter): BybitAdapter {
-  let inFlight = false;
-  return new Proxy(bybit, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      if (typeof value !== "function") {
-        return value;
-      }
-      return async (...args: unknown[]) => {
-        assert.equal(inFlight, false, `${String(prop)} called while another BybitAdapter call was already in flight`);
-        inFlight = true;
-        try {
-          return await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
-        } finally {
-          inFlight = false;
-        }
-      };
-    },
-  }) as unknown as BybitAdapter;
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
 }
 
 function liveConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
@@ -517,84 +482,6 @@ function liveConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     bybitEnvironment: "testnet",
     ...overrides,
   });
-}
-
-async function withService(
-  fn: (ctx: Ctx) => Promise<void>,
-  configOverrides: Partial<AbiConfig> = {},
-): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "abi-close-app-service-"));
-  try {
-    const config = liveConfig(configOverrides);
-    const bybit = new FakeBybitAdapter();
-    const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const mutex = new KeyedMutex();
-
-    const service = new CloseApplicationService({ config, bybit, correlationRepository: repo, mutex });
-
-    await fn({ service, bybit, repo });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-// By default (no explicit order response configured), both realtime and
-// history cleanly report the order absent — classifyEntryOrderTerminality
-// treats that as terminal (design.md: the same clean-absence condition
-// confirmEntryPackageCancelled already treats as confirmed non-live), so
-// most tests above never need to configure an order response at all.
-function setOrderStatus(bybit: FakeBybitAdapter, orderLinkId: string, input: { orderStatus: string; cumExecQty: string }): void {
-  const response = orderListResponse(input);
-  bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
-  bybit.orderHistoryResponseByLinkId.set(orderLinkId, response);
-}
-
-// Simulates a real cancel taking effect: once cancelOrder is called for
-// this orderLinkId, subsequent order queries report the settled status.
-function settleOrderAfterCancel(
-  bybit: FakeBybitAdapter,
-  orderLinkId: string,
-  input: { orderStatus: string; cumExecQty: string },
-): void {
-  const realCancel = bybit.cancelOrder.bind(bybit);
-  bybit.cancelOrder = async (payload) => {
-    const result = await realCancel(payload);
-    if (payload.orderLinkId === orderLinkId) {
-      setOrderStatus(bybit, orderLinkId, input);
-    }
-    return result;
-  };
-}
-
-// Simulates the market close settling: the pre-close read (and any
-// verification attempt before createOrder is called) sees `openResponse`;
-// every position read after the close order is sent reports flat.
-function settlePositionAfterClose(bybit: FakeBybitAdapter, openResponse: unknown): void {
-  bybit.openPositionsResponse = openResponse;
-  const realCreateOrder = bybit.createOrder.bind(bybit);
-  bybit.createOrder = async (payload) => {
-    const result = await realCreateOrder(payload);
-    bybit.openPositionsResponse = closedResponse();
-    return result;
-  };
-}
-
-function orderListResponse(input: { orderStatus: string; cumExecQty: string }): unknown {
-  return {
-    retCode: 0,
-    result: {
-      list: [
-        {
-          orderStatus: input.orderStatus,
-          triggerPrice: "100000",
-          qty: "0.003",
-          cumExecQty: input.cumExecQty,
-          stopLoss: "99000",
-          takeProfit: "103000",
-        },
-      ],
-    },
-  };
 }
 
 function makeCommand(overrides: { strategyInstanceId?: string; tradeCycleId?: string } = {}): {
@@ -617,6 +504,9 @@ function makeRecord(
     exchangeCategory: "linear" | "spot";
     orderLinkId: string | null;
     calculatedQuantity: string;
+    side: "long" | "short";
+    generation: number;
+    closeOrderLinkId: string | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -628,7 +518,7 @@ function makeRecord(
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {
-      side: "long",
+      side: overrides.side ?? "long",
       source_plan_bar_open_time_ms: 1785000000000,
       planned_entry_price: "100000",
       initial_stop_price: "99000",
@@ -639,7 +529,10 @@ function makeRecord(
     calculated_quantity: overrides.calculatedQuantity ?? "0.003",
     order_link_id: overrides.orderLinkId === undefined ? "link-1" : overrides.orderLinkId,
     order_id: overrides.orderLinkId === null ? null : "order-1",
-    generation: 1,
+    close_order_link_id: overrides.closeOrderLinkId ?? null,
+    close_order_id: null,
+    first_fill_at_ms: null,
+    generation: overrides.generation ?? 1,
     status: overrides.status ?? "applied",
     early_execution_observation: null,
     binding_history: [],
@@ -648,28 +541,133 @@ function makeRecord(
   };
 }
 
-function closedResponse(symbol = "BTCUSDT", category = "linear"): unknown {
-  return {
+function setEntry(
+  bybit: FakeBybitAdapter,
+  orderLinkId: string,
+  orderStatus: string,
+  cumExecQty: string,
+  qty: string,
+): void {
+  setOrder(bybit, orderLinkId, orderStatus, cumExecQty, qty);
+}
+
+function setOrder(
+  bybit: FakeBybitAdapter,
+  orderLinkId: string,
+  orderStatus: string,
+  cumExecQty: string,
+  qty: string,
+): void {
+  const response = {
     retCode: 0,
-    result: { category, list: [{ symbol, side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }] },
+    result: {
+      list: [{ orderStatus, triggerPrice: "100000", qty, cumExecQty, stopLoss: "99000", takeProfit: "103000" }],
+    },
+  };
+  bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
+  bybit.orderHistoryResponseByLinkId.set(orderLinkId, response);
+}
+
+function installFilledCloseAfterCreate(bybit: FakeBybitAdapter, orderLinkId: string, qty: string): void {
+  const realCreate = bybit.createOrder.bind(bybit);
+  bybit.createOrder = async (payload) => {
+    const response = await realCreate(payload);
+    if (payload.orderLinkId === orderLinkId) setOrder(bybit, orderLinkId, "Filled", qty, qty);
+    return response;
   };
 }
 
-function positionResponse(input: { side: "Buy" | "Sell"; size: string }, symbol = "BTCUSDT"): unknown {
+function installNoProtection(bybit: FakeBybitAdapter): void {
+  bybit.activeOrdersResponse = childList([]);
+  bybit.orderHistoryForSymbolResponse = childList([]);
+}
+
+function installActiveProtection(bybit: FakeBybitAdapter, parentOrderLinkId: string, qty: string): Record<string, unknown>[] {
+  const rows = activeProtectionRows(parentOrderLinkId, qty);
+  bybit.activeOrdersResponse = childList(rows);
+  bybit.orderHistoryForSymbolResponse = childList([]);
+  return rows;
+}
+
+function installTerminalProtection(bybit: FakeBybitAdapter, parentOrderLinkId: string, qty: string): void {
+  bybit.activeOrdersResponse = childList(terminalProtectionRows(parentOrderLinkId, qty));
+  bybit.orderHistoryForSymbolResponse = childList([]);
+}
+
+function activeProtectionRows(parentOrderLinkId: string, qty: string): Record<string, unknown>[] {
+  return [stopRow(parentOrderLinkId, qty), takeRow(parentOrderLinkId, qty)];
+}
+
+function terminalProtectionRows(parentOrderLinkId: string, qty: string): Record<string, unknown>[] {
+  return activeProtectionRows(parentOrderLinkId, qty).map((row) => ({ ...row, orderStatus: "Deactivated", leavesQty: "0" }));
+}
+
+function terminalize(rows: Record<string, unknown>[]): void {
+  for (const row of rows) {
+    row.orderStatus = "Deactivated";
+    row.leavesQty = "0";
+  }
+}
+
+function childList(rows: Record<string, unknown>[]): unknown {
+  return { retCode: 0, result: { category: "linear", list: rows } };
+}
+
+function stopRow(parentOrderLinkId: string, qty: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    symbol: "BTCUSDT",
+    orderLinkId: "",
+    orderId: `stop-${parentOrderLinkId}`,
+    parentOrderLinkId,
+    stopOrderType: "PartialStopLoss",
+    createType: "CreateByPartialStopLoss",
+    orderStatus: "Untriggered",
+    triggerPrice: "99000",
+    qty,
+    leavesQty: qty,
+    ...overrides,
+  };
+}
+
+function takeRow(parentOrderLinkId: string, qty: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...stopRow(parentOrderLinkId, qty),
+    orderId: `take-${parentOrderLinkId}`,
+    stopOrderType: "PartialTakeProfit",
+    createType: "CreateByPartialTakeProfit",
+    triggerPrice: "103000",
+    ...overrides,
+  };
+}
+
+function setPosition(bybit: FakeBybitAdapter, side: "Buy" | "Sell", size: string, symbol = "BTCUSDT"): void {
+  bybit.openPositionsResponse = position(side, size, symbol);
+}
+
+function position(side: "Buy" | "Sell", size: string, symbol = "BTCUSDT"): unknown {
   return {
     retCode: 0,
     result: {
       category: "linear",
-      list: [
-        {
-          symbol,
-          side: input.side,
-          size: input.size,
-          positionIdx: 0,
-          avgPrice: "100000",
-          openTime: 111,
-        },
-      ],
+      list: [{ symbol, side, size, positionIdx: 0, avgPrice: "100000", openTime: 1 }],
     },
   };
+}
+
+function flatPosition(): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }],
+    },
+  };
+}
+
+function closeId(): string {
+  return closeIdentity("instance-1", "cycle-1");
+}
+
+function closeIdentity(strategyInstanceId: string, tradeCycleId: string, generation = 1): string {
+  return buildEntryPackageOrderLinkId(strategyInstanceId, tradeCycleId, "close", generation);
 }

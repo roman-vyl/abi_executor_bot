@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type {
@@ -5,7 +7,7 @@ import type {
   BindingHistoryEntry,
   EntryPackageExecutionRecord,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
@@ -17,12 +19,24 @@ import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIden
 import { positionScopeKey } from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
-import { mapEntryPackageToBybit } from "../../exchange/bybitOrderMapper.js";
+import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
-import { classifyEntryOrderTerminality, confirmEntryPackage, confirmEntryPackageCancelled } from "./packageConfirmation.js";
+import {
+  classifyEntryOrderForRecovery,
+  classifyEntryOrderTerminality,
+  confirmEntryPackage,
+  confirmEntryPackageCancelled,
+} from "./packageConfirmation.js";
+import {
+  AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS,
+  AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS,
+  ambiguousCreateAbsenceCandidate,
+  completedObservationIsFresh,
+  observeAmbiguousCreateAbsenceAttempt,
+} from "./ambiguousCreateAbsence.js";
 
 export type EntryPackageApplicationServiceDeps = {
   config: AbiConfig;
@@ -109,12 +123,90 @@ export class EntryPackageApplicationService {
       return this.absentResult(command);
     }
 
+    const ambiguousCreateCandidate = ambiguousCreateAbsenceCandidate(record);
+    if (ambiguousCreateCandidate !== undefined) {
+      return this.revalidateAmbiguousCreateBeforeCancel(command, record, ambiguousCreateCandidate);
+    }
+
     if (record.status === "terminal_unfilled" || record.order_link_id === null) {
       await this.persistTransitionToAbsent(record);
       return this.absentResult(command);
     }
 
     return this.revalidateBeforeCancel(command, record);
+  }
+
+  private async revalidateAmbiguousCreateBeforeCancel(
+    command: EntryPackageCommand,
+    record: EntryPackageExecutionRecord,
+    candidate: NonNullable<ReturnType<typeof ambiguousCreateAbsenceCandidate>>,
+  ): Promise<EntryPackageHttpResult> {
+    const orderLinkId = record.order_link_id;
+    if (orderLinkId === null) {
+      return internalErrorResult();
+    }
+
+    const symbol = record.exchange_symbol;
+    const category = requireCategory(record.exchange_category);
+    const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    let cleanAbsenceAttempts = 0;
+    let absenceTainted = false;
+
+    for (let attempt = 0; attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS; attempt += 1) {
+      const orderSignal = await classifyEntryOrderForRecovery({
+        bybit: this.deps.bybit,
+        getEntryOrderPayload,
+        getEntryOrderHistoryPayload,
+      });
+
+      if (orderSignal.kind === "live_unfilled") {
+        return this.cancelLiveOrder(command, record);
+      }
+      if (orderSignal.kind === "terminal_without_fill") {
+        return this.confirmCancelOutcomeAndPersist(command, record);
+      }
+      if (orderSignal.kind === "live_with_fill" || orderSignal.kind === "terminal_with_fill") {
+        // The positive fill observation permanently supersedes absence for
+        // this request. A follow-up query may confirm and persist the fill,
+        // but may never turn a vanished row into EntryPackageAbsent.
+        return this.confirmCancelOutcomeAndPersist(command, record, false);
+      }
+      if (orderSignal.kind === "not_found") {
+        const attemptEvidence = await observeAmbiguousCreateAbsenceAttempt({
+          bybit: this.deps.bybit,
+          category,
+          symbol,
+          orderLinkId,
+          desiredSide: candidate.desiredSide,
+        });
+        if (attemptEvidence === "clean_absent") {
+          cleanAbsenceAttempts += 1;
+        } else {
+          absenceTainted = true;
+        }
+      } else {
+        absenceTainted = true;
+      }
+
+      if (attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS - 1) {
+        await sleep(AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS);
+      }
+    }
+
+    if (
+      absenceTainted ||
+      cleanAbsenceAttempts !== AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS ||
+      !(await completedObservationIsFresh({
+        bybit: this.deps.bybit,
+        bindingStartedAtMs: candidate.bindingStartedAtMs,
+      }))
+    ) {
+      return internalErrorResult();
+    }
+
+    await this.persistAmbiguousCreateAbsence(record);
+    return this.absentResult(command);
   }
 
   // Preflight for a null-desired-entry (cancel-intent) PUT against a binding
@@ -252,6 +344,16 @@ export class EntryPackageApplicationService {
       calculated_quantity: calculatedQuantity,
       order_link_id: orderLinkId,
       order_id: null,
+      // A new generation never inherits a stale close-order identity from
+      // an earlier one — see abi-pair-scoped-close-execution-v1's design.md
+      // Decision 3 for why this explicit reset (not a spread of
+      // priorRecord) is what makes that guarantee hold by construction.
+      close_order_link_id: null,
+      close_order_id: null,
+      // Same reasoning as close_order_link_id/close_order_id above: a new
+      // generation's own first fill (if any) has not been observed yet —
+      // abi-pair-scoped-open-position-resolution-v1's design.md Decision 6.
+      first_fill_at_ms: null,
       generation,
       status: "pending_create",
       early_execution_observation: null,
@@ -268,10 +370,15 @@ export class EntryPackageApplicationService {
     const claim = await this.deps.scopeMutex.withKeyLock(
       positionScopeKey(identity.category, identity.symbol),
       async (): Promise<"claimed" | "conflict"> => {
-        const owner = this.deps.correlationRepository.findOwnerByScope(identity.category, identity.symbol);
-        const ownedByAnotherActivePair =
-          owner !== undefined && !isOwnedBySamePair(owner, command) && !isDurablyClosedEntryPackageStatus(owner.status);
-        if (ownedByAnotherActivePair) {
+        const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(identity.category, identity.symbol);
+        const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
+
+        // Native Partial protection and pair-scoped close are now the only
+        // production paths. A same-side sibling can therefore claim this
+        // scope without sharing or overwriting another cycle's lifecycle;
+        // opposite-side and structurally corrupt ownership still fail closed
+        // before the provisional durable write or any exchange write.
+        if (classification !== "empty" && classification !== "same_side") {
           return "conflict";
         }
 
@@ -513,6 +620,7 @@ export class EntryPackageApplicationService {
   private async confirmCancelOutcomeAndPersist(
     command: EntryPackageCommand,
     record: EntryPackageExecutionRecord,
+    allowCleanAbsence = true,
   ): Promise<EntryPackageHttpResult> {
     const orderLinkId = record.order_link_id;
     if (orderLinkId === null) {
@@ -533,6 +641,10 @@ export class EntryPackageApplicationService {
     const now = new Date().toISOString();
 
     if (confirmation.kind === "cancelled_confirmed") {
+      if (!allowCleanAbsence) {
+        await this.deps.correlationRepository.save({ ...record, status: "unknown", updated_at: now });
+        return internalErrorResult();
+      }
       await this.deps.correlationRepository.save({
         ...record,
         desired_entry: null,
@@ -653,6 +765,9 @@ export class EntryPackageApplicationService {
       calculated_quantity: null,
       order_link_id: null,
       order_id: null,
+      close_order_link_id: null,
+      close_order_id: null,
+      first_fill_at_ms: null,
       generation: 0,
       status: "absent",
       early_execution_observation: null,
@@ -672,6 +787,21 @@ export class EntryPackageApplicationService {
       pending_action: null,
       current_binding_started_at: null,
       updated_at: new Date().toISOString(),
+    });
+  }
+
+  private async persistAmbiguousCreateAbsence(record: EntryPackageExecutionRecord): Promise<void> {
+    const now = new Date().toISOString();
+    await this.deps.correlationRepository.save({
+      ...record,
+      desired_entry: null,
+      order_link_id: null,
+      order_id: null,
+      status: "absent",
+      pending_action: null,
+      current_binding_started_at: null,
+      updated_at: now,
+      binding_history: [...record.binding_history, closeBindingFrom(record, "cancelled", now)],
     });
   }
 
@@ -725,7 +855,47 @@ function isOwnedBySamePair(owner: EntryPackageExecutionRecord, command: EntryPac
   return owner.strategy_instance_id === command.strategyInstanceId && owner.trade_cycle_id === command.tradeCycleId;
 }
 
-function closeBindingFrom(
+// The real, permanent classification createOrder()'s scope-claim guard is
+// built on (abi-same-side-virtual-exposure-ownership-v1 design.md
+// Decision 1) — exported so it can be proven correct in isolation, against
+// synthetic multi-owner fixtures, independent of the temporary production
+// guard the caller currently wraps it in (see createOrder()). Excludes the
+// requesting pair's own active record first: without this, a pair's own
+// retry would otherwise be compared against itself once more than one
+// active record can exist for a scope, which is exactly the self-conflict
+// bug the architecture review found in the old findOwnerByScope()-based
+// check. A `null` desired_entry on any other active record is a structural
+// contradiction no current write path produces — classified as "corrupt"
+// rather than silently excluded or guessed through.
+export type ScopeAdmissionClassification = "empty" | "same_side" | "opposite_side" | "corrupt";
+
+export function classifyScopeAdmission(
+  activeRecords: EntryPackageExecutionRecord[],
+  command: EntryPackageCommand,
+  requestedSide: DesiredEntryDto["side"],
+): ScopeAdmissionClassification {
+  const otherActiveRecords = activeRecords.filter((record) => !isOwnedBySamePair(record, command));
+
+  for (const other of otherActiveRecords) {
+    if (other.desired_entry === null) {
+      return "corrupt";
+    }
+  }
+
+  if (otherActiveRecords.length === 0) {
+    return "empty";
+  }
+
+  const allSameSide = otherActiveRecords.every((other) => other.desired_entry?.side === requestedSide);
+  return allSameSide ? "same_side" : "opposite_side";
+}
+
+// Exported for reuse by entry-cycle-recovery's Recovery Convergence policy
+// (abi-entry-cycle-recovery-convergence-v1), which durably closes a binding
+// from the exact same shape this service already uses for its own
+// terminal_without_fill/absent writes — never a second, divergent
+// construction.
+export function closeBindingFrom(
   record: EntryPackageExecutionRecord,
   endReason: NonNullable<BindingHistoryEndReason>,
   endedAt: string,
@@ -756,18 +926,4 @@ function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstru
   }
 
   throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
-}
-
-function readBybitOrderId(response: unknown): string | null {
-  if (typeof response !== "object" || response === null || !("result" in response)) {
-    return null;
-  }
-
-  const result = (response as Record<string, unknown>).result;
-  if (typeof result !== "object" || result === null || !("orderId" in result)) {
-    return null;
-  }
-
-  const orderId = (result as Record<string, unknown>).orderId;
-  return typeof orderId === "string" && orderId !== "" ? orderId : null;
 }

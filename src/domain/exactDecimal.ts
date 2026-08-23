@@ -52,6 +52,10 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
   return (numerator + denominator - 1n) / denominator;
 }
 
+function floorDiv(numerator: bigint, denominator: bigint): bigint {
+  return numerator / denominator;
+}
+
 function formatScaled(unscaled: bigint, scale: number): string {
   const negative = unscaled < 0n;
   const abs = negative ? -unscaled : unscaled;
@@ -65,6 +69,14 @@ function formatScaled(unscaled: bigint, scale: number): string {
   const integerPart = digits.slice(0, digits.length - scale);
   const fractionPart = digits.slice(digits.length - scale).replace(/0+$/, "");
   return fractionPart === "" ? `${sign}${integerPart}` : `${sign}${integerPart}.${fractionPart}`;
+}
+
+// Exact-decimal multiplication, computed with integer arithmetic — no
+// intermediate binary-float multiplication for either operand.
+export function multiplyDecimal(aText: string, bText: string): string {
+  const a = parseDecimal(aText);
+  const b = parseDecimal(bText);
+  return formatScaled(a.unscaled * b.unscaled, a.scale + b.scale);
 }
 
 // ceil((numerator / denominator) / step) * step, computed exactly with
@@ -84,6 +96,22 @@ export function ceilRatioToStep(numeratorText: string, denominatorText: string, 
 // ceil(value / step) * step
 export function ceilToStep(valueText: string, stepText: string): string {
   return ceilRatioToStep(valueText, "1", stepText);
+}
+
+// floor(value / step) * step, computed exactly with integer arithmetic —
+// same shape as ceilToStep, opposite rounding direction along the step
+// grid (toward zero for a positive value, rather than away from it).
+// An exact multiple of step is returned unchanged, matching ceilToStep.
+export function floorToStep(valueText: string, stepText: string): string {
+  const value = parseDecimal(valueText);
+  const step = parseDecimal(stepText);
+
+  const scale = Math.max(value.scale, step.scale);
+  const scaledValue = value.unscaled * pow10(scale - value.scale);
+  const scaledStep = step.unscaled * pow10(scale - step.scale);
+
+  const steps = floorDiv(scaledValue, scaledStep);
+  return formatScaled(steps * step.unscaled, step.scale);
 }
 
 export function maxDecimal(a: string, b: string): string {

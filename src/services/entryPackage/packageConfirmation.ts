@@ -9,12 +9,21 @@ import type {
 } from "../../exchange/bybitOrderMapper.js";
 import type { BybitOrderView, ExpectedOrderIdentity } from "./orderQueryResponseDecoder.js";
 import { decodeOrderQueryResponse } from "./orderQueryResponseDecoder.js";
+import { decodeExecutionListResponsePage } from "./executionListResponseDecoder.js";
 
 // Starting point matches verifyPostCreateProtection.ts's existing
 // bounded-retry mechanics (2 attempts / 300ms); tunable independently since
 // this component's classification differs from protection read-back.
 const CONFIRMATION_ATTEMPTS = 2;
 const CONFIRMATION_RETRY_DELAY_MS = 300;
+
+// Page size for /v5/execution/list queries — mirrors this codebase's
+// existing single-page order queries' pragmatic sizing, not a Bybit
+// protocol requirement. EXECUTION_LIST_PAGE_CAP is defensive headroom, not
+// a realistic ceiling: a genuine entry order in this system is expected to
+// produce a handful of executions at most.
+const EXECUTION_LIST_LIMIT = "50";
+const EXECUTION_LIST_PAGE_CAP = 10;
 
 // Exported for reuse by entry-cycle-recovery-resolution, which composes its
 // own order-side signal from these same status sets rather than inventing a
@@ -227,12 +236,32 @@ export async function confirmEntryPackageCancelled(input: {
 // confirmEntryPackageCancelled or its callers.
 export type EntryOrderTerminality = { kind: "terminal" } | { kind: "live" } | { kind: "ambiguous" };
 
+export type RecoveryEntryOrderSignal =
+  | { kind: "live_unfilled" }
+  | { kind: "live_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
+  | { kind: "terminal_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
+  | { kind: "terminal_without_fill" }
+  | { kind: "not_found" }
+  | { kind: "inconclusive" };
+
 function isTerminalOrderStatus(orderStatus: string): boolean {
   return FILLED_STATUSES.has(orderStatus) || TERMINAL_WITHOUT_FILL_STATUSES.has(orderStatus);
 }
 
 function isLiveOrderStatus(orderStatus: string): boolean {
   return LIVE_UNFILLED_STATUSES.has(orderStatus) || PARTIAL_FILL_STATUSES.has(orderStatus);
+}
+
+// Whether a trade cycle's own recorded fill facts (cumulative_filled_qty /
+// avg_execution_price) are settled rather than a live snapshot. Bybit order
+// statuses do not un-terminalize, so a terminal order_status makes the
+// observation permanently final; a live order_status (including a still-open
+// PartiallyFilled) means the entry order can still add exposure, so the
+// recorded quantity/price must not be treated as authoritative without a
+// fresh re-check. No separate durable finality flag is introduced — this
+// derives the fact from the already-durable order_status.
+export function isFillFactFinal(observation: EarlyExecutionObservation | null): boolean {
+  return observation !== null && isTerminalOrderStatus(observation.order_status);
 }
 
 // Single fresh classification of the current entry order's terminal-vs-live
@@ -294,6 +323,80 @@ export async function classifyEntryOrderTerminality(input: {
   return { kind: "ambiguous" };
 }
 
+// Single-pass recovery classification of the exact entry identity. Kept
+// beside the shared order decoders/status sets so recovery GET and the
+// ambiguous-CREATE corrective CANCEL cannot drift into different notions
+// of live, terminal, filled, or cleanly absent.
+export async function classifyEntryOrderForRecovery(input: {
+  bybit: BybitAdapter;
+  getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
+  getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+}): Promise<RecoveryEntryOrderSignal> {
+  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const realtime = await queryOrderView(
+    () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
+    realtimeIdentity,
+  );
+
+  if (realtime.status === "query_failed") {
+    return { kind: "inconclusive" };
+  }
+
+  if (realtime.status === "found") {
+    if (FILLED_STATUSES.has(realtime.item.orderStatus)) {
+      return fillRecoverySignal("terminal_with_fill", realtime.item);
+    }
+    if (PARTIAL_FILL_STATUSES.has(realtime.item.orderStatus)) {
+      return fillRecoverySignal("live_with_fill", realtime.item);
+    }
+    if (LIVE_UNFILLED_STATUSES.has(realtime.item.orderStatus)) {
+      return { kind: "live_unfilled" };
+    }
+  }
+
+  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const history = await queryOrderView(
+    () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
+    historyIdentity,
+  );
+
+  if (history.status === "query_failed") {
+    return { kind: "inconclusive" };
+  }
+
+  if (history.status === "found") {
+    const cumulativeFilledQty = normalizedCumulativeFilledQty(history.item);
+    if (compareDecimal(cumulativeFilledQty, "0") > 0) {
+      return {
+        kind: "terminal_with_fill",
+        averageEntryPrice: history.item.avgPrice,
+        cumulativeFilledQty,
+      };
+    }
+    if (TERMINAL_WITHOUT_FILL_STATUSES.has(history.item.orderStatus)) {
+      return { kind: "terminal_without_fill" };
+    }
+    return { kind: "inconclusive" };
+  }
+
+  return realtime.status === "not_found" ? { kind: "not_found" } : { kind: "inconclusive" };
+}
+
+function fillRecoverySignal(
+  kind: "live_with_fill" | "terminal_with_fill",
+  item: BybitOrderView,
+): RecoveryEntryOrderSignal {
+  return {
+    kind,
+    averageEntryPrice: item.avgPrice,
+    cumulativeFilledQty: normalizedCumulativeFilledQty(item),
+  };
+}
+
+function normalizedCumulativeFilledQty(item: BybitOrderView): string {
+  return item.cumExecQty !== "" ? item.cumExecQty : "0";
+}
+
 // Bounded re-classification after a cancel has already been sent for a
 // live order — re-queries only, never resends anything. Reuses the same
 // bounded-retry shape (attempt count and delay) confirmEntryPackage and
@@ -315,6 +418,131 @@ export async function confirmEntryOrderNeutralized(input: {
   }
 
   return "ambiguous";
+}
+
+export type OwnCloseOrderOutcome =
+  | { kind: "matched" }
+  | { kind: "zero_fill" }
+  | { kind: "qty_mismatch" }
+  | { kind: "not_found" }
+  | { kind: "ambiguous" };
+
+// Single-shot (no internal retry) classification of one close order's own
+// fate against an expected fully-closed quantity: terminal AND cumulative
+// filled qty exactly equals expectedQty -> "matched"; terminal but confirmed
+// zero fill (rejected/never executed) -> "zero_fill"; terminal but filled an
+// amount that does not exactly equal expectedQty -> "qty_mismatch";
+// genuinely absent from both realtime and history -> "not_found"; anything
+// else (still live, or a query/classification failure) -> "ambiguous".
+// Extracted from CloseApplicationService.resolveCloseOrderOutcome's own
+// single-shot core (abi-entry-cycle-recovery-attribution-v1 design.md
+// Decision 3) so CloseApplicationService and
+// EntryCycleRecoveryResolutionService share one implementation of this exact
+// strictness instead of each maintaining their own. Callers own their own
+// retry cadence around this — their existing bounded-retry shapes already
+// differ (different attempt counts, different callers) and baking a retry
+// policy in here would take a decision away from both without benefit.
+export async function classifyOwnCloseOrderOutcome(input: {
+  bybit: BybitAdapter;
+  getCloseOrderPayload: BybitGetOrderByLinkIdPayload;
+  getCloseOrderHistoryPayload: BybitGetOrderHistoryPayload;
+  expectedQty: string;
+}): Promise<OwnCloseOrderOutcome> {
+  const terminality = await classifyEntryOrderTerminality({
+    bybit: input.bybit,
+    getEntryOrderPayload: input.getCloseOrderPayload,
+    getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
+  });
+
+  if (terminality.kind !== "terminal") {
+    return { kind: "ambiguous" };
+  }
+
+  const confirmation = await confirmEntryPackage({
+    bybit: input.bybit,
+    getEntryOrderPayload: input.getCloseOrderPayload,
+    getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
+    expected: { qty: input.expectedQty },
+  });
+
+  if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
+    return decimalEquals(confirmation.observation.cumulative_filled_qty, input.expectedQty)
+      ? { kind: "matched" }
+      : { kind: "qty_mismatch" };
+  }
+  if (confirmation.kind === "terminal_without_fill") {
+    return { kind: "zero_fill" };
+  }
+  if (confirmation.kind === "not_found") {
+    return { kind: "not_found" };
+  }
+  // "ambiguous" despite terminal classification (e.g. a query failure within
+  // confirmEntryPackage's own bounded window).
+  return { kind: "ambiguous" };
+}
+
+export type FirstAttributableFillResolution =
+  | { kind: "found"; firstFillAtMs: number }
+  | { kind: "no_executions_found" }
+  | { kind: "ambiguous" };
+
+// Sources this cycle's own raw attributable first-fill timestamp from
+// /v5/execution/list — the only Bybit primitive that records each
+// individual fill with its own timestamp, unlike order/realtime's or
+// order/history's own "current state" fields (abi-pair-scoped-open-
+// position-resolution-v1's design.md Decision 4). Pages to completion
+// before computing a result: never assumes record order, never returns a
+// candidate minimum from a partial page set. Attribution rests on the
+// query's own orderLinkId filter, this cycle's own deterministic identity —
+// the same trust level every other own-order query in this codebase already
+// places in its own orderLinkId filter. The only call site for this
+// function is OpenPositionResolutionService.resolve() — determine() itself
+// never queries /v5/execution/list.
+export async function resolveFirstAttributableFillAtMs(input: {
+  bybit: BybitAdapter;
+  category: string;
+  symbol: string;
+  orderLinkId: string;
+}): Promise<FirstAttributableFillResolution> {
+  const executions: { execTimeMs: number }[] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < EXECUTION_LIST_PAGE_CAP; page += 1) {
+    let response: unknown;
+    try {
+      response = await input.bybit.getExecutionList({
+        category: input.category,
+        symbol: input.symbol,
+        orderLinkId: input.orderLinkId,
+        limit: EXECUTION_LIST_LIMIT,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+    } catch {
+      return { kind: "ambiguous" };
+    }
+
+    const decoded = decodeExecutionListResponsePage({
+      response,
+      expected: { category: input.category, symbol: input.symbol },
+    });
+    if (decoded.kind === "protocol_failure") {
+      return { kind: "ambiguous" };
+    }
+
+    executions.push(...decoded.executions);
+
+    if (decoded.nextCursor === "") {
+      return executions.length === 0
+        ? { kind: "no_executions_found" }
+        : { kind: "found", firstFillAtMs: Math.min(...executions.map((execution) => execution.execTimeMs)) };
+    }
+
+    cursor = decoded.nextCursor;
+  }
+
+  // The page cap was exhausted without the cursor going empty — never
+  // compute a minimum over a known-incomplete set.
+  return { kind: "ambiguous" };
 }
 
 function confirmsAbsenceOrTerminal(result: QueryResult): boolean {

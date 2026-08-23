@@ -6,9 +6,12 @@ import type {
   BybitCancelOrderPayload,
   BybitCancelAllOrdersPayload,
   BybitCreateOrderPayload,
+  BybitGetExecutionListPayload,
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
+  BybitGetOrderHistoryForSymbolPayload,
   BybitMarketCloseOrderPayload,
+  BybitAmendOrderPayload,
 } from "./bybitOrderMapper.js";
 
 export type BybitOrderSide = "Buy" | "Sell";
@@ -72,18 +75,6 @@ export type PlaceMarketOrderInput = {
   orderLinkId: string;
 };
 
-// Both legs are always present: a protection write is a full-state replace,
-// never a partial patch (position-management-api's contract requires
-// stop_price on every request and take_price null-or-positive). "0" is
-// Bybit's own convention on this endpoint for "remove this leg" — callers
-// pass it explicitly rather than an optional/absent field.
-export type SetTradingStopInput = {
-  category: string;
-  symbol: string;
-  stopLoss: string;
-  takeProfit: string;
-};
-
 export interface BybitAdapter {
   getServerTime(): Promise<unknown>;
   getWalletBalance(input?: GetWalletBalanceInput): Promise<unknown>;
@@ -92,14 +83,24 @@ export interface BybitAdapter {
   queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult>;
   createOrder(payload: BybitCreateOrderPayload | BybitMarketCloseOrderPayload): Promise<unknown>;
   cancelOrder(payload: BybitCancelOrderPayload): Promise<unknown>;
+  // In-place order amend, scoped by orderId — the only Bybit write
+  // abi-native-partial-protection-lifecycle-v1 introduces. Not wired to any
+  // production caller; see nativeProtectionReconciliation.ts.
+  amendOrder(payload: BybitAmendOrderPayload): Promise<unknown>;
   cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown>;
   getOrderByLinkId(payload: BybitGetOrderByLinkIdPayload): Promise<unknown>;
   getOrderHistory(payload: BybitGetOrderHistoryPayload): Promise<unknown>;
+  // Symbol-scoped, not orderLinkId-scoped — surfaces terminal candidates
+  // for native attached-protection attribution
+  // (abi-native-partial-protection-attribution-v1), subject to a confirmed
+  // history propagation lag the caller must account for.
+  getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown>;
+  getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown>;
   getInstrumentInfo(category: string, symbol: string): Promise<unknown>;
+  getOrderPriceLimit(category: string, symbol: string): Promise<unknown>;
   getPosition(symbol: string): Promise<BybitPosition | null>;
   getMarketPrice(symbol: string): Promise<string>;
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
-  setTradingStop(input: SetTradingStopInput): Promise<unknown>;
 }
 
 export type GetWalletBalanceInput = {
@@ -188,6 +189,10 @@ export class RestBybitAdapter implements BybitAdapter {
     return this.signedPost("/v5/order/cancel", payload);
   }
 
+  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
+    return this.signedPost("/v5/order/amend", payload);
+  }
+
   async cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown> {
     return this.signedPost("/v5/order/cancel-all", payload);
   }
@@ -220,6 +225,42 @@ export class RestBybitAdapter implements BybitAdapter {
     );
   }
 
+  // Symbol-scoped order history — no orderLinkId, mirroring getActiveOrders's
+  // existing symbol-scoped shape applied to the history endpoint instead of
+  // realtime. Confirmed reachable against Bybit Demo
+  // (abi-native-partial-protection-attribution-v1 design.md Decision 0/4),
+  // subject to a confirmed propagation lag: an empty/incomplete result
+  // shortly after a transition is not proof a terminal order does not exist.
+  async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
+    return this.signedGet(
+      "/v5/order/history",
+      new URLSearchParams({
+        category: payload.category,
+        symbol: payload.symbol,
+        limit: payload.limit,
+      }),
+    );
+  }
+
+  // "Get Trade History" — the only Bybit primitive that records each
+  // individual fill with its own timestamp (execTime), used by
+  // resolveFirstAttributableFillAtMs to source first_fill_at_ms
+  // (abi-pair-scoped-open-position-resolution-v1). Deliberately keyed on
+  // orderLinkId only, never orderId — see BybitGetExecutionListPayload.
+  async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
+    const params = new URLSearchParams({
+      category: payload.category,
+      symbol: payload.symbol,
+      orderLinkId: payload.orderLinkId,
+      limit: payload.limit,
+    });
+    if (payload.cursor !== undefined) {
+      params.set("cursor", payload.cursor);
+    }
+
+    return this.signedGet("/v5/execution/list", params);
+  }
+
   // Public, unauthenticated — unlike every other bybitAdapter.ts method, this
   // one is intentionally not signed.
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
@@ -229,6 +270,14 @@ export class RestBybitAdapter implements BybitAdapter {
     });
 
     const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
+      signal: this.timeoutSignal(),
+    });
+    return readBybitResponse(response);
+  }
+
+  async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
+    const params = new URLSearchParams({ category, symbol });
+    const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
       signal: this.timeoutSignal(),
     });
     return readBybitResponse(response);
@@ -252,22 +301,6 @@ export class RestBybitAdapter implements BybitAdapter {
 
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {
     return stub("placeMarketOrder", input);
-  }
-
-  // Position-level protection write, not an order amend — replaces the
-  // whole current stop-loss/take-profit state for the position
-  // (positionIdx=0, tpslMode=Full), never a delta.
-  async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    return this.signedPost("/v5/position/trading-stop", {
-      category: input.category,
-      symbol: input.symbol,
-      positionIdx: 0,
-      tpslMode: "Full",
-      stopLoss: input.stopLoss,
-      takeProfit: input.takeProfit,
-      tpTriggerBy: this.config.bybitTriggerBy,
-      slTriggerBy: this.config.bybitTriggerBy,
-    });
   }
 
   private async signedGet(path: string, params: URLSearchParams): Promise<unknown> {
@@ -371,6 +404,10 @@ export class StubBybitAdapter implements BybitAdapter {
     return stub("cancelOrder", payload);
   }
 
+  async amendOrder(payload: BybitAmendOrderPayload): Promise<unknown> {
+    return stub("amendOrder", payload);
+  }
+
   async cancelAllOrders(payload: BybitCancelAllOrdersPayload): Promise<unknown> {
     return stub("cancelAllOrders", payload);
   }
@@ -383,8 +420,20 @@ export class StubBybitAdapter implements BybitAdapter {
     return stub("getOrderHistory", payload);
   }
 
+  async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
+    return stub("getOrderHistoryForSymbol", payload);
+  }
+
+  async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
+    return stub("getExecutionList", payload);
+  }
+
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {
     return stub("getInstrumentInfo", { category, symbol });
+  }
+
+  async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
+    return stub("getOrderPriceLimit", { category, symbol });
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
@@ -399,10 +448,6 @@ export class StubBybitAdapter implements BybitAdapter {
 
   async placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown> {
     return stub("placeMarketOrder", input);
-  }
-
-  async setTradingStop(input: SetTradingStopInput): Promise<unknown> {
-    return stub("setTradingStop", input);
   }
 
 }

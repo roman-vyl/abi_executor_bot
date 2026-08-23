@@ -4,6 +4,7 @@ export type InstrumentTradingRules = {
   minOrderQty: string;
   qtyStep: string;
   minNotionalValue: string;
+  tickSize: string;
 };
 
 export type InstrumentTradingRulesFailureReason =
@@ -17,7 +18,9 @@ export type InstrumentTradingRulesFailureReason =
   | "missing_lot_size_filter"
   | "invalid_min_order_qty"
   | "invalid_qty_step"
-  | "invalid_min_notional_value";
+  | "invalid_min_notional_value"
+  | "missing_price_filter"
+  | "invalid_tick_size";
 
 export type DecodedInstrumentTradingRules =
   | { ok: true; rules: InstrumentTradingRules }
@@ -100,7 +103,19 @@ export function decodeInstrumentTradingRulesResponse(input: {
     return { ok: false, reason: "invalid_min_notional_value" };
   }
 
-  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue } };
+  const priceFilter = record.priceFilter;
+  if (typeof priceFilter !== "object" || priceFilter === null) {
+    return { ok: false, reason: "missing_price_filter" };
+  }
+
+  const priceFilterRecord = priceFilter as Record<string, unknown>;
+
+  const tickSize = priceFilterRecord.tickSize;
+  if (typeof tickSize !== "string" || !isStrictlyPositive(tickSize)) {
+    return { ok: false, reason: "invalid_tick_size" };
+  }
+
+  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue, tickSize } };
 }
 
 function isStrictlyPositive(text: string): boolean {

@@ -140,6 +140,165 @@ export function decodeOrderQueryResponse(input: {
   };
 }
 
+// A candidate order row from a symbol-scoped (not orderLinkId-scoped) query
+// — potentially a native Bybit-materialized `tpslMode: "Partial"` protection
+// child, potentially an unrelated order for the same symbol. `orderLinkId`
+// is decoded for completeness/audit only: a native child is observed to
+// always report it empty (abi-native-partial-protection-attribution-v1
+// design.md Decision 0, fact 2), so it is never used as an identity —
+// `orderId` is. `parentOrderLinkId`/`stopOrderType`/`createType` are the
+// attribution and role-classification fields that same design's Decision 0
+// confirmed against real Bybit Demo responses.
+export type BybitChildOrderCandidate = {
+  orderLinkId: string;
+  orderId: string;
+  parentOrderLinkId: string;
+  stopOrderType: string;
+  createType: string;
+  orderStatus: string;
+  triggerPrice: string;
+  qty: string;
+  leavesQty: string;
+};
+
+export type ChildOrderListProtocolFailureReason =
+  | "malformed_envelope"
+  | "category_mismatch"
+  | "list_not_array"
+  | "malformed_item"
+  | "symbol_mismatch"
+  | "invalid_order_link_id"
+  | "invalid_order_id"
+  | "invalid_parent_order_link_id"
+  | "invalid_stop_order_type"
+  | "invalid_create_type"
+  | "invalid_order_status"
+  | "invalid_trigger_price"
+  | "invalid_qty"
+  | "invalid_leaves_qty";
+
+export type DecodedChildOrderList =
+  | { kind: "ok"; items: BybitChildOrderCandidate[] }
+  | { kind: "protocol_failure"; reason: ChildOrderListProtocolFailureReason };
+
+export type ExpectedChildOrderListScope = {
+  category: string;
+  symbol: string;
+};
+
+// Pure decoder for a symbol-scoped `order/realtime` or `order/history`
+// response — unlike decodeOrderQueryResponse, this accepts zero or many
+// rows (that is the whole point of a symbol-wide scan) and does not reject
+// on a particular orderLinkId, since there is no single expected identity
+// to match: every row is a candidate, filtered by parentOrderLinkId one
+// layer up (resolveOwnAttachedProtection). A malformed individual row still
+// fails the whole response closed, the same discipline decodeOrderQueryResponse
+// applies to its own single row.
+export function decodeChildOrderListResponse(input: {
+  response: unknown;
+  expected: ExpectedChildOrderListScope;
+}): DecodedChildOrderList {
+  const { response, expected } = input;
+
+  if (typeof response !== "object" || response === null || !("result" in response)) {
+    return { kind: "protocol_failure", reason: "malformed_envelope" };
+  }
+
+  const result = (response as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null) {
+    return { kind: "protocol_failure", reason: "malformed_envelope" };
+  }
+
+  const resultRecord = result as Record<string, unknown>;
+  if (resultRecord.category !== expected.category) {
+    return { kind: "protocol_failure", reason: "category_mismatch" };
+  }
+
+  const list = resultRecord.list;
+  if (!Array.isArray(list)) {
+    return { kind: "protocol_failure", reason: "list_not_array" };
+  }
+
+  const items: BybitChildOrderCandidate[] = [];
+
+  for (const row of list) {
+    if (typeof row !== "object" || row === null) {
+      return { kind: "protocol_failure", reason: "malformed_item" };
+    }
+
+    const record = row as Record<string, unknown>;
+
+    if (record.symbol !== expected.symbol) {
+      return { kind: "protocol_failure", reason: "symbol_mismatch" };
+    }
+
+    // Legitimately empty on a native child (fact 2) — only a present,
+    // non-string value is rejected as malformed.
+    const orderLinkIdField = readOptionalStringField(record, "orderLinkId");
+    if (!orderLinkIdField.ok) {
+      return { kind: "protocol_failure", reason: "invalid_order_link_id" };
+    }
+
+    // The only reliable per-child identity (used for dedup by the caller) —
+    // unlike orderLinkId, never legitimately empty.
+    const orderId = record.orderId;
+    if (typeof orderId !== "string" || orderId === "") {
+      return { kind: "protocol_failure", reason: "invalid_order_id" };
+    }
+
+    const parentOrderLinkIdField = readOptionalStringField(record, "parentOrderLinkId");
+    if (!parentOrderLinkIdField.ok) {
+      return { kind: "protocol_failure", reason: "invalid_parent_order_link_id" };
+    }
+
+    const stopOrderTypeField = readOptionalStringField(record, "stopOrderType");
+    if (!stopOrderTypeField.ok) {
+      return { kind: "protocol_failure", reason: "invalid_stop_order_type" };
+    }
+
+    const createTypeField = readOptionalStringField(record, "createType");
+    if (!createTypeField.ok) {
+      return { kind: "protocol_failure", reason: "invalid_create_type" };
+    }
+
+    const orderStatus = record.orderStatus;
+    if (typeof orderStatus !== "string" || orderStatus === "") {
+      return { kind: "protocol_failure", reason: "invalid_order_status" };
+    }
+
+    const triggerPriceField = readOptionalStringField(record, "triggerPrice");
+    if (!triggerPriceField.ok || !isNonNegativeOrEmptyExactDecimal(triggerPriceField.value)) {
+      return { kind: "protocol_failure", reason: "invalid_trigger_price" };
+    }
+
+    const qtyField = readOptionalStringField(record, "qty");
+    if (!qtyField.ok || !isPositiveOrEmptyExactDecimal(qtyField.value)) {
+      return { kind: "protocol_failure", reason: "invalid_qty" };
+    }
+
+    // 0 is the expected, legitimate value on a terminal record (fact 10) —
+    // not merely tolerated as empty.
+    const leavesQtyField = readOptionalStringField(record, "leavesQty");
+    if (!leavesQtyField.ok || !isNonNegativeOrEmptyExactDecimal(leavesQtyField.value)) {
+      return { kind: "protocol_failure", reason: "invalid_leaves_qty" };
+    }
+
+    items.push({
+      orderLinkId: orderLinkIdField.value,
+      orderId,
+      parentOrderLinkId: parentOrderLinkIdField.value,
+      stopOrderType: stopOrderTypeField.value,
+      createType: createTypeField.value,
+      orderStatus,
+      triggerPrice: triggerPriceField.value,
+      qty: qtyField.value,
+      leavesQty: leavesQtyField.value,
+    });
+  }
+
+  return { kind: "ok", items };
+}
+
 // A field the exchange omits entirely (not an own key on the row) is a
 // legitimate empty — some fields only appear at certain order states. A
 // field that IS present but is not a string (a number, null, boolean,

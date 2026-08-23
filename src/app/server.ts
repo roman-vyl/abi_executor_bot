@@ -52,11 +52,20 @@ export function startServer(config: AbiConfig): void {
   const openPositionResolutionService = new OpenPositionResolutionService({
     correlationRepository,
     bybit,
+    // Used only to durably capture first_fill_at_ms exactly once
+    // (abi-pair-scoped-open-position-resolution-v1) — the same shared
+    // instance every other durable write in this codebase already uses.
+    mutex,
   });
 
   const entryCycleRecoveryResolutionService = new EntryCycleRecoveryResolutionService({
     correlationRepository,
     bybit,
+    // Used only to durably capture first_fill_at_ms exactly once, when
+    // resolving position_open (abi-entry-cycle-recovery-attribution-v1) —
+    // the same shared instance every other durable write in this codebase
+    // already uses.
+    mutex,
   });
 
   // Reuses the same pair-level `mutex` (not `scopeMutex`) and the same
@@ -68,6 +77,7 @@ export function startServer(config: AbiConfig): void {
     correlationRepository,
     mutex,
     openPositionResolutionService,
+    tradingRules: rulesProvider,
   });
 
   // Reuses the same pair-level `mutex`, never `scopeMutex` — release of a

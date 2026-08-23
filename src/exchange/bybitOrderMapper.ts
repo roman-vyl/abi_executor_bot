@@ -18,7 +18,7 @@ export type BybitCreateOrderPayload = {
   stopLoss?: string;
   tpTriggerBy?: string;
   slTriggerBy?: string;
-  tpslMode?: "Full";
+  tpslMode?: "Partial";
   tpOrderType?: "Market";
   slOrderType?: "Market";
 };
@@ -31,12 +31,29 @@ export type BybitMarketCloseOrderPayload = {
   qty: string;
   reduceOnly: true;
   positionIdx?: number;
+  // Only the multi-owner close path (abi-pair-scoped-close-execution-v1)
+  // sets this — a stable, attributable identity so a crash/retry can
+  // resolve this specific close order's own fate before ever sending a
+  // second one. The single-owner path's payload construction is unchanged
+  // and omits it entirely.
+  orderLinkId?: string;
 };
 
-export type BybitCancelOrderPayload = {
+export type BybitCancelOrderPayload =
+  | { category: string; symbol: string; orderLinkId: string; orderId?: never }
+  | { category: string; symbol: string; orderId: string; orderLinkId?: never };
+
+// Scoped by orderId, never orderLinkId — a native Partial protection
+// child's own orderLinkId is confirmed empty
+// (abi-native-partial-protection-attribution-v1 design.md Decision 0,
+// fact 2), so orderId is the only usable identity for amending it
+// (abi-native-partial-protection-lifecycle-v1 design.md Decision 2).
+export type BybitAmendOrderPayload = {
   category: string;
   symbol: string;
-  orderLinkId: string;
+  orderId: string;
+  triggerPrice?: string;
+  qty?: string;
 };
 
 export type BybitCancelAllOrdersPayload = {
@@ -57,6 +74,30 @@ export type BybitGetOrderHistoryPayload = {
   symbol: string;
   orderLinkId: string;
   limit: "1";
+};
+
+// Deliberately no orderLinkId field — a distinct, narrower type from
+// BybitGetOrderHistoryPayload rather than making that one's orderLinkId
+// optional, so a symbol-wide scan (this) and a single-order lookup (that)
+// can never be confused at the type level
+// (abi-native-partial-protection-attribution-v1 design.md Decision 4).
+export type BybitGetOrderHistoryForSymbolPayload = {
+  category: string;
+  symbol: string;
+  limit: string;
+};
+
+// Deliberately no orderId field: Bybit's own documented parameter-priority
+// rule for this endpoint is orderId > orderLinkId > symbol > baseCoin —
+// sending both would let orderId silently override the intended filter.
+// order_id is this codebase's established "audit only, never used for
+// lookup" field everywhere else; this endpoint gets the same treatment.
+export type BybitGetExecutionListPayload = {
+  category: string;
+  symbol: string;
+  orderLinkId: string;
+  limit: string;
+  cursor?: string;
 };
 
 export type EntryPackageOrderInput = {
@@ -102,7 +143,7 @@ export function mapEntryPackageToBybit(
     triggerDirection,
     triggerBy: config.bybitTriggerBy,
     orderLinkId: input.orderLinkId,
-    tpslMode: "Full",
+    tpslMode: "Partial",
     stopLoss: input.initialStopPrice,
     slTriggerBy: config.bybitTriggerBy,
     slOrderType: "Market",
@@ -135,6 +176,23 @@ export function mapEntryPackageToBybit(
 
 export function mapPositionSideToCloseSide(side: string): BybitOrderSide {
   return side === "Buy" ? "Sell" : "Buy";
+}
+
+// Reads Bybit's own assigned orderId out of a create-order response.
+// Generic to any /v5/order/create call (entry, or a multi-owner close order)
+// — nothing here is specific to which kind of order was created.
+export function readBybitOrderId(response: unknown): string | null {
+  if (typeof response !== "object" || response === null || !("result" in response)) {
+    return null;
+  }
+
+  const result = (response as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null || !("orderId" in result)) {
+    return null;
+  }
+
+  const orderId = (result as Record<string, unknown>).orderId;
+  return typeof orderId === "string" && orderId !== "" ? orderId : null;
 }
 
 function mapTriggerDirection(direction: "rises_to" | "falls_to"): BybitTriggerDirection {

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   serializeProtectionApplied,
   serializeTradeCycleClosed,
+  validateCloseCommand,
   validateProtectionCommand,
 } from "../../src/domain/positionManagementApi.js";
 
@@ -36,9 +37,16 @@ test("protection OpenAPI examples conform to runtime request and response contra
   );
 });
 
-test("close OpenAPI example conforms to the runtime response contract", async () => {
+test("close OpenAPI examples conform to runtime request and response contracts", async () => {
   const document = await readDocument();
   const operation = closeOperation(document);
+  const requestExamples = operation.requestBody.content["application/json"].examples;
+
+  const result = validateCloseCommand(
+    { strategyInstanceId: "runtime-owned-instance-id", tradeCycleId: "runtime-owned-cycle-id" },
+    requestExamples.fullClose.value,
+  );
+  assert.equal(result.ok, true);
 
   const closed = operation.responses["200"].content["application/json"].examples.closed.value;
   assert.deepEqual(
@@ -80,13 +88,17 @@ test("protection operation owns transport shape and the documented error codes",
   ]);
 });
 
-test("close operation accepts no request body and owns the documented error codes", async () => {
+test("close operation requires exposure_fraction and owns the documented error codes", async () => {
   const document = await readDocument();
   const operation = closeOperation(document);
   const schemas = document.components.schemas;
 
-  assert.equal("requestBody" in operation, false);
-  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "422", "500"]);
+  assert.deepEqual(operation.requestBody.content["application/json"].schema, {
+    $ref: "#/components/schemas/CloseRequest",
+  });
+  assert.deepEqual(schemas.CloseRequest.required, ["exposure_fraction"]);
+  assert.equal(schemas.CloseRequest.additionalProperties, false);
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500"]);
   assert.equal(schemas.TradeCycleClosedResponse.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.properties.status.const, "trade_cycle_closed");
 
@@ -95,10 +107,19 @@ test("close operation accepts no request body and owns the documented error code
     "#/components/schemas/ValidationFailedError",
     "#/components/schemas/UnknownTradeCycleBindingError",
     "#/components/schemas/UnsupportedExchangeScopeError",
+    "#/components/schemas/CloseExecutionIncompleteError",
   ]);
 
   const serializedCloseErrors = JSON.stringify(schemas.CloseBusinessError);
   assert.equal(serializedCloseErrors.includes("PositionNotOpenError"), false);
+});
+
+test("the retired DELETE .../open-position path is not documented", async () => {
+  const document = await readDocument();
+  assert.equal(
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position" in document.paths,
+    false,
+  );
 });
 
 test("OpenAPI introduces no internal ABI workflow or exchange detail", async () => {
@@ -126,6 +147,6 @@ function protectionOperation(document: Record<string, any>): Record<string, any>
 
 function closeOperation(document: Record<string, any>): Record<string, any> {
   return document.paths[
-    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/open-position"
-  ].delete as Record<string, any>;
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/close"
+  ].post as Record<string, any>;
 }

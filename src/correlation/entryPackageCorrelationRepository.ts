@@ -1,6 +1,7 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { compareDecimal } from "../domain/exactDecimal.js";
 import { positionScopeKey } from "../domain/positionScope.js";
 import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
 import type { EntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
@@ -75,6 +76,17 @@ export class EntryPackageCorrelationRepository {
         return { ok: false, reason: `corrupt correlation record at line ${index + 1}` };
       }
 
+      // Durable rows written before abi-pair-scoped-close-execution-v1
+      // shipped have no close_order_link_id/close_order_id keys at all.
+      // Normalizing a missing key to null here — before validation, before
+      // indexing — guarantees every in-memory record matches its declared
+      // `string | null` type exactly, never `undefined`; downstream close
+      // logic reads these fields as `!== null` without also having to
+      // check for `undefined` at every call site. Not a schema migration:
+      // nothing is rewritten on disk, only the in-memory value read this
+      // one time.
+      normalizeLegacyCloseIdentityFields(parsed);
+
       // A syntactically-valid-but-wrong-shaped line (e.g. from a future
       // schema migration bug) is corruption too, and must fail readiness
       // the same way malformed JSON does — never be silently indexed.
@@ -84,6 +96,18 @@ export class EntryPackageCorrelationRepository {
           continue;
         }
         return { ok: false, reason: `correlation record at line ${index + 1} does not match the expected schema` };
+      }
+
+      // Fill-fact monotonicity, checked in file order against the previous
+      // line for the same pair — unlike scope ownership (Phase 2 below),
+      // a single pair's own fill-fact sequence has no legitimate
+      // "intermediate disagreement" case: every line for the same pair is
+      // either a compatible continuation of the previous line or it is
+      // real corruption, so per-line comparison is correct here.
+      const key = correlationRecordKey(parsed.strategy_instance_id, parsed.trade_cycle_id);
+      const regression = fillFactRegression(this.byCompositeKey.get(key), parsed);
+      if (regression !== undefined) {
+        return { ok: false, reason: `${regression} at line ${index + 1}` };
       }
 
       // Phase 1: replay every valid line, keyed indexes only. byScope is
@@ -117,15 +141,68 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
-  // The pair, if any, currently holding this physical scope. Callers
-  // acquiring a new scope binding must serialize this read together with
-  // the durable write that claims it under the scope-level KeyedMutex —
-  // this method itself performs no locking.
+  // The most recent non-durably-closed writer of this physical scope, if
+  // any — a single-pointer index, `byScope.set(scope, record)` on every
+  // such write. Correct at what it actually promises (the latest writer),
+  // but NOT a valid primitive for any ownership/admission decision as of
+  // abi-same-side-virtual-exposure-ownership-v1: it cannot represent more
+  // than one active owner, so it cannot answer "is pair X one of this
+  // scope's active owners" once more than one can exist. Both remaining
+  // production call sites that used to ask that question
+  // (EntryPackageApplicationService.createOrder()'s scope-claim guard,
+  // ProtectionApplicationService's ownership re-verification) have moved to
+  // findActiveRecordsForScope() below. Kept only as a cheap,
+  // non-authoritative existence check — do not add a new decision-making
+  // caller of this method.
   findOwnerByScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord | undefined {
     return this.byScope.get(positionScopeKey(category, symbol));
   }
 
+  // Every active (non-durably-closed) record currently sharing a physical
+  // scope, regardless of which pair holds it. A plain scan over
+  // byCompositeKey (already the authoritative "latest record per pair"
+  // collection) rather than a second maintained index — nothing here can
+  // drift out of sync with it. This is the canonical multi-owner-aware
+  // ownership lookup — EntryPackageApplicationService.createOrder()'s
+  // scope-claim guard and ProtectionApplicationService's ownership
+  // re-verification both use it. In production this can still only ever
+  // return zero or one record today: createOrder()'s own admission
+  // classification is gated by a temporary guard
+  // (abi-same-side-virtual-exposure-ownership-v1) that keeps single
+  // ownership in effect until a later change removes it. This also exists
+  // so a repository-level test can seed multiple same-side records
+  // directly (bypassing that guard) and prove the repository layer itself
+  // has no single-owner assumption baked in — see virtual-exposure-state
+  // spec.md.
+  findActiveRecordsForScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord[] {
+    const targetScope = positionScopeKey(category, symbol);
+    const results: EntryPackageExecutionRecord[] = [];
+
+    for (const record of this.byCompositeKey.values()) {
+      if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+        continue;
+      }
+      if (isDurablyClosedEntryPackageStatus(record.status)) {
+        continue;
+      }
+      if (positionScopeKey(record.exchange_category, record.exchange_symbol) !== targetScope) {
+        continue;
+      }
+      results.push(record);
+    }
+
+    return results;
+  }
+
   async save(record: EntryPackageExecutionRecord): Promise<void> {
+    const regression = fillFactRegression(
+      this.byCompositeKey.get(correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)),
+      record,
+    );
+    if (regression !== undefined) {
+      throw new Error(regression);
+    }
+
     const line = `${JSON.stringify(record)}\n`;
 
     const task = this.writeQueue.then(() => this.appendDurable(line));
@@ -204,6 +281,12 @@ export class EntryPackageCorrelationRepository {
   // durable state, not a sequencing artifact.
   private rebuildScopeIndexFromReplay(): string | undefined {
     this.byScope.clear();
+    // Local to this one replay pass, discarded on return — not a new
+    // persisted index. Tracks the side already seen active for each scope
+    // so two or more same-side active records no longer fail readiness by
+    // themselves (abi-same-side-virtual-exposure-ownership-v1 design.md
+    // Decision 3); only a genuine mixed-side conflict does.
+    const activeSideByScope = new Map<string, "long" | "short">();
 
     for (const record of this.byCompositeKey.values()) {
       if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
@@ -242,14 +325,28 @@ export class EntryPackageCorrelationRepository {
       }
 
       const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
-      const existingOwner = this.byScope.get(scope);
-      if (existingOwner !== undefined) {
+
+      const side = record.desired_entry?.side;
+      if (side === undefined) {
+        // Same contradiction class as the missing-exchange-binding checks
+        // above: a non-durably-closed record with no usable desired_entry
+        // is a state no current write path produces, but replay must fail
+        // closed rather than silently exclude it from ownership if it ever
+        // does.
         return (
-          `conflicting scope ownership for ${scope}: both ` +
-          `${correlationRecordKey(existingOwner.strategy_instance_id, existingOwner.trade_cycle_id)} and ` +
-          `${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} are durably open`
+          `record for ${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} is active but ` +
+          `has no usable desired_entry.side`
         );
       }
+
+      const existingSide = activeSideByScope.get(scope);
+      if (existingSide !== undefined && existingSide !== side) {
+        return (
+          `conflicting scope ownership for ${scope}: mixed sides among active records ` +
+          `(saw both "${existingSide}" and "${side}")`
+        );
+      }
+      activeSideByScope.set(scope, side);
       this.byScope.set(scope, record);
     }
 
@@ -259,6 +356,74 @@ export class EntryPackageCorrelationRepository {
 
 function isSamePair(a: EntryPackageExecutionRecord, b: EntryPackageExecutionRecord): boolean {
   return a.strategy_instance_id === b.strategy_instance_id && a.trade_cycle_id === b.trade_cycle_id;
+}
+
+// A pair's own recorded cumulative_filled_qty must never regress across
+// writes: it is sourced from Bybit's own monotonic cumExecQty for that
+// cycle's own entry order at every observation point
+// (packageConfirmation.ts's toObservation), so no legitimate write can ever
+// produce a smaller value than what is already durably recorded for the
+// same pair. A violation is a programming-error signal, not a real business
+// outcome (virtual-exposure-state spec.md, "Cumulative filled quantity
+// never regresses"). average_execution_price is deliberately not checked —
+// it is not required to move in any particular direction. Returns a
+// descriptive reason on violation, undefined otherwise; callers decide
+// whether to throw (live save()) or fail replay closed.
+function fillFactRegression(
+  previous: EntryPackageExecutionRecord | undefined,
+  incoming: EntryPackageExecutionRecord,
+): string | undefined {
+  // first_fill_at_ms is a strict immutability check (not monotonic
+  // non-decrease like cumulative_filled_qty below): once captured
+  // (abi-pair-scoped-open-position-resolution-v1), it must never change,
+  // including changing to null. Checked independently of
+  // early_execution_observation's own nullity.
+  const previousFirstFillAtMs = previous?.first_fill_at_ms ?? null;
+  if (previousFirstFillAtMs !== null && incoming.first_fill_at_ms !== previousFirstFillAtMs) {
+    return (
+      `first_fill_at_ms regression for ` +
+      `${correlationRecordKey(incoming.strategy_instance_id, incoming.trade_cycle_id)}: ` +
+      `${JSON.stringify(incoming.first_fill_at_ms)} !== ${JSON.stringify(previousFirstFillAtMs)}`
+    );
+  }
+
+  const previousObservation = previous?.early_execution_observation ?? null;
+  const incomingObservation = incoming.early_execution_observation;
+  if (previousObservation === null || incomingObservation === null) {
+    return undefined;
+  }
+
+  if (compareDecimal(incomingObservation.cumulative_filled_qty, previousObservation.cumulative_filled_qty) < 0) {
+    return (
+      `cumulative_filled_qty regression for ` +
+      `${correlationRecordKey(incoming.strategy_instance_id, incoming.trade_cycle_id)}: ` +
+      `${incomingObservation.cumulative_filled_qty} < ${previousObservation.cumulative_filled_qty}`
+    );
+  }
+
+  return undefined;
+}
+
+// Mutates a freshly JSON.parse()'d value in place, filling in a missing
+// close_order_link_id/close_order_id key with null. Only ever called on a
+// value that has not yet been validated or indexed, before any other code
+// holds a reference to it — see the call site's comment in replay().
+function normalizeLegacyCloseIdentityFields(value: unknown): void {
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  if (!("close_order_link_id" in record)) {
+    record.close_order_link_id = null;
+  }
+  if (!("close_order_id" in record)) {
+    record.close_order_id = null;
+  }
+  // Same precedent, for rows written before
+  // abi-pair-scoped-open-position-resolution-v1 shipped.
+  if (!("first_fill_at_ms" in record)) {
+    record.first_fill_at_ms = null;
+  }
 }
 
 function isNotFoundError(error: unknown): boolean {

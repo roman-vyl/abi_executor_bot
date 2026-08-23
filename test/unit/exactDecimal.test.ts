@@ -6,7 +6,9 @@ import {
   ceilToStep,
   compareDecimal,
   decimalEquals,
+  floorToStep,
   maxDecimal,
+  multiplyDecimal,
   subtractDecimal,
 } from "../../src/domain/exactDecimal.js";
 
@@ -34,6 +36,25 @@ test("ceilToStep still rounds up correctly with the wider grammar", () => {
 
 test("ceilRatioToStep exact-decimal division is unaffected by the grammar widening", () => {
   assert.equal(ceilRatioToStep("5", "3", "0.001"), "1.667");
+});
+
+test("floorToStep leaves an exact-multiple-of-step input unchanged", () => {
+  assert.equal(floorToStep("1.5", "0.5"), "1.5");
+  assert.equal(floorToStep("0.001", "0.001"), "0.001");
+});
+
+test("floorToStep rounds a value strictly between two step boundaries down to the lower one", () => {
+  assert.equal(floorToStep("0.0019", "0.001"), "0.001");
+  assert.equal(floorToStep("1.0009", "0.001"), "1");
+});
+
+test("floorToStep and ceilToStep differ whenever the input is not already an exact multiple", () => {
+  assert.equal(floorToStep("0.0019", "0.001"), "0.001");
+  assert.equal(ceilToStep("0.0019", "0.001"), "0.002");
+  assert.notEqual(floorToStep("0.0019", "0.001"), ceilToStep("0.0019", "0.001"));
+
+  // Exact multiples: both agree (no rounding needed either way).
+  assert.equal(floorToStep("1.5", "0.5"), ceilToStep("1.5", "0.5"));
 });
 
 test("maxDecimal and subtractDecimal handle bare-dot and signed forms", () => {
@@ -73,4 +94,15 @@ test("decimalEquals is total: malformed input is a mismatch, never a throw", () 
   assert.equal(decimalEquals("", "1"), false);
   assert.equal(decimalEquals("1.2.3", "1.2.3"), false);
   assert.equal(decimalEquals("1", "1"), true);
+});
+
+test("multiplyDecimal computes an exact product with no binary-float rounding", () => {
+  assert.equal(multiplyDecimal("100000", "1.5"), "150000");
+  assert.equal(multiplyDecimal("100000.33", "1.5"), "150000.495");
+  assert.equal(multiplyDecimal("0.1", "0.2"), "0.02");
+});
+
+test("multiplyDecimal accepts the exponent transport grammar (e.g. 1e3), matching isExactDecimalText", () => {
+  assert.equal(multiplyDecimal("1e3", "1.5"), "1500");
+  assert.equal(compareDecimal(multiplyDecimal("1e3", "1.5"), "1500"), 0);
 });

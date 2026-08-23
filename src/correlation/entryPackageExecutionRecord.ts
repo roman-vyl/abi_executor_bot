@@ -87,6 +87,26 @@ export type EntryPackageExecutionRecord = {
   calculated_quantity: string | null;
   order_link_id: string | null;
   order_id: string | null;
+  // The close operation's own attributable order identity for this
+  // generation — independent of order_link_id/order_id above, which name
+  // the entry order. Non-null once a close order has been dispatched for
+  // this generation (abi-pair-scoped-close-execution-v1); null while none
+  // has, and reset to null only by a fresh generation's provisional
+  // record (a new generation can never begin while a close identity for
+  // the prior one is unresolved — see that change's design.md). close_order_id
+  // is audit-only: every lookup keys on close_order_link_id, mirroring how
+  // order_id is never used for lookup either.
+  close_order_link_id: string | null;
+  close_order_id: string | null;
+  // This cycle's own raw attributable first-fill timestamp — the earliest
+  // execTime among this cycle's own entry order's own executions
+  // (abi-pair-scoped-open-position-resolution-v1), never a canonical
+  // strategy-bar value (ABI has no timeframe/grid concept; that
+  // normalization is Runtime's responsibility). Captured durably exactly
+  // once, the first time OpenPositionResolutionService observes a nonzero
+  // own fill with this field still null, and immutable afterward — see
+  // fillFactRegression's sibling check in entryPackageCorrelationRepository.ts.
+  first_fill_at_ms: number | null;
   generation: number;
   status: EntryPackageExecutionStatus;
   early_execution_observation: EarlyExecutionObservation | null;
@@ -170,6 +190,31 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     (record.calculated_quantity === null || typeof record.calculated_quantity === "string") &&
     (record.order_link_id === null || typeof record.order_link_id === "string") &&
     (record.order_id === null || typeof record.order_id === "string") &&
+    // Unlike order_link_id/order_id above, these two tolerate the key being
+    // entirely absent (undefined), not just null: they did not exist on
+    // durable rows written before abi-pair-scoped-close-execution-v1
+    // shipped, and this codebase has no schema-migration subsystem to
+    // backfill them. replay() normalizes a missing key to null before this
+    // function runs (see entryPackageCorrelationRepository.ts), so this
+    // tolerance is defense-in-depth for any other caller, not the only
+    // safeguard against a stray `undefined` reaching close-execution logic
+    // that assumes `string | null`.
+    (record.close_order_link_id === undefined ||
+      record.close_order_link_id === null ||
+      typeof record.close_order_link_id === "string") &&
+    (record.close_order_id === undefined ||
+      record.close_order_id === null ||
+      typeof record.close_order_id === "string") &&
+    // Same three-way tolerance as close_order_link_id/close_order_id above,
+    // for the same reason: rows written before
+    // abi-pair-scoped-open-position-resolution-v1 shipped lack this key
+    // entirely. replay() normalizes a missing key to null before this
+    // function runs.
+    (record.first_fill_at_ms === undefined ||
+      record.first_fill_at_ms === null ||
+      (typeof record.first_fill_at_ms === "number" &&
+        Number.isInteger(record.first_fill_at_ms) &&
+        record.first_fill_at_ms >= 0)) &&
     typeof record.generation === "number" &&
     Number.isInteger(record.generation) &&
     record.generation >= 0 &&

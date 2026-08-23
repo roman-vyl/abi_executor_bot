@@ -60,11 +60,11 @@ const expectedDocuments = [
         requestBody: "required",
       },
       {
-        method: "delete",
-        httpMethod: "DELETE",
-        path: `${routePrefix}/open-position`,
-        responses: ["200", "422", "500"],
-        requestBody: "absent",
+        method: "post",
+        httpMethod: "POST",
+        path: `${routePrefix}/close`,
+        responses: ["200", "400", "415", "422", "500"],
+        requestBody: "required",
       },
     ],
     validate: validatePositionManagementDocument,
@@ -234,15 +234,20 @@ function validateOpenPositionDocument(document) {
 function validateEntryCycleRecoveryDocument(document) {
   const schemas = document.components.schemas;
 
-  assert.equal(schemas.RecoveryStateResponse.oneOf.length, 4);
+  assert.equal(schemas.RecoveryStateResponse.oneOf.length, 5);
   assert.equal(schemas.RecoveryStateBusinessError.oneOf.length, 2);
   assert.equal(schemas.InternalError.properties.error.properties.code.const, "internal_error");
 
-  const stateConsts = ["EntryOrderLiveResponse", "PositionOpenResponse", "TerminalWithoutFillResponse", "TerminalAfterFillResponse"].map(
-    (name) => schemas[name].properties.recovery_state.const,
-  );
+  const stateConsts = [
+    "EntryOrderLiveResponse",
+    "EntryOrderNotFoundResponse",
+    "PositionOpenResponse",
+    "TerminalWithoutFillResponse",
+    "TerminalAfterFillResponse",
+  ].map((name) => schemas[name].properties.recovery_state.const);
   assert.deepEqual(stateConsts, [
     "entry_order_live",
+    "entry_order_not_found",
     "position_open",
     "terminal_without_fill",
     "terminal_after_fill",
@@ -253,13 +258,15 @@ function validateEntryCycleRecoveryDocument(document) {
       $ref: "#/components/schemas/AppliedEntryPackage",
     });
   }
-  for (const name of ["TerminalWithoutFillResponse", "TerminalAfterFillResponse"]) {
+  for (const name of ["EntryOrderNotFoundResponse", "TerminalWithoutFillResponse", "TerminalAfterFillResponse"]) {
     assert.equal(schemas[name].properties.applied_entry_package.type, "null");
   }
 
   assert.equal(schemas.PositionOpenResponse.properties.first_fill_at_ms.type, "integer");
   assert.equal(schemas.PositionOpenResponse.properties.average_entry_price.format, "positive-exact-decimal");
   assert.equal(schemas.EntryOrderLiveResponse.properties.first_fill_at_ms.type, "null");
+  assert.equal(schemas.EntryOrderNotFoundResponse.properties.first_fill_at_ms.type, "null");
+  assert.equal(schemas.EntryOrderNotFoundResponse.properties.average_entry_price.type, "null");
 
   assertForbiddenText(document, [
     "pending_create",
@@ -274,7 +281,7 @@ function validateEntryCycleRecoveryDocument(document) {
 function validatePositionManagementDocument(document) {
   const schemas = document.components.schemas;
   const protectionOperation = document.paths[`${routePrefix}/protection`].put;
-  const closeOperation = document.paths[`${routePrefix}/open-position`].delete;
+  const closeOperation = document.paths[`${routePrefix}/close`].post;
 
   assert.deepEqual(schemas.ProtectionRequest.required, ["stop_price", "take_price"]);
   assert.equal(schemas.ProtectionRequest.additionalProperties, false);
@@ -289,7 +296,11 @@ function validatePositionManagementDocument(document) {
     "#/components/schemas/PositionNotOpenError",
   ]);
 
-  assert.equal("requestBody" in closeOperation, false);
+  assert.deepEqual(closeOperation.requestBody.content["application/json"].schema, {
+    $ref: "#/components/schemas/CloseRequest",
+  });
+  assert.deepEqual(schemas.CloseRequest.required, ["exposure_fraction"]);
+  assert.equal(schemas.CloseRequest.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.properties.status.const, "trade_cycle_closed");
 
@@ -298,12 +309,14 @@ function validatePositionManagementDocument(document) {
     "#/components/schemas/ValidationFailedError",
     "#/components/schemas/UnknownTradeCycleBindingError",
     "#/components/schemas/UnsupportedExchangeScopeError",
+    "#/components/schemas/CloseExecutionIncompleteError",
   ]);
   assert.equal(JSON.stringify(schemas.CloseBusinessError).includes("PositionNotOpenError"), false);
 
   assert.ok(protectionOperation.requestBody.content["application/json"].examples.withTake);
   assert.ok(protectionOperation.requestBody.content["application/json"].examples.stopOnly);
   assert.ok(protectionOperation.responses["200"].content["application/json"].examples.applied);
+  assert.ok(closeOperation.requestBody.content["application/json"].examples.fullClose);
   assert.ok(closeOperation.responses["200"].content["application/json"].examples.closed);
 
   assertForbiddenText(document, ["bybit", "Bybit", "adapter", "positionIdx", "orderLinkId"]);

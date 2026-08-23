@@ -149,24 +149,34 @@ async function handleClose(
   closeApplicationService: CloseApplicationServicePort,
   isReady: () => boolean,
 ): Promise<void> {
+  // Same content-type/JSON-parse flow handleProtection already uses — close
+  // now carries a body (exposure_fraction), unlike the retired empty-bodied
+  // DELETE this route replaces.
+  if (!isSupportedJsonContentType(request.headers["content-type"])) {
+    writeResult(response, unsupportedMediaTypeResult());
+    return;
+  }
+
   if (match.details !== undefined) {
     writeResult(response, validationFailedResult(match.details));
     return;
   }
 
-  const rawBody = await readRawBody(request);
-  if (rawBody.length > 0) {
-    writeResult(
-      response,
-      validationFailedResult([{ path: "/", message: "request body must be empty" }]),
-    );
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(request);
+  } catch {
+    writeResult(response, malformedJsonResult());
     return;
   }
 
-  const validation = validateCloseCommand({
-    strategyInstanceId: match.strategyInstanceId,
-    tradeCycleId: match.tradeCycleId,
-  });
+  const validation = validateCloseCommand(
+    {
+      strategyInstanceId: match.strategyInstanceId,
+      tradeCycleId: match.tradeCycleId,
+    },
+    payload,
+  );
 
   if (!validation.ok) {
     writeResult(response, validationFailedResult(validation.details));
@@ -231,7 +241,7 @@ export function matchCloseRoute(
   method: string | undefined,
   requestUrl: string | undefined,
 ): PositionManagementRouteMatch {
-  if (method !== "DELETE" || requestUrl === undefined) {
+  if (method !== "POST" || requestUrl === undefined) {
     return { matched: false };
   }
 
@@ -242,7 +252,7 @@ export function matchCloseRoute(
     segments[1] !== "v1" ||
     segments[2] !== "strategy-instances" ||
     segments[4] !== "trade-cycles" ||
-    segments[6] !== "open-position"
+    segments[6] !== "close"
   ) {
     return { matched: false };
   }
@@ -264,22 +274,6 @@ function pathSegments(requestUrl: string): string[] {
   const queryStart = requestUrl.indexOf("?");
   const pathname = queryStart === -1 ? requestUrl : requestUrl.slice(0, queryStart);
   return pathname.split("/");
-}
-
-// DELETE's body is required to be empty. Unlike readJsonBody, this never
-// parses JSON and never rejects an empty body; it only reports raw byte
-// length.
-function readRawBody(request: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = "";
-
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => {
-      body += chunk;
-    });
-    request.on("end", () => resolve(body));
-    request.on("error", reject);
-  });
 }
 
 function writeResult(response: ServerResponse, result: PositionManagementHttpResult): void {

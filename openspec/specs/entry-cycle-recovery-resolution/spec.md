@@ -84,87 +84,177 @@ Given an existing correlation record whose `status` is not already one of the th
 durably closed statuses resolved directly above, ABI SHALL resolve exactly one of:
 `entry_order_live`, `position_open`, `terminal_without_fill`, or `terminal_after_fill` —
 or, when it cannot positively establish one of those four from non-contradictory
-evidence, ABI SHALL fail safe rather than resolve anything. Resolution SHALL combine a
-bounded order query (realtime and history, using the same fill-priority classification
-already used to confirm package application) with a bounded position query, following
-the same dual-query, bounded-retry pattern `close-execution` already uses to verify both
-postconditions of a close. This dual-query, bounded-retry resolution path is required
-only when resolving from current exchange observations, as in this Requirement — it is
-not required, and not performed, when the record's own durably closed status already
-resolves the state directly (the prior Requirement). No state is resolved from the order
-query alone or the position query alone — both signals SHALL be positively established
-and SHALL agree before ABI resolves `position_open`, `terminal_after_fill`, or
-`terminal_without_fill`; a
-fill signal on its own (including an order found `PartiallyFilled`), or a terminal-order
-signal on its own, is never sufficient by itself. In particular, `terminal_without_fill`
-requires the position query to positively confirm no open position — a position query
-that fails, times out, or is otherwise inconclusive does NOT satisfy this, even though it
-also does not "contradict" the order-side finding; absence of contradiction is not the
-same as a positive confirmation, and only the latter is sufficient. A positively-found
-position confirms `position_open` only when its side plausibly matches the correlation
-record's own `desired_entry.side` (`Buy` with `long`, `Sell` with `short`) — the same
-plausibility rule `open-position-resolution` already applies. A found position on the
-opposite side is contradictory evidence (some other exposure on the same exchange
-symbol, not this binding's own fill) and ABI SHALL fail safe rather than resolve
-`position_open` from it.
+evidence, ABI SHALL fail safe rather than resolve anything.
 
-#### Scenario: A live, unfilled order resolves to entry_order_live
-- **WHEN** the order query positively finds the entry order in a live, unfilled state, and
-  the position query positively finds no open position
+Every state SHALL be resolved primarily from this specific trade cycle's own durable/
+order/execution evidence — its own entry order (identified by its own `order_link_id`)
+and, when that order proves a fill, its own close order (identified by its own
+`close_order_link_id`, when one has been durably recorded) — never from the aggregate
+physical position query as a required, co-equal signal. The aggregate physical position
+query SHALL be retained only as a narrow, state-appropriate sanity check that can block a
+resolution this cycle's own evidence would otherwise positively support, and SHALL NEVER
+be required to positively confirm a specific state (existence, flatness, or side) as a
+precondition for `entry_order_live` or `terminal_without_fill`, and SHALL NEVER be
+consulted at all when resolving `terminal_after_fill`. This reflects that a physical
+scope may be shared by more than one same-side trade cycle: a sibling cycle's own
+activity is visible in the same aggregate query and SHALL NOT prevent, delay, or alter
+this cycle's own resolution.
+
+`entry_order_live` and `terminal_without_fill` each resolve directly from a positive
+own-order-query finding (a live, unfilled order; or a terminal order with zero
+cumulative fill, respectively). Each fails safe if the aggregate physical position query
+positively confirms an open position on the side opposite this record's own
+`desired_entry.side` — a genuine structural invariant violation (same-side-only sharing),
+never a normal condition of a same-side sibling sharing the scope. A same-side aggregate
+position, no aggregate position at all, or an inconclusive/failed aggregate query are all
+compatible with resolving either state from own evidence alone.
+
+`position_open` and `terminal_after_fill` are resolved once the own-order query
+positively observes a fill (fully or partially filled). Which of the two resolves SHALL
+be determined by this cycle's own `close_order_link_id`:
+- If `close_order_link_id` is not durably recorded for this cycle, ABI SHALL resolve
+  `position_open`, sourcing `average_entry_price` from this cycle's own order-query
+  response and `first_fill_at_ms` from this cycle's own durable first-fill capture (the
+  same durable, immutable, capture-once value and mechanism `open-position-resolution`
+  establishes for the identical field) — never from the aggregate position row. This
+  resolution fails safe unless the aggregate physical position query positively confirms
+  an existing position on the matching side (existence-only sanity, mirroring
+  `open-position-resolution`'s own aggregate-sanity check for the identical purpose — not
+  proof this cycle exclusively owns that position, only that a matching-side exposure
+  genuinely exists).
+- If `close_order_link_id` is durably recorded for this cycle, ABI SHALL classify that
+  order's own current state using the same exact-quantity-matching strictness
+  `close-execution` already uses to confirm its own dispatch fully succeeded (terminality,
+  then this cycle's own close order's confirmed cumulative fill compared exactly against
+  this cycle's own entry order's confirmed cumulative fill) — never the coarser "any fill
+  occurred" check this capability uses to classify the entry order itself, and never the
+  aggregate. A positively confirmed **exact** quantity match on this cycle's own close
+  order resolves `terminal_after_fill`, with no fill facts in the response and with no
+  aggregate physical position query consulted at all for this determination — this
+  cycle's own two-order evidence chain (its entry order's own confirmed fill, its close
+  order's own confirmed matching fill) is sufficient by itself and is never overridden or
+  reinterpreted by a same-side sibling's own aggregate contribution. A positively
+  confirmed terminal state with zero fill on this cycle's own close order (the close
+  attempt was rejected or otherwise never executed) resolves `position_open` instead,
+  using the same sourcing and the same aggregate existence-only sanity check as the
+  no-close-attempted case above. A positively confirmed terminal state with a fill that
+  does **not** exactly match this cycle's own expected close quantity (a genuine, unresolved
+  partial close) SHALL NOT resolve either `position_open` or `terminal_after_fill` — ABI
+  fails safe, since neither state correctly describes an exposure that was only partially
+  reduced by an unconfirmed amount. Any other finding for this cycle's own close order
+  (still live, not found, or inconclusive) SHALL NOT resolve either state — ABI fails safe,
+  exactly as it would for any other not-yet-established evidence.
+
+A fill signal on the entry order's own query without a positive determination of the
+close order's own fate (when one is durably recorded) is never sufficient by itself to
+resolve `position_open` or `terminal_after_fill`.
+
+#### Scenario: A live, unfilled order resolves to entry_order_live regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively finds this cycle's own entry order in a live,
+  unfilled state, no close order is durably recorded for this cycle, and the aggregate
+  physical position query positively confirms an open position on the matching side
+  (belonging to a same-side sibling cycle sharing the same physical scope)
 - **THEN** ABI resolves `entry_order_live`
+- **AND** the sibling's own open position does not block, delay, or alter this resolution
 
-#### Scenario: A fill confirmed by an open position resolves to position_open
-- **WHEN** the order query positively observes a fill (fully or partially filled), and the
-  position query positively confirms an open position
-- **THEN** ABI resolves `position_open`
-- **AND** this holds regardless of whether the order itself is `Filled` or
-  `PartiallyFilled` — the position query's confirmation is what makes `position_open`
-  safe to resolve, not the order status alone
-
-#### Scenario: A fill confirmed flat, with the order positively terminal, resolves to terminal_after_fill
-- **WHEN** the order query positively observes a fill (fully or partially filled) AND
-  positively establishes the order has no live remainder (a terminal status, or a fully
-  filled order with zero remaining quantity), and the position query positively confirms
-  no open position
-- **THEN** ABI resolves `terminal_after_fill`, distinct from `terminal_without_fill`
-
-#### Scenario: A found position on the opposite side is contradictory, not position_open
-- **WHEN** the order query positively observes a fill (fully or partially filled), and the
-  position query positively finds an open position whose side does not plausibly match
-  the correlation record's `desired_entry.side` (e.g. a `long` record with a found `Sell`
-  position, or a `short` record with a found `Buy` position)
-- **THEN** ABI does NOT resolve `position_open` from this — the opposite-side position is
-  contradictory evidence, not confirmation of this binding's own fill
-- **AND** ABI fails safe instead of resolving any state from this contradictory evidence
-
-#### Scenario: A fill observed with a flat position but a still-live order fails safe
-- **WHEN** the order query positively observes a fill but the order is still live (e.g.
-  `PartiallyFilled` with a live remainder, or any other non-terminal status), and the
-  position query positively confirms no open position
-- **THEN** ABI does NOT resolve `position_open` (the position query contradicts it) and
-  does NOT resolve `terminal_after_fill` (the order is not yet terminal)
-- **AND** ABI fails safe instead — this combination is contradictory, not resolvable
-
-#### Scenario: A terminal order that never filled resolves to terminal_without_fill only when the position query positively confirms flat
-- **WHEN** the order query positively finds the entry order in a terminal state
-  (rejected, cancelled, or deactivated) with zero cumulative filled quantity, AND the
-  position query positively confirms no open position
+#### Scenario: A terminal order with zero fill resolves to terminal_without_fill regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively finds this cycle's own entry order terminal with
+  zero cumulative fill, no close order is durably recorded for this cycle, and the
+  aggregate physical position query positively confirms an open position on the matching
+  side (a same-side sibling's own exposure)
 - **THEN** ABI resolves `terminal_without_fill`
+- **AND** the sibling's own open position does not block, delay, or alter this resolution
 
-#### Scenario: A zero-fill terminal order contradicted by an open position fails safe
-- **WHEN** the order query positively finds the entry order terminal with zero cumulative
-  filled quantity, but the position query positively confirms an open position
-- **THEN** ABI does NOT resolve `terminal_without_fill` — the two signals contradict each
-  other
-- **AND** ABI fails safe instead of resolving any state from this contradictory evidence
+#### Scenario: An opposite-side aggregate finding fails safe for entry_order_live or terminal_without_fill
+- **WHEN** the own-order query positively supports `entry_order_live` or
+  `terminal_without_fill`, and the aggregate physical position query positively confirms
+  an open position on the side opposite this record's own `desired_entry.side`
+- **THEN** ABI does NOT resolve either state — this is a genuine invariant violation, not
+  a normal shared-scope condition
+- **AND** ABI fails safe instead
 
-#### Scenario: A zero-fill terminal order with an inconclusive position query fails safe
-- **WHEN** the order query positively finds the entry order terminal with zero cumulative
-  filled quantity, but the position query fails, times out, or is otherwise inconclusive
-- **THEN** ABI does NOT resolve `terminal_without_fill` — a position query that merely
-  fails to contradict the order-side finding is not a positive confirmation of flat
-- **AND** ABI fails safe, exactly as it would for any other inconclusive query
-- **AND** ABI fails safe instead of resolving any state from this contradictory evidence
+#### Scenario: A fill with no close attempted resolves to position_open, sourced from this cycle's own evidence
+- **WHEN** the own-order query positively observes a fill (fully or partially filled), no
+  close order is durably recorded for this cycle (`close_order_link_id` is absent), and
+  the aggregate physical position query positively confirms an existing position on the
+  matching side
+- **THEN** ABI resolves `position_open`
+- **AND** `average_entry_price` is read from this cycle's own order-query response, never
+  from the aggregate row
+- **AND** `first_fill_at_ms` is this cycle's own durably captured value (reused if already
+  present, captured once via the same mechanism `open-position-resolution` establishes if
+  not), never the aggregate row's own time field
+- **AND** this holds regardless of whether any other same-side cycle also has a position
+  on the same matching side
+
+#### Scenario: A fill with no close attempted fails safe when the aggregate cannot confirm a matching position
+- **WHEN** the own-order query positively observes a fill, no close order is durably
+  recorded for this cycle, and the aggregate physical position query does not positively
+  confirm an existing position on the matching side (no position at all, a query failure,
+  or a wrong-side position)
+- **THEN** ABI does NOT resolve `position_open` from this cycle's own fill evidence alone
+- **AND** ABI fails safe instead — this is a genuine contradiction between this cycle's
+  own evidence and physical reality, not a normal shared-scope condition
+
+#### Scenario: A fill with the cycle's own close order confirmed an exact quantity match resolves to terminal_after_fill, with no aggregate consultation, regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state (using the
+  same exact-quantity-matching strictness `close-execution` already uses) positively
+  confirms its own confirmed cumulative fill exactly matches this cycle's own entry
+  order's confirmed cumulative fill
+- **THEN** ABI resolves `terminal_after_fill`
+- **AND** ABI does not query, or use in any way, the aggregate physical position query to
+  reach this determination
+- **AND** this holds even when the aggregate physical position query would positively
+  report an open position on the matching side belonging to a same-side sibling cycle —
+  the sibling's own open position never causes this cycle to be mis-resolved as
+  `position_open`
+
+#### Scenario: A fill with the cycle's own close order confirmed rejected (zero fill) resolves to position_open
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state positively
+  confirms it is terminal with zero fill (the close attempt was rejected or otherwise
+  never executed)
+- **THEN** ABI resolves `position_open`, sourced and sanity-checked exactly as the
+  no-close-attempted case above (this cycle's own order-query response for
+  `average_entry_price`, this cycle's own durable capture for `first_fill_at_ms`,
+  aggregate existence-only sanity on the matching side)
+
+#### Scenario: A partial fill on the cycle's own close order fails safe rather than resolving either state
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state positively
+  confirms it is terminal with a fill that does NOT exactly match this cycle's own entry
+  order's confirmed cumulative fill
+- **THEN** ABI does NOT resolve `position_open` (some of this cycle's own exposure was
+  reduced, so reporting it as still fully open would be wrong) and does NOT resolve
+  `terminal_after_fill` (the reduction is not confirmed complete)
+- **AND** ABI fails safe instead, regardless of what the aggregate physical position query
+  reports
+
+#### Scenario: A fill with the cycle's own close order not yet positively resolved fails safe
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state does not
+  positively confirm any of: an exact quantity match, a zero-fill terminal state, or a
+  partial (non-matching) fill — it is still live, genuinely not found, or the
+  classification is otherwise inconclusive
+- **THEN** ABI does NOT resolve `position_open` or `terminal_after_fill` from this attempt
+- **AND** ABI fails safe instead, regardless of what the aggregate physical position query
+  reports
+
+#### Scenario: A fill-carrying order response with no usable average price fails safe
+- **WHEN** the own-order query positively observes a fill, and would otherwise resolve
+  `position_open`, but that response carries no usable average execution price
+- **THEN** ABI does NOT resolve `position_open` with a fabricated, estimated, or
+  aggregate-sourced `average_entry_price`
+- **AND** ABI fails safe instead
+
+#### Scenario: An unresolvable first-fill capture fails safe rather than resolving position_open
+- **WHEN** ABI would otherwise resolve `position_open`, this cycle's own `first_fill_at_ms`
+  is not yet durably captured, and the one-time capture of this cycle's own entry order's
+  own executions cannot positively establish a value
+- **THEN** ABI does NOT resolve `position_open` with a fabricated, omitted, or
+  aggregate-sourced `first_fill_at_ms`
+- **AND** ABI fails safe instead
 
 ### Requirement: Absence of evidence is never treated as evidence of absence
 ABI SHALL NOT resolve `terminal_without_fill` or any other state from an empty,
@@ -260,3 +350,283 @@ cancel, amend, or create any order as part of resolving recovery state.
 - **WHEN** ABI resolves any of the four recovery states, or fails safe
 - **THEN** ABI SHALL NOT send any create, amend, or cancel request to the exchange as
   part of that resolution
+
+#### Scenario: Read-only exchange queries and ABI's own local durable write are not exchange side effects
+- **WHEN** resolving a trade cycle's state requires querying this cycle's own close
+  order's current state, or querying this cycle's own entry order's own executions (to
+  capture `first_fill_at_ms` for the first time) and durably saving the captured value to
+  ABI's own correlation record
+- **THEN** none of these — the close-order query, the execution-history query, or ABI's
+  own local durable write — is a violation of this requirement — "exchange side effect"
+  in this requirement refers exclusively to a create, amend, or cancel request sent to the
+  exchange, exactly as this requirement's own text and the preceding scenario already
+  state
+
+### Requirement: Recovery Convergence is a separate, pure decision from Recovery Resolution
+Once Recovery Resolution has already positively resolved one of the five recovery outcomes
+(`entry_order_live`, `position_open`, `terminal_without_fill`, `terminal_after_fill`,
+`entry_order_not_found`) for a given `(strategy_instance_id, trade_cycle_id)` pair, ABI
+SHALL evaluate a separate, pure Recovery Convergence decision — given only the resolved
+outcome, the current correlation record, and a caller-supplied timestamp — that determines
+whether the durable correlation record's `status` (and, where specified, `pending_action`
+and related fields) SHALL converge toward that proven outcome, or SHALL remain unchanged
+(`no_change`). The Convergence decision function itself SHALL NOT query the exchange, SHALL
+NOT acquire the per-pair mutex, SHALL NOT write to the correlation repository directly, and
+SHALL NOT read the system clock itself — those remain the responsibility of the existing
+application-layer call site, exactly as they are today for the existing `first_fill_at_ms`
+capture.
+
+#### Scenario: Convergence never runs for a durably-closed record
+- **WHEN** the correlation record's `status` is already `absent`, `terminal_unfilled`, or
+  `terminal_closed`
+- **THEN** Recovery Resolution answers directly from that status, as it already does today
+- **AND** Recovery Convergence is never evaluated and no durable write beyond what already
+  happens today occurs
+
+#### Scenario: Convergence never runs when Resolution fails safe
+- **WHEN** Recovery Resolution cannot positively establish one of the five outcomes
+- **THEN** Recovery Convergence is never invoked
+- **AND** the correlation record's `status` remains exactly as it was
+
+### Requirement: A resolved outcome converges only the exact binding it was resolved against
+Recovery Resolution's bounded exchange queries take place against a specific record
+snapshot read before the pair mutex is acquired (Resolution's own existing, unmodified
+behavior). Between that read and the mutex being acquired for convergence, the same
+`(strategy_instance_id, trade_cycle_id)` pair's binding MAY have durably changed — including
+to a new generation with a new `order_link_id` — through the entry-package execution path's
+own existing lifecycle (e.g. the prior binding reaching `absent` and a subsequent PUT
+establishing a new one). A resolved outcome describes only the exact binding it was proven
+against, never the pair in the abstract. Before evaluating the convergence decision against
+the fresh, under-lock record, ABI SHALL verify that the fresh record's `generation` and
+`order_link_id` are identical to the record's `generation` and `order_link_id` at the time
+Resolution resolved the outcome. If either has changed, ABI SHALL NOT evaluate or apply any
+convergence for that outcome — it SHALL return the existing fail-safe `internal_error`
+response, and the fresh record (the new binding) SHALL be left entirely untouched. This
+guard applies to all five outcomes uniformly, including `entry_order_not_found`, whose own
+upstream eligibility gate is evaluated against the pre-lock record and therefore does not,
+by itself, prove anything about a binding that has since changed.
+
+#### Scenario: A generation change between resolution and the lock prevents convergence
+- **WHEN** Recovery Resolution resolves an outcome against a record at `generation` N with
+  `order_link_id` A, and by the time the pair mutex is acquired the fresh record is at
+  `generation` N+1 with a different `order_link_id` B (e.g. the prior binding reached
+  `absent` and a new PUT established a new binding in the interim)
+- **THEN** ABI does NOT evaluate or apply any convergence decision
+- **AND** ABI returns the existing fail-safe `internal_error` response
+- **AND** the fresh record (generation N+1 / `order_link_id` B) remains entirely unchanged
+  by this recovery attempt
+- **AND** a subsequent recovery call resolves fresh evidence against the new binding on its
+  own terms
+
+#### Scenario: An unchanged binding proceeds to convergence normally
+- **WHEN** the fresh, under-lock record's `generation` and `order_link_id` are identical to
+  those of the record the outcome was resolved against
+- **THEN** ABI proceeds to evaluate the convergence decision against the fresh record,
+  exactly as already specified elsewhere in this capability
+
+### Requirement: A proven live-truth outcome converges an eligible non-durably-closed record to applied
+When Recovery Resolution positively resolves `entry_order_live` or `position_open` for a
+correlation record whose `status` is not durably closed, and whose `pending_action` is
+`null` or `"create"`, ABI SHALL durably converge `status` to `"applied"`. If
+`pending_action` was `"create"`, ABI SHALL also clear it to `null` in the same write. **This
+convergence SHALL apply only when the record's `order_id` is already non-null in the fresh,
+under-lock-read record — for BOTH `entry_order_live` and `position_open` alike, not
+`entry_order_live` alone.** A record whose `order_id` is still `null` (i.e. `pending_create`)
+SHALL NOT converge from either outcome. This durable write SHALL be evaluated against the
+correlation record re-read fresh under the pair mutex, after acquiring the lock and before
+evaluating the convergence decision — not against the outer, unlocked snapshot the outcome
+was originally resolved against. For `position_open`, ABI SHALL continue to capture
+`first_fill_at_ms` exactly as it already does today (capture-once, immutable), in the same
+locked write as the `status` convergence when both apply. **If the durable write changes
+`status` and/or `pending_action` and fails, ABI SHALL return the existing fail-safe
+`internal_error` response instead of the positive resolved outcome, and the record SHALL
+remain unconverged for the next recovery attempt.**
+
+#### Scenario: An unknown-status record with a proven fill converges to applied
+- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`,
+  `order_id` is non-null, and Recovery Resolution positively resolves `position_open`
+- **THEN** ABI durably converges `status` to `"applied"` in the same write that captures
+  `first_fill_at_ms`
+- **AND** a subsequent `GET .../open-position` for the same pair no longer fails solely
+  because of the previously stale `unknown` status
+
+#### Scenario: An unknown-status record with a proven live unfilled order converges to applied
+- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`,
+  `order_id` is non-null, and Recovery Resolution positively resolves `entry_order_live`
+- **THEN** ABI durably converges `status` to `"applied"`
+
+#### Scenario: A pending-create ambiguity proven to have landed converges to applied and clears the pending create
+- **WHEN** a correlation record's `pending_action` is `"create"`, `order_id` is non-null,
+  and Recovery Resolution positively resolves `entry_order_live` or `position_open`
+- **THEN** ABI durably converges `status` to `"applied"` and `pending_action` to `null`
+
+#### Scenario: A pending-create ambiguity with no confirmed order_id does not converge from either live-truth outcome
+- **WHEN** a correlation record's `status` is `pending_create`, `order_id` is `null`, and
+  Recovery Resolution positively resolves `entry_order_live` OR `position_open`
+- **THEN** ABI does NOT converge `status` for either outcome — the record remains unchanged
+- **AND** this is a deliberate, deferred boundary, applied symmetrically to both outcomes,
+  not a failure or an oversight
+
+#### Scenario: A failed durable write during status convergence never returns the positive outcome
+- **WHEN** Recovery Resolution positively resolves `entry_order_live` or `position_open`,
+  Recovery Convergence decides to converge `status` (and/or `pending_action`), and the
+  durable write fails
+- **THEN** ABI returns the existing fail-safe `internal_error` response, NOT
+  `entry_order_live`/`position_open`
+- **AND** the correlation record's `status`/`pending_action` remain exactly as they were
+  before the attempt, so the next recovery call retries convergence from the same starting
+  point
+
+#### Scenario: A race between the outer resolution read and the lock is resolved by re-evaluating against the fresh record
+- **WHEN** the correlation record's `pending_action` or `order_id` changes between
+  Recovery Resolution's own outer, unlocked read and the pair mutex being acquired for the
+  convergence write
+- **THEN** ABI evaluates the convergence decision against the record re-read fresh under
+  the lock, not against the outer snapshot the outcome was originally resolved against
+- **AND** a guard that would exclude convergence under the fresh record (e.g. a
+  `pending_action` that became `"cancel"` in the interim) is honored, even though the outer
+  snapshot would have permitted convergence
+
+#### Scenario: An in-flight cancel intent is never silently overridden by a live-truth outcome
+- **WHEN** a correlation record's `pending_action` is `"cancel"`, and Recovery Resolution
+  positively resolves `entry_order_live` or `position_open`
+- **THEN** ABI does NOT converge `status`
+- **AND** `pending_action` remains `"cancel"`, unchanged
+
+#### Scenario: A legacy pending_action never reaches convergence for a live-truth outcome
+- **WHEN** a correlation record's `pending_action` is `"amend"` or `"cancel_and_create"`
+- **THEN** Recovery Resolution does not resolve `entry_order_live` or `position_open` for
+  it (existing, unmodified behavior)
+- **AND** Recovery Convergence is correspondingly never invoked for either outcome on this
+  record
+
+### Requirement: A proven terminal-without-fill outcome converges an eligible record to terminal_unfilled
+When Recovery Resolution positively resolves `terminal_without_fill` for a correlation
+record whose `status` is not durably closed and whose `pending_action` is `null` or
+`"create"`, ABI SHALL durably converge `status` to `"terminal_unfilled"`, clear
+`pending_action` to `null` if it was `"create"`, and append a `binding_history` closing
+entry using the same `closeBindingFrom(record, "exchange_terminal", now)` construction
+`entry-package-execution`'s own existing `terminal_without_fill` write already uses for its
+own call site — never a second, divergent construction.
+
+#### Scenario: An unknown-status record proven terminal without fill converges to terminal_unfilled
+- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`, and
+  Recovery Resolution positively resolves `terminal_without_fill`
+- **THEN** ABI durably converges `status` to `"terminal_unfilled"`
+- **AND** ABI appends a `binding_history` entry via the existing `closeBindingFrom` helper,
+  matching the shape `entry-package-execution`'s own equivalent write already produces
+
+#### Scenario: An in-flight cancel intent is left to its own dedicated confirmation path
+- **WHEN** a correlation record's `pending_action` is `"cancel"`, and Recovery Resolution
+  positively resolves `terminal_without_fill`
+- **THEN** ABI does NOT converge `status` via this mechanism
+- **AND** the existing dedicated cancel-confirmation path remains the sole writer for this
+  transition on this record
+
+### Requirement: A proven terminal-after-fill outcome converges an eligible record to terminal_closed
+When Recovery Resolution positively resolves `terminal_after_fill` for a correlation record
+whose `status` is not durably closed and whose `pending_action` is `null`, ABI SHALL
+durably converge `status` to `"terminal_closed"`, reusing exactly the same durable write
+shape `close-execution`'s own existing terminal-closed confirmation already produces —
+never a second, divergent construction — and SHALL capture `first_fill_at_ms` if not
+already durably set, using the same existing capture-once mechanism.
+
+#### Scenario: An unknown-status record proven terminal after fill converges to terminal_closed
+- **WHEN** a correlation record's `status` is `unknown`, `pending_action` is `null`, a
+  `close_order_link_id` is durably recorded, and Recovery Resolution positively resolves
+  `terminal_after_fill`
+- **THEN** ABI durably converges `status` to `"terminal_closed"`, matching the exact write
+  shape `close-execution` already uses for its own confirmed-close write
+
+#### Scenario: Any non-null pending_action prevents this convergence
+- **WHEN** a correlation record's `pending_action` is non-null and Recovery Resolution
+  positively resolves `terminal_after_fill`
+- **THEN** ABI does NOT converge `status`
+
+### Requirement: A proven entry-order-not-found outcome converges the eligible ambiguous-CREATE record to absent
+When Recovery Resolution positively resolves `entry_order_not_found` — an outcome whose own
+eligibility is already fully gated by the existing ambiguous-CREATE predicate (`status` in
+`{pending_create, unknown}`, `pending_action` exactly `"create"`, no durable fill, close
+identity, or observation) — ABI SHALL durably converge `status` to `"absent"` and clear
+`order_link_id`, `order_id`, and `pending_action` to `null`, reusing exactly the same
+durable write shape ABI's existing successful-CANCEL confirmation already produces for
+`status:"absent"` — never a second, divergent construction. ABI SHALL NOT extend this
+convergence, or any equivalent inference, to a record with a durably recorded fill, close
+identity, or a `pending_action` other than `"create"` — that topology is entirely excluded
+by the outcome's own existing upstream eligibility gate and remains untouched by this
+convergence.
+
+#### Scenario: An ambiguous-CREATE record proven absent converges to absent
+- **WHEN** Recovery Resolution positively resolves `entry_order_not_found` for an eligible
+  record
+- **THEN** ABI durably converges `status` to `"absent"`, `order_link_id` to `null`,
+  `order_id` to `null`, and `pending_action` to `null`
+- **AND** this write shape is identical to the existing successful-CANCEL confirmation's
+  own `status:"absent"` write
+
+### Requirement: A failed status-changing durable write never yields a positive response, for every convergence outcome
+For every convergence transition defined in this capability (`entry_order_live`/
+`position_open` → `applied`, `terminal_without_fill` → `terminal_unfilled`,
+`terminal_after_fill` → `terminal_closed`, `entry_order_not_found` → `absent`), ABI SHALL
+evaluate the Recovery Convergence decision against the correlation record re-read fresh
+under the pair mutex — acquired after Recovery Resolution's own outcome is resolved and
+before the convergence decision is evaluated, not merely before its write is applied. When
+the resulting decision durably changes `status` and/or `pending_action` and the underlying
+repository write fails, ABI SHALL return the existing fail-safe `internal_error` response
+instead of the outcome that would otherwise have been positive, and the correlation
+record SHALL remain unconverged, exactly as it was, for the next recovery attempt to retry.
+This rule applies uniformly to all five outcomes' convergence transitions; it does not
+apply to the pre-existing, unmodified `first_fill_at_ms`-only capture that occurs when
+`status` is already `"applied"` and no lifecycle field is changing — a failure of that
+narrower, pre-existing capture continues to return the already-true resolved outcome
+unchanged, exactly as it does today.
+
+#### Scenario: A failed terminal-status write never returns the positive terminal outcome
+- **WHEN** Recovery Resolution positively resolves `terminal_without_fill`,
+  `terminal_after_fill`, or `entry_order_not_found`, Recovery Convergence decides to
+  converge `status` accordingly, and the durable write fails
+- **THEN** ABI returns the existing fail-safe `internal_error` response, not the resolved
+  terminal outcome
+- **AND** the correlation record's `status` remains exactly as it was before the attempt
+
+#### Scenario: A pre-existing field-only capture failure is unaffected by this rule
+- **WHEN** a correlation record's `status` is already `"applied"`, Recovery Resolution
+  positively resolves `position_open`, and only the pre-existing `first_fill_at_ms` capture
+  (no `status`/`pending_action` change) fails to durably write
+- **THEN** ABI still returns `position_open`, exactly as this pre-existing capture behavior
+  already does today
+
+### Requirement: Convergence is idempotent under repeated recovery
+Recovery Convergence SHALL be a pure function of the currently-resolved outcome and the
+current correlation record. Recovering the same `(strategy_instance_id, trade_cycle_id)`
+pair any number of times, with no change in underlying exchange evidence, SHALL produce
+`no_change` on every call after the first successful convergence, and SHALL produce
+`no_change` (never a partial or duplicate write) on every call while evidence remains
+insufficient.
+
+#### Scenario: Repeated recovery while evidence is insufficient causes no writes
+- **WHEN** the same unresolved pair is recovered multiple times in a row and Recovery
+  Resolution fails safe every time
+- **THEN** no durable write occurs on any of those calls
+
+#### Scenario: Repeated recovery after convergence is a no-op
+- **WHEN** a pair has already converged (e.g. `status` is now `applied`,
+  `pending_action` is `null`) and is recovered again with the same outcome resolving
+  positively
+- **THEN** Recovery Convergence decides `no_change`
+- **AND** no further durable write occurs
+
+### Requirement: Convergence never uses the aggregate physical position as ownership proof
+Recovery Convergence SHALL base every durable transition exclusively on the outcome
+Recovery Resolution already derived from this cycle's own pair-scoped order, close-order,
+and execution evidence. Recovery Convergence SHALL NOT itself query, or otherwise use, the
+aggregate physical position as a basis for any durable transition; any aggregate-position
+consultation remains exclusively Recovery Resolution's own existing narrow veto, applied
+before Recovery Convergence is ever invoked.
+
+#### Scenario: A same-side sibling's own aggregate exposure never causes or blocks a convergence decision
+- **WHEN** Recovery Resolution has already positively resolved an outcome for this cycle's
+  own pair-scoped evidence, regardless of what a same-side sibling cycle's own activity
+  shows in the aggregate physical position
+- **THEN** Recovery Convergence's decision depends only on that already-resolved outcome
+  and the current correlation record, never on a fresh or cached aggregate-position read

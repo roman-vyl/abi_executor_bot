@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { confirmEntryPackage, confirmEntryPackageCancelled } from "../../src/services/entryPackage/packageConfirmation.js";
+import {
+  confirmEntryPackage,
+  confirmEntryPackageCancelled,
+  isFillFactFinal,
+} from "../../src/services/entryPackage/packageConfirmation.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
 const expected = { qty: "0.001" };
@@ -317,6 +321,83 @@ test("an unrecognized realtime order status during cancel confirmation is ambigu
   const outcome = await confirmEntryPackageCancelled({ bybit, ...payloads, desiredQty: "0.001" });
 
   assert.deepEqual(outcome, { kind: "ambiguous" });
+});
+
+// -- abi-virtual-exposure-state-foundation-v1: isFillFactFinal --
+
+test("isFillFactFinal is false for a null observation", () => {
+  assert.equal(isFillFactFinal(null), false);
+});
+
+test("isFillFactFinal is false for a live order_status, including a still-open partial fill", () => {
+  assert.equal(
+    isFillFactFinal({
+      order_status: "PartiallyFilled",
+      cumulative_filled_qty: "0.0004",
+      remaining_qty: "0.0006",
+      observed_at: "2026-01-01T00:00:00.000Z",
+    }),
+    false,
+  );
+  assert.equal(
+    isFillFactFinal({
+      order_status: "New",
+      cumulative_filled_qty: "0",
+      remaining_qty: "0.001",
+      observed_at: "2026-01-01T00:00:00.000Z",
+    }),
+    false,
+  );
+});
+
+test("isFillFactFinal is true for a terminal order_status", () => {
+  for (const terminalStatus of ["Filled", "Cancelled", "Rejected", "Deactivated"]) {
+    assert.equal(
+      isFillFactFinal({
+        order_status: terminalStatus,
+        cumulative_filled_qty: "0.001",
+        remaining_qty: "0",
+        observed_at: "2026-01-01T00:00:00.000Z",
+      }),
+      true,
+      `expected order_status ${terminalStatus} to be final`,
+    );
+  }
+});
+
+// -- abi-virtual-exposure-state-foundation-v1: partial-then-full-fill sequence --
+// Simulates repeat-PUT revalidation: the same order is queried twice, first
+// still partially filled, then fully filled — cumulative_filled_qty must grow
+// and isFillFactFinal must transition from false to true.
+
+test("a partial fill observed on one confirmation and a full fill observed on a later one records growing cumulative_filled_qty", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "PartiallyFilled", cumExecQty: "0.0004", qty: "0.001", avgPrice: "99900" },
+  ]);
+
+  const first = await confirmEntryPackage({ bybit, ...payloads, expected });
+  assert.equal(first.kind, "partial_fill");
+  if (first.kind !== "partial_fill") {
+    return;
+  }
+  assert.equal(first.observation.cumulative_filled_qty, "0.0004");
+  assert.equal(isFillFactFinal(first.observation), false);
+
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100100" },
+  ]);
+
+  const second = await confirmEntryPackage({ bybit, ...payloads, expected });
+  assert.equal(second.kind, "full_fill");
+  if (second.kind !== "full_fill") {
+    return;
+  }
+  assert.equal(second.observation.cumulative_filled_qty, "0.001");
+  // avg_execution_price is not required to be monotonic — it legitimately
+  // moved from 99900 to 100100 between the two observations.
+  assert.equal(second.observation.avg_execution_price, "100100");
+  assert.equal(isFillFactFinal(second.observation), true);
 });
 
 function malformedResponse(): unknown {
