@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { compareDecimal } from "../../domain/exactDecimal.js";
 import type { RecoveryStateHttpResult } from "../../domain/entryCycleRecoveryApi.js";
 import {
+  entryOrderNotFoundResult,
   entryOrderLiveResult,
   internalErrorResult,
   positionOpenResult,
@@ -18,24 +19,23 @@ import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
 import type { BybitAdapter, BybitOrderSide, PositionQueryResult } from "../../exchange/bybitAdapter.js";
 import type { BybitGetOrderByLinkIdPayload, BybitGetOrderHistoryPayload } from "../../exchange/bybitOrderMapper.js";
 import {
-  FILLED_STATUSES,
-  LIVE_UNFILLED_STATUSES,
-  PARTIAL_FILL_STATUSES,
-  TERMINAL_WITHOUT_FILL_STATUSES,
+  classifyEntryOrderForRecovery,
   classifyOwnCloseOrderOutcome,
   resolveFirstAttributableFillAtMs,
 } from "../entryPackage/packageConfirmation.js";
-import type { OwnCloseOrderOutcome } from "../entryPackage/packageConfirmation.js";
-import type { BybitOrderView, ExpectedOrderIdentity } from "../entryPackage/orderQueryResponseDecoder.js";
-import { decodeOrderQueryResponse } from "../entryPackage/orderQueryResponseDecoder.js";
+import type { OwnCloseOrderOutcome, RecoveryEntryOrderSignal } from "../entryPackage/packageConfirmation.js";
+import {
+  AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS,
+  AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS,
+  ambiguousCreateAbsenceCandidate,
+  completedObservationIsFresh,
+  observeAmbiguousCreateAbsenceAttempt,
+} from "../entryPackage/ambiguousCreateAbsence.js";
 
 // Same bounded-retry shape CloseApplicationService.verifyBothPostconditions
 // already uses (3 attempts / 300ms) — no time-based recovery horizon of any
 // kind, only a bound on how many times this one request re-queries before
 // giving up and returning the safe-error response.
-const RECOVERY_ATTEMPTS = 3;
-const RECOVERY_RETRY_DELAY_MS = 300;
-
 export type RecoveryQuery = {
   strategyInstanceId: string;
   tradeCycleId: string;
@@ -62,14 +62,6 @@ export type EntryCycleRecoveryResolutionServiceDeps = {
 // averageEntryPrice/cumulativeFilledQty, read from the same already-fetched
 // response — never a second query, and never sourced from the aggregate
 // position (abi-entry-cycle-recovery-attribution-v1 design.md Decision 1).
-type OrderRecoverySignal =
-  | { kind: "live_unfilled" }
-  | { kind: "live_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
-  | { kind: "terminal_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
-  | { kind: "terminal_without_fill" }
-  | { kind: "not_found" }
-  | { kind: "inconclusive" };
-
 type ResolvedOutcome =
   | { state: "entry_order_live" }
   | { state: "position_open"; averageEntryPrice: string }
@@ -162,38 +154,73 @@ export class EntryCycleRecoveryResolutionService {
     const closeOrderLinkId = record.close_order_link_id;
     const closeOrderAttempted = closeOrderLinkId !== null;
 
-    for (let attempt = 0; attempt < RECOVERY_ATTEMPTS; attempt += 1) {
-      const orderSignal = await classifyOrderForRecovery({
+    const absenceCandidate = ambiguousCreateAbsenceCandidate(record);
+    let cleanAbsenceAttempts = 0;
+    let absenceTainted = false;
+
+    for (let attempt = 0; attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS; attempt += 1) {
+      const orderSignal = await classifyEntryOrderForRecovery({
         bybit: this.deps.bybit,
         getEntryOrderPayload,
         getEntryOrderHistoryPayload,
       });
 
-      const closeOutcome = await this.classifyCloseOutcomeIfNeeded({
-        orderSignal,
-        closeOrderAttempted,
-        closeOrderLinkId,
-        category,
-        symbol,
-      });
+      if (absenceCandidate !== undefined && orderSignal.kind === "not_found") {
+        const attemptEvidence = await observeAmbiguousCreateAbsenceAttempt({
+          bybit: this.deps.bybit,
+          category,
+          symbol,
+          orderLinkId,
+          desiredSide: absenceCandidate.desiredSide,
+        });
+        if (attemptEvidence === "clean_absent") {
+          cleanAbsenceAttempts += 1;
+        } else {
+          absenceTainted = true;
+        }
+      } else {
+        if (absenceCandidate !== undefined) {
+          absenceTainted = true;
+        }
 
-      const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
+        const closeOutcome = await this.classifyCloseOutcomeIfNeeded({
+          orderSignal,
+          closeOrderAttempted,
+          closeOrderLinkId,
+          category,
+          symbol,
+        });
 
-      const resolved = resolveRecoveryState({
-        orderSignal,
-        closeOutcome,
-        closeOrderAttempted,
-        positionQuery,
-        desiredEntry: record.desired_entry,
-      });
+        const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
 
-      if (resolved !== undefined) {
-        return this.finalizeOutcome(resolved, record);
+        const resolved = resolveRecoveryState({
+          orderSignal,
+          closeOutcome,
+          closeOrderAttempted,
+          positionQuery,
+          desiredEntry: record.desired_entry,
+        });
+
+        if (resolved !== undefined) {
+          return this.finalizeOutcome(resolved, record);
+        }
       }
 
-      if (attempt < RECOVERY_ATTEMPTS - 1) {
-        await sleep(RECOVERY_RETRY_DELAY_MS);
+      if (attempt < AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS - 1) {
+        await sleep(AMBIGUOUS_CREATE_ABSENCE_RETRY_DELAY_MS);
       }
+    }
+
+    if (
+      absenceCandidate !== undefined &&
+      !absenceTainted &&
+      cleanAbsenceAttempts === AMBIGUOUS_CREATE_ABSENCE_ATTEMPTS &&
+      (await completedObservationIsFresh({
+        bybit: this.deps.bybit,
+        bindingStartedAtMs: absenceCandidate.bindingStartedAtMs,
+      }))
+    ) {
+      return entryOrderNotFoundResult();
     }
 
     return internalErrorResult();
@@ -208,7 +235,7 @@ export class EntryCycleRecoveryResolutionService {
   // classifyOwnCloseOrderOutcome with an unusable value (design.md
   // Decision 3).
   private async classifyCloseOutcomeIfNeeded(input: {
-    orderSignal: OrderRecoverySignal;
+    orderSignal: RecoveryEntryOrderSignal;
     closeOrderAttempted: boolean;
     closeOrderLinkId: string | null;
     category: "linear" | "spot";
@@ -368,7 +395,7 @@ export class EntryCycleRecoveryResolutionService {
 // no-close-attempted case), and a partial (quantity-mismatched) fill, or any
 // not-yet-established close-order state, fails safe.
 function resolveRecoveryState(input: {
-  orderSignal: OrderRecoverySignal;
+  orderSignal: RecoveryEntryOrderSignal;
   closeOutcome: OwnCloseOrderOutcome | undefined;
   closeOrderAttempted: boolean;
   positionQuery: PositionQueryResult;
@@ -462,113 +489,4 @@ function positionSideMatches(rowSide: BybitOrderSide, desiredEntry: DesiredEntry
   }
 
   return (rowSide === "Buy" && desiredEntry.side === "long") || (rowSide === "Sell" && desiredEntry.side === "short");
-}
-
-// Single-pass realtime-then-history classification of the order side of the
-// recovery question, reusing packageConfirmation.ts's own status sets and
-// its documented priority (a positive fill finding is checked before a
-// terminal-without-fill finding, exactly as confirmEntryPackage already
-// does). Never retries internally — the caller's own bounded loop is the
-// only retry boundary, matching classifyEntryOrderTerminality's shape. Used
-// for both the entry order (this capability's own long-standing call site)
-// and, a second time with the close order's own identity, inside
-// classifyOwnCloseOrderOutcome's terminality check (packageConfirmation.ts)
-// — the same function, no second implementation.
-async function classifyOrderForRecovery(input: {
-  bybit: BybitAdapter;
-  getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
-  getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
-}): Promise<OrderRecoverySignal> {
-  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
-  const realtime = await queryOrder(() => input.bybit.getOrderByLinkId(input.getEntryOrderPayload), realtimeIdentity);
-
-  if (realtime.status === "query_failed") {
-    return { kind: "inconclusive" };
-  }
-
-  if (realtime.status === "found") {
-    const orderStatus = realtime.item.orderStatus;
-    if (FILLED_STATUSES.has(orderStatus)) {
-      return {
-        kind: "terminal_with_fill",
-        averageEntryPrice: realtime.item.avgPrice,
-        cumulativeFilledQty: normalizedCumulativeFilledQty(realtime.item),
-      };
-    }
-    if (PARTIAL_FILL_STATUSES.has(orderStatus)) {
-      return {
-        kind: "live_with_fill",
-        averageEntryPrice: realtime.item.avgPrice,
-        cumulativeFilledQty: normalizedCumulativeFilledQty(realtime.item),
-      };
-    }
-    if (LIVE_UNFILLED_STATUSES.has(orderStatus)) {
-      return { kind: "live_unfilled" };
-    }
-    // An unrecognized or terminal-without-fill realtime status falls
-    // through to the order-history query below, the same pattern
-    // confirmEntryPackage and classifyEntryOrderTerminality already use.
-  }
-
-  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
-  const history = await queryOrder(() => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload), historyIdentity);
-
-  if (history.status === "query_failed") {
-    return { kind: "inconclusive" };
-  }
-
-  if (history.status === "found") {
-    const item = history.item;
-    const cumulativeFilledQty = normalizedCumulativeFilledQty(item);
-    const hasFilledQty = compareDecimal(cumulativeFilledQty, "0") > 0;
-
-    // history-endpoint items always left the realtime order book already —
-    // any fill found here is necessarily on an order with no live
-    // remainder, exactly as confirmEntryPackage's own history branch treats
-    // any hasFilledQty finding as a fill outcome without re-checking status.
-    if (hasFilledQty) {
-      return { kind: "terminal_with_fill", averageEntryPrice: item.avgPrice, cumulativeFilledQty };
-    }
-    if (TERMINAL_WITHOUT_FILL_STATUSES.has(item.orderStatus)) {
-      return { kind: "terminal_without_fill" };
-    }
-    return { kind: "inconclusive" };
-  }
-
-  if (realtime.status === "not_found") {
-    // Genuinely absent from both realtime and history.
-    return { kind: "not_found" };
-  }
-
-  // Realtime positively found the order in an unrecognized state, and
-  // history cleanly reports it absent: a positively found order must never
-  // be discarded solely because history is clean-empty.
-  return { kind: "inconclusive" };
-}
-
-function normalizedCumulativeFilledQty(item: BybitOrderView): string {
-  return item.cumExecQty !== "" ? item.cumExecQty : "0";
-}
-
-type OrderQueryResult =
-  | { status: "found"; item: BybitOrderView }
-  | { status: "not_found" }
-  | { status: "query_failed" };
-
-async function queryOrder(query: () => Promise<unknown>, expected: ExpectedOrderIdentity): Promise<OrderQueryResult> {
-  let response: unknown;
-  try {
-    response = await query();
-  } catch {
-    return { status: "query_failed" };
-  }
-
-  const decoded = decodeOrderQueryResponse({ response, expected });
-  if (decoded.kind === "found") {
-    return { status: "found", item: decoded.item };
-  }
-  if (decoded.kind === "not_found") {
-    return { status: "not_found" };
-  }
-  return { status: "query_failed" };
 }
