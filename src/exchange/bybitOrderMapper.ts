@@ -65,6 +65,19 @@ export type BybitGetOrderHistoryPayload = {
   limit: "1";
 };
 
+// Deliberately no orderId field: Bybit's own documented parameter-priority
+// rule for this endpoint is orderId > orderLinkId > symbol > baseCoin —
+// sending both would let orderId silently override the intended filter.
+// order_id is this codebase's established "audit only, never used for
+// lookup" field everywhere else; this endpoint gets the same treatment.
+export type BybitGetExecutionListPayload = {
+  category: string;
+  symbol: string;
+  orderLinkId: string;
+  limit: string;
+  cursor?: string;
+};
+
 export type EntryPackageOrderInput = {
   // Already-resolved Bybit symbol — never a raw Runtime ticker.
   symbol: string;

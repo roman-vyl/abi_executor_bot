@@ -14,6 +14,7 @@ import type {
   BybitCancelAllOrdersPayload,
   BybitCancelOrderPayload,
   BybitCreateOrderPayload,
+  BybitGetExecutionListPayload,
   BybitGetOrderByLinkIdPayload,
   BybitGetOrderHistoryPayload,
   BybitMarketCloseOrderPayload,
@@ -25,6 +26,7 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly cancelAllOrdersCalls: BybitCancelAllOrdersPayload[] = [];
   readonly getOrderByLinkIdCalls: BybitGetOrderByLinkIdPayload[] = [];
   readonly getOrderHistoryCalls: BybitGetOrderHistoryPayload[] = [];
+  readonly getExecutionListCalls: BybitGetExecutionListPayload[] = [];
   // Recorded as "category:symbol" so tests can assert the exact category a
   // call used, not just the symbol.
   readonly getInstrumentInfoCalls: string[] = [];
@@ -52,6 +54,12 @@ export class FakeBybitAdapter implements BybitAdapter {
   marketPrice = "61000.0";
   setTradingStopResponse: unknown = { retCode: 0, result: {} };
   setTradingStopError: Error | null = null;
+  // Queue of responses returned in call order (shifted on each call); when
+  // exhausted, falls back to executionListResponse — lets a test express an
+  // exact multi-page sequence (pagination) or a single steady-state answer.
+  executionListResponses: unknown[] = [];
+  executionListResponse: unknown = { retCode: 0, result: { category: "linear", list: [], nextPageCursor: "" } };
+  executionListError: Error | null = null;
 
   async getServerTime(): Promise<unknown> {
     return { retCode: 0, result: { timeSecond: "0" } };
@@ -110,6 +118,17 @@ export class FakeBybitAdapter implements BybitAdapter {
     this.getOrderHistoryCalls.push(payload);
     const response = this.orderHistoryResponseByLinkId.get(payload.orderLinkId) ?? this.orderHistoryResponse;
     return withDefaultOrderIdentity(response, payload);
+  }
+
+  async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
+    this.getExecutionListCalls.push(payload);
+    if (this.executionListError !== null) {
+      throw this.executionListError;
+    }
+    if (this.executionListResponses.length > 0) {
+      return this.executionListResponses.shift();
+    }
+    return this.executionListResponse;
   }
 
   async getInstrumentInfo(category: string, symbol: string): Promise<unknown> {

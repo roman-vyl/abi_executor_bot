@@ -51,6 +51,8 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 
 When `position_open` is `true`, both `first_fill_at_ms` and `average_entry_price` SHALL be non-null. When `position_open` is `false`, both SHALL be `null`. No other combination SHALL be returned.
 
+Both facts reflect this specific trade cycle's own execution evidence, never an aggregate physical position shared with any other trade cycle (`open-position-resolution` capability): `first_fill_at_ms` is this cycle's own raw attributable first-fill timestamp — the earliest of this cycle's own entry order's own executions — never a value normalized to any strategy timeframe or bar boundary; `average_entry_price` is this cycle's own cumulative average execution price.
+
 #### Scenario: Open position response includes both facts
 - **WHEN** ABI determines the current position is open
 - **THEN** ABI returns HTTP `200`

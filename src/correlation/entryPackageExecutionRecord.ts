@@ -98,6 +98,15 @@ export type EntryPackageExecutionRecord = {
   // order_id is never used for lookup either.
   close_order_link_id: string | null;
   close_order_id: string | null;
+  // This cycle's own raw attributable first-fill timestamp — the earliest
+  // execTime among this cycle's own entry order's own executions
+  // (abi-pair-scoped-open-position-resolution-v1), never a canonical
+  // strategy-bar value (ABI has no timeframe/grid concept; that
+  // normalization is Runtime's responsibility). Captured durably exactly
+  // once, the first time OpenPositionResolutionService observes a nonzero
+  // own fill with this field still null, and immutable afterward — see
+  // fillFactRegression's sibling check in entryPackageCorrelationRepository.ts.
+  first_fill_at_ms: number | null;
   generation: number;
   status: EntryPackageExecutionStatus;
   early_execution_observation: EarlyExecutionObservation | null;
@@ -196,6 +205,16 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     (record.close_order_id === undefined ||
       record.close_order_id === null ||
       typeof record.close_order_id === "string") &&
+    // Same three-way tolerance as close_order_link_id/close_order_id above,
+    // for the same reason: rows written before
+    // abi-pair-scoped-open-position-resolution-v1 shipped lack this key
+    // entirely. replay() normalizes a missing key to null before this
+    // function runs.
+    (record.first_fill_at_ms === undefined ||
+      record.first_fill_at_ms === null ||
+      (typeof record.first_fill_at_ms === "number" &&
+        Number.isInteger(record.first_fill_at_ms) &&
+        record.first_fill_at_ms >= 0)) &&
     typeof record.generation === "number" &&
     Number.isInteger(record.generation) &&
     record.generation >= 0 &&

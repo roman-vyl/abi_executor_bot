@@ -339,6 +339,20 @@ function fillFactRegression(
   previous: EntryPackageExecutionRecord | undefined,
   incoming: EntryPackageExecutionRecord,
 ): string | undefined {
+  // first_fill_at_ms is a strict immutability check (not monotonic
+  // non-decrease like cumulative_filled_qty below): once captured
+  // (abi-pair-scoped-open-position-resolution-v1), it must never change,
+  // including changing to null. Checked independently of
+  // early_execution_observation's own nullity.
+  const previousFirstFillAtMs = previous?.first_fill_at_ms ?? null;
+  if (previousFirstFillAtMs !== null && incoming.first_fill_at_ms !== previousFirstFillAtMs) {
+    return (
+      `first_fill_at_ms regression for ` +
+      `${correlationRecordKey(incoming.strategy_instance_id, incoming.trade_cycle_id)}: ` +
+      `${JSON.stringify(incoming.first_fill_at_ms)} !== ${JSON.stringify(previousFirstFillAtMs)}`
+    );
+  }
+
   const previousObservation = previous?.early_execution_observation ?? null;
   const incomingObservation = incoming.early_execution_observation;
   if (previousObservation === null || incomingObservation === null) {
@@ -370,6 +384,11 @@ function normalizeLegacyCloseIdentityFields(value: unknown): void {
   }
   if (!("close_order_id" in record)) {
     record.close_order_id = null;
+  }
+  // Same precedent, for rows written before
+  // abi-pair-scoped-open-position-resolution-v1 shipped.
+  if (!("first_fill_at_ms" in record)) {
+    record.first_fill_at_ms = null;
   }
 }
 

@@ -8,6 +8,7 @@ import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../src/config/config.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type {
+  EarlyExecutionObservation,
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
@@ -91,7 +92,16 @@ test("an unsupported category returns unsupported_exchange_scope", async () => {
 
 test("no live position returns position_not_open", async () => {
   await withService(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord());
+    await repo.save(
+      makeRecord({
+        earlyExecutionObservation: {
+          order_status: "Cancelled",
+          cumulative_filled_qty: "0",
+          remaining_qty: "0.001",
+          observed_at: "2026-01-01T00:00:00.000Z",
+        },
+      }),
+    );
     bybit.openPositionsResponse = closedResponse();
 
     const result = await service.apply(makeCommand());
@@ -384,7 +394,7 @@ test("protection and a concurrent entry-package command for the same pair never 
       bybit: guardedBybit,
       correlationRepository: repo,
       mutex,
-      openPositionResolutionService: new OpenPositionResolutionService({ correlationRepository: repo, bybit: guardedBybit }),
+      openPositionResolutionService: new OpenPositionResolutionService({ correlationRepository: repo, bybit: guardedBybit, mutex }),
     });
 
     const rulesProvider = new FakeInstrumentTradingRulesProvider();
@@ -452,7 +462,7 @@ test("protection commands for two different pairs proceed independently", async 
       bybit,
       correlationRepository: repo,
       mutex,
-      openPositionResolutionService: new OpenPositionResolutionService({ correlationRepository: repo, bybit }),
+      openPositionResolutionService: new OpenPositionResolutionService({ correlationRepository: repo, bybit, mutex }),
     });
 
     const btcPromise = service.apply(makeCommand());
@@ -524,7 +534,11 @@ async function withService(
     const bybit = new FakeBybitAdapter();
     const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
     const mutex = new KeyedMutex();
-    const openPositionResolutionService = new OpenPositionResolutionService({ correlationRepository: repo, bybit });
+    const openPositionResolutionService = new OpenPositionResolutionService({
+      correlationRepository: repo,
+      bybit,
+      mutex,
+    });
 
     const service = new ProtectionApplicationService({
       config,
@@ -560,6 +574,22 @@ function makeCommand(overrides: {
   };
 }
 
+// Own-cycle fill sourcing (abi-pair-scoped-open-position-resolution-v1)
+// means determine() now requires this cycle's own attributable fill facts
+// before it will ever report a position open — this file's scenarios
+// almost all assume an already-open position (they test protection's own
+// stop/take logic, not open-position sourcing), so the default record
+// carries an already-final, filled own-order observation, requiring no
+// exchange call to resolve it. The one scenario that wants "not open"
+// overrides this to a final, zero-fill observation instead.
+const DEFAULT_FILLED_OBSERVATION: EarlyExecutionObservation = {
+  order_status: "Filled",
+  cumulative_filled_qty: "0.001",
+  remaining_qty: "0",
+  avg_execution_price: "99500",
+  observed_at: "2026-01-01T00:00:00.000Z",
+};
+
 function makeRecord(
   overrides: Partial<{
     strategyInstanceId: string;
@@ -567,6 +597,7 @@ function makeRecord(
     status: EntryPackageExecutionStatus;
     exchangeSymbol: string;
     exchangeCategory: "linear" | "spot";
+    earlyExecutionObservation: EarlyExecutionObservation | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -591,9 +622,11 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    first_fill_at_ms: null,
     generation: 1,
     status: overrides.status ?? "applied",
-    early_execution_observation: null,
+    early_execution_observation:
+      overrides.earlyExecutionObservation !== undefined ? overrides.earlyExecutionObservation : DEFAULT_FILLED_OBSERVATION,
     binding_history: [],
     pending_action: null,
     current_binding_started_at: "2026-01-01T00:00:00.000Z",

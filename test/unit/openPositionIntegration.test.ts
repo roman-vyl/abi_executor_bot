@@ -4,17 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type {
+  EarlyExecutionObservation,
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
 } from "../../src/correlation/entryPackageExecutionRecord.js";
 import { OpenPositionResolutionService } from "../../src/services/openPosition/openPositionResolutionService.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
 
-test("9.1 full happy path: applied + matching live fill resolves open, sourced from the fake response", async () => {
+test("9.1 full happy path: applied + own fill + matching live aggregate resolves open, sourced from own evidence", async () => {
   await withStack(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ status: "applied", side: "long" }));
+    await repo.save(makeRecord({ status: "applied", side: "long", firstFillAtMs: 1785000012345 }));
     bybit.openPositionsResponse = envelope([row({ side: "Buy", size: "0.001", avgPrice: "100000", openTime: 1785000012345 })]);
 
     const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
@@ -28,7 +30,7 @@ test("9.1 full happy path: applied + matching live fill resolves open, sourced f
 
 test("9.2 partial fill (less than intended order quantity) still reports open", async () => {
   await withStack(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ status: "applied", side: "long", calculatedQuantity: "0.010" }));
+    await repo.save(makeRecord({ status: "applied", side: "long", calculatedQuantity: "0.010", firstFillAtMs: 1 }));
     bybit.openPositionsResponse = envelope([row({ side: "Buy", size: "0.001", avgPrice: "100000", openTime: 1 })]);
 
     const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
@@ -52,9 +54,9 @@ for (const status of ["absent", "terminal_unfilled"] as const) {
 }
 
 for (const status of ["applied", "pending_replace", "pending_cancel"] as const) {
-  test(`9.3 live-query-admissible status '${status}' resolves closed when the fake backend reports a flat row`, async () => {
+  test(`9.3 live-query-admissible status '${status}' resolves closed when this cycle's own evidence shows no fill (the aggregate is never even queried)`, async () => {
     await withStack(async ({ service, bybit, repo }) => {
-      await repo.save(makeRecord({ status }));
+      await repo.save(makeRecord({ status, earlyExecutionObservation: zeroFillObservation() }));
       bybit.openPositionsResponse = envelope([
         { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 },
       ]);
@@ -62,6 +64,7 @@ for (const status of ["applied", "pending_replace", "pending_cancel"] as const) 
       const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
 
       assert.deepEqual(result.body, { position_open: false, first_fill_at_ms: null, average_entry_price: null });
+      assert.equal(bybit.getOpenPositionsCalls.length, 0);
     });
   });
 }
@@ -187,7 +190,11 @@ test("9.6 flat, zero-size hedge-mode row (positionIdx non-zero) also fails close
 
 test("9.6 a valid zero-size, positionIdx==0 row with empty/default fields resolves closed, not a failure", async () => {
   await withStack(async ({ service, bybit, repo }) => {
-    await repo.save(makeRecord({ status: "applied" }));
+    // Own evidence shows no fill: the aggregate is never queried at all
+    // (Decision 2), so this genuinely represents "never filled," not a
+    // disagreement — the zero-size aggregate row's own decode path is
+    // covered directly by openPositionResolutionService.test.ts.
+    await repo.save(makeRecord({ status: "applied", earlyExecutionObservation: zeroFillObservation() }));
     bybit.openPositionsResponse = envelope([
       { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 },
     ]);
@@ -279,12 +286,38 @@ async function withStack(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   try {
     const bybit = new FakeBybitAdapter();
     const repo = new EntryPackageCorrelationRepository(join(dir, "correlation.jsonl"));
-    const service = new OpenPositionResolutionService({ correlationRepository: repo, bybit });
+    const service = new OpenPositionResolutionService({ correlationRepository: repo, bybit, mutex: new KeyedMutex() });
 
     await fn({ service, bybit, repo });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// Own-cycle fill sourcing (abi-pair-scoped-open-position-resolution-v1)
+// means the aggregate is reached only once this cycle's own evidence shows
+// a fill — this file's 9.6 scenarios test the aggregate decoder's edge
+// cases, which requires reaching it at all, so the default record already
+// carries a final, filled own-order observation matching this file's usual
+// row fixture (size "0.001", avgPrice "100000"). Scenarios that genuinely
+// want "never filled" override this to zeroFillObservation().
+function filledObservation(): EarlyExecutionObservation {
+  return {
+    order_status: "Filled",
+    cumulative_filled_qty: "0.001",
+    remaining_qty: "0",
+    avg_execution_price: "100000",
+    observed_at: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function zeroFillObservation(): EarlyExecutionObservation {
+  return {
+    order_status: "Cancelled",
+    cumulative_filled_qty: "0",
+    remaining_qty: "0.001",
+    observed_at: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 function makeRecord(
@@ -293,6 +326,8 @@ function makeRecord(
     exchangeCategory: "linear" | "spot";
     side: "long" | "short";
     calculatedQuantity: string;
+    earlyExecutionObservation: EarlyExecutionObservation | null;
+    firstFillAtMs: number | null;
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -317,9 +352,11 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    first_fill_at_ms: overrides.firstFillAtMs ?? null,
     generation: 1,
     status: overrides.status ?? "applied",
-    early_execution_observation: null,
+    early_execution_observation:
+      overrides.earlyExecutionObservation !== undefined ? overrides.earlyExecutionObservation : filledObservation(),
     binding_history: [],
     pending_action: null,
     current_binding_started_at: "2026-01-01T00:00:00.000Z",
