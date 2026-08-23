@@ -51,8 +51,11 @@
 
 ## 5. Coordinated Phase A verification
 
-- [ ] 5.1 Deploy Runtime first, then ABI, without editing the two incident records.
-- [ ] 5.2 If still fresh, capture all three clean order/execution attempts, fifth state,
+- [x] 5.1 Deploy Runtime first, then ABI, without editing the two incident records.
+- [x] 5.2 If still fresh, capture all three clean order/execution attempts, fifth state,
   corrective CANCEL revalidation, exact absence, and marker clearing for both incidents.
 - [ ] 5.3 Confirm no old CREATE is resent and the next genuine bar performs ordinary fresh
   reconciliation; if either binding has aged out, confirm it stays fail-closed instead.
+  Old CREATE non-resend is confirmed for both exact identities, but the first post-recovery
+  genuine ETH and BTC bars timed out at Runtime → Strategy Engine before reaching ABI, so
+  ordinary fresh reconciliation is not yet accepted and Phase A remains stopped.

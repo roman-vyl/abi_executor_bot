@@ -5,9 +5,7 @@
 Defines the application and execution behavior that turns a validated Runtime
 entry-package command into correlated, confirmed Bybit exchange state and a
 truthful synchronous acknowledgement or safe failure.
-
 ## Requirements
-
 ### Requirement: ABI applies a new desired entry package by creating a real exchange order
 When a valid entry-package command specifies a non-null desired entry and no order
 currently exists for that trade cycle, ABI SHALL submit a real create order to the
@@ -240,23 +238,19 @@ acknowledgement.
   crash immediately before that commit cannot have produced a successful response
 
 ### Requirement: ABI confirms package application with field-level accuracy before acknowledging success
-After the exchange accepts a create, and when ABI revalidates the same binding for a
-repeat PUT or metadata-only update, ABI SHALL verify within a bounded window that the
-read-back identifies the expected `category`, `symbol`, and `orderLinkId`, reports a
+After the exchange accepts a create or amend, and when ABI revalidates the same binding
+for a repeat PUT or metadata-only update, ABI SHALL verify within a bounded window that
+the read-back identifies the expected `category`, `symbol`, and `orderLinkId`, reports a
 recognized live or filled state, carries the expected quantity, and contains structurally
 valid exchange-reported numeric fields. The exchange-reported `triggerPrice`, `stopLoss`,
 and `takeProfit` SHALL be treated as the authoritative exchange representation and SHALL
-NOT be required to equal the raw desired-entry decimal text. This requirement's only
-change from the currently active canonical-price-confirmation semantics
-(`abi-entry-package-exchange-canonical-confirmation-v1`) is the removal of "or amend" from
-its trigger clause, since this change removes physical amend entirely — the identity,
-quantity, state, and exchange-canonical-price rules are otherwise unchanged and are not
-being reintroduced as raw decimal equality.
+NOT be required to equal the raw desired-entry decimal text.
 
 #### Scenario: Exchange-canonical prices do not create false ambiguity
-- **WHEN** a successful create is read back for the same correctly identified order with
-  the expected quantity and a recognized state, but Bybit represents `triggerPrice`,
-  `stopLoss`, or `takeProfit` with decimal text different from the raw desired-entry text
+- **WHEN** a successful create or amend is read back for the same correctly identified
+  order with the expected quantity and a recognized state, but Bybit represents
+  `triggerPrice`, `stopLoss`, or `takeProfit` with decimal text different from the raw
+  desired-entry text
 - **THEN** ABI SHALL accept those structurally valid exchange-canonical price fields and
   SHALL NOT make confirmation ambiguous solely because their text or numeric values differ
   from the raw desired-entry fields
