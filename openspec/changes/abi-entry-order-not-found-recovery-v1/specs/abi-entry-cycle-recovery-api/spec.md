@@ -82,6 +82,15 @@ position remains contradictory and part of the safe-error class.
 - **AND** clients are required to use a separate explicit neutralization operation before
   treating the entry package as durably absent
 
+#### Scenario: A clean-but-empty result everywhere returns the same safe error
+- **WHEN** the realtime order query, the history order query, and the position query all
+  complete cleanly and each finds nothing, and the record is not the eligible
+  ambiguous-CREATE shape completing the full fresh budget
+- **THEN** ABI returns HTTP `500` with `error.code` `internal_error`, identical to the
+  query-failure response
+- **AND** ABI does not return `terminal_without_fill` or any other `recovery_state` on
+  the basis of that absence
+
 ### Requirement: The endpoint never causes an exchange side effect
 This endpoint SHALL remain read-only with respect to the exchange for every response it
 can return, including `entry_order_live` and `entry_order_not_found`.

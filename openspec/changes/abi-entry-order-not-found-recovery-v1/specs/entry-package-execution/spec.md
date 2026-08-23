@@ -33,6 +33,17 @@ record shape retain their existing behavior.
 - **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
   action occurred and without requiring the ambiguous-CREATE empty-read rule
 
+#### Scenario: Cancel a live order
+- **WHEN** `desired_entry` is null and a live order exists for the trade cycle
+- **THEN** ABI SHALL cancel the exchange order and return `entry_package_absent` only
+  after the cancellation is durably confirmed
+
+#### Scenario: Confirm already-absent state
+- **WHEN** `desired_entry` is null and no order has ever existed, or the trade cycle is
+  already confirmed absent
+- **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
+  action occurred
+
 #### Scenario: Fresh full-budget ambiguous-CREATE absence can be confirmed
 - **WHEN** `desired_entry` is null for the ambiguous-CREATE shape, all three CANCEL-side
   attempts are cleanly exact-order absent and exact-execution absent, every clean

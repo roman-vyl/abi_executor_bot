@@ -189,6 +189,113 @@ close order's fate is never sufficient to resolve `position_open` or
 - **THEN** ABI does not resolve `entry_order_not_found` or any other recovery state
 - **AND** ABI fails safe
 
+#### Scenario: A live, unfilled order resolves to entry_order_live regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively finds this cycle's own entry order in a live,
+  unfilled state, no close order is durably recorded for this cycle, and the aggregate
+  physical position query positively confirms an open position on the matching side
+  (belonging to a same-side sibling cycle sharing the same physical scope)
+- **THEN** ABI resolves `entry_order_live`
+- **AND** the sibling's own open position does not block, delay, or alter this resolution
+
+#### Scenario: A terminal order with zero fill resolves to terminal_without_fill regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively finds this cycle's own entry order terminal with
+  zero cumulative fill, no close order is durably recorded for this cycle, and the
+  aggregate physical position query positively confirms an open position on the matching
+  side (a same-side sibling's own exposure)
+- **THEN** ABI resolves `terminal_without_fill`
+- **AND** the sibling's own open position does not block, delay, or alter this resolution
+
+#### Scenario: An opposite-side aggregate finding fails safe for entry_order_live or terminal_without_fill
+- **WHEN** the own-order query positively supports `entry_order_live` or
+  `terminal_without_fill`, and the aggregate physical position query positively confirms
+  an open position on the side opposite this record's own `desired_entry.side`
+- **THEN** ABI does NOT resolve either state — this is a genuine invariant violation, not
+  a normal shared-scope condition
+- **AND** ABI fails safe instead
+
+#### Scenario: A fill with no close attempted resolves to position_open, sourced from this cycle's own evidence
+- **WHEN** the own-order query positively observes a fill (fully or partially filled), no
+  close order is durably recorded for this cycle (`close_order_link_id` is absent), and
+  the aggregate physical position query positively confirms an existing position on the
+  matching side
+- **THEN** ABI resolves `position_open`
+- **AND** `average_entry_price` is read from this cycle's own order-query response, never
+  from the aggregate row
+- **AND** `first_fill_at_ms` is this cycle's own durably captured value (reused if already
+  present, captured once via the same mechanism `open-position-resolution` establishes if
+  not), never the aggregate row's own time field
+- **AND** this holds regardless of whether any other same-side cycle also has a position
+  on the same matching side
+
+#### Scenario: A fill with no close attempted fails safe when the aggregate cannot confirm a matching position
+- **WHEN** the own-order query positively observes a fill, no close order is durably
+  recorded for this cycle, and the aggregate physical position query does not positively
+  confirm an existing position on the matching side (no position at all, a query failure,
+  or a wrong-side position)
+- **THEN** ABI does NOT resolve `position_open` from this cycle's own fill evidence alone
+- **AND** ABI fails safe instead — this is a genuine contradiction between this cycle's
+  own evidence and physical reality, not a normal shared-scope condition
+
+#### Scenario: A fill with the cycle's own close order confirmed an exact quantity match resolves to terminal_after_fill, with no aggregate consultation, regardless of a same-side sibling's own open position
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state (using the
+  same exact-quantity-matching strictness `close-execution` already uses) positively
+  confirms its own confirmed cumulative fill exactly matches this cycle's own entry
+  order's confirmed cumulative fill
+- **THEN** ABI resolves `terminal_after_fill`
+- **AND** ABI does not query, or use in any way, the aggregate physical position query to
+  reach this determination
+- **AND** this holds even when the aggregate physical position query would positively
+  report an open position on the matching side belonging to a same-side sibling cycle —
+  the sibling's own open position never causes this cycle to be mis-resolved as
+  `position_open`
+
+#### Scenario: A fill with the cycle's own close order confirmed rejected (zero fill) resolves to position_open
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state positively
+  confirms it is terminal with zero fill (the close attempt was rejected or otherwise
+  never executed)
+- **THEN** ABI resolves `position_open`, sourced and sanity-checked exactly as the
+  no-close-attempted case above (this cycle's own order-query response for
+  `average_entry_price`, this cycle's own durable capture for `first_fill_at_ms`,
+  aggregate existence-only sanity on the matching side)
+
+#### Scenario: A partial fill on the cycle's own close order fails safe rather than resolving either state
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state positively
+  confirms it is terminal with a fill that does NOT exactly match this cycle's own entry
+  order's confirmed cumulative fill
+- **THEN** ABI does NOT resolve `position_open` (some of this cycle's own exposure was
+  reduced, so reporting it as still fully open would be wrong) and does NOT resolve
+  `terminal_after_fill` (the reduction is not confirmed complete)
+- **AND** ABI fails safe instead, regardless of what the aggregate physical position query
+  reports
+
+#### Scenario: A fill with the cycle's own close order not yet positively resolved fails safe
+- **WHEN** the own-order query positively observes a fill, a close order is durably
+  recorded for this cycle, and classifying that close order's own current state does not
+  positively confirm any of: an exact quantity match, a zero-fill terminal state, or a
+  partial (non-matching) fill — it is still live, genuinely not found, or the
+  classification is otherwise inconclusive
+- **THEN** ABI does NOT resolve `position_open` or `terminal_after_fill` from this attempt
+- **AND** ABI fails safe instead, regardless of what the aggregate physical position query
+  reports
+
+#### Scenario: A fill-carrying order response with no usable average price fails safe
+- **WHEN** the own-order query positively observes a fill, and would otherwise resolve
+  `position_open`, but that response carries no usable average execution price
+- **THEN** ABI does NOT resolve `position_open` with a fabricated, estimated, or
+  aggregate-sourced `average_entry_price`
+- **AND** ABI fails safe instead
+
+#### Scenario: An unresolvable first-fill capture fails safe rather than resolving position_open
+- **WHEN** ABI would otherwise resolve `position_open`, this cycle's own `first_fill_at_ms`
+  is not yet durably captured, and the one-time capture of this cycle's own entry order's
+  own executions cannot positively establish a value
+- **THEN** ABI does NOT resolve `position_open` with a fabricated, omitted, or
+  aggregate-sourced `first_fill_at_ms`
+- **AND** ABI fails safe instead
+
 ### Requirement: Only fresh full-budget ambiguous-CREATE absence is an actionable observation
 ABI SHALL continue to treat arbitrary clean-empty evidence as inconclusive. It SHALL
 distinguish `entry_order_not_found` from query failure and `terminal_without_fill` only
@@ -238,6 +345,25 @@ infer or persist a terminal state.
 - **AND** an earlier `entry_order_not_found` response is not treated as durable terminal
   truth
 
+#### Scenario: A clean-but-empty result everywhere is never terminal_without_fill
+- **WHEN** the realtime order query, the history order query, and the position query all
+  complete cleanly and each finds nothing, and the record is not the eligible
+  ambiguous-CREATE shape completing the full fresh budget
+- **THEN** ABI fails safe, using the same response as a query failure
+- **AND** ABI does NOT resolve `terminal_without_fill`
+
+#### Scenario: A query failure or malformed response never resolves any state
+- **WHEN** the order query or the position query fails, times out, or returns a
+  structurally malformed response
+- **THEN** ABI SHALL NOT resolve any of the five states from that attempt
+- **AND** ABI fails safe, and the caller retries later
+
+#### Scenario: A positive finding is always honored, regardless of how long the binding has existed
+- **WHEN** the order or position query positively finds the order still live, filled, or
+  the position open — no matter how long ago `current_binding_started_at` was
+- **THEN** ABI resolves the state that finding supports
+- **AND** no elapsed-time check ever suppresses or overrides a positive finding
+
 ### Requirement: The applied entry package is included only for the two live-truth states
 For `entry_order_live` and `position_open`, ABI SHALL include the correlation record's
 `desired_entry` and `calculated_quantity` as the resolved `AppliedEntryPackage`. For
@@ -252,6 +378,10 @@ NOT include an `AppliedEntryPackage`.
 #### Scenario: Absence observation and terminal states omit the applied entry package
 - **WHEN** ABI resolves `entry_order_not_found`, `terminal_without_fill`, or
   `terminal_after_fill`
+- **THEN** the response does not include an `AppliedEntryPackage`
+
+#### Scenario: Terminal states omit the applied entry package
+- **WHEN** ABI resolves `terminal_without_fill` or `terminal_after_fill`
 - **THEN** the response does not include an `AppliedEntryPackage`
 
 ### Requirement: Recovery resolution never causes an exchange side effect
@@ -274,6 +404,17 @@ including `entry_order_not_found`.
 - **WHEN** resolution queries order, position, close-order, or execution evidence, or
   durably captures an attributable first-fill timestamp under the existing rules
 - **THEN** those reads and the local durable capture do not violate this requirement
+
+#### Scenario: Read-only exchange queries and ABI's own local durable write are not exchange side effects
+- **WHEN** resolving a trade cycle's state requires querying this cycle's own close
+  order's current state, or querying this cycle's own entry order's own executions (to
+  capture `first_fill_at_ms` for the first time) and durably saving the captured value to
+  ABI's own correlation record
+- **THEN** none of these — the close-order query, the execution-history query, or ABI's
+  own local durable write — is a violation of this requirement — "exchange side effect"
+  in this requirement refers exclusively to a create, amend, or cancel request sent to the
+  exchange, exactly as this requirement's own text and the preceding scenario already
+  state
 
 ## RENAMED Requirements
 
