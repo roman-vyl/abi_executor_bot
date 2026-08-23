@@ -890,7 +890,12 @@ export function classifyScopeAdmission(
   return allSameSide ? "same_side" : "opposite_side";
 }
 
-function closeBindingFrom(
+// Exported for reuse by entry-cycle-recovery's Recovery Convergence policy
+// (abi-entry-cycle-recovery-convergence-v1), which durably closes a binding
+// from the exact same shape this service already uses for its own
+// terminal_without_fill/absent writes — never a second, divergent
+// construction.
+export function closeBindingFrom(
   record: EntryPackageExecutionRecord,
   endReason: NonNullable<BindingHistoryEndReason>,
   endedAt: string,

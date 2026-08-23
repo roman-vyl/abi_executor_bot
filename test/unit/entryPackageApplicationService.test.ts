@@ -525,7 +525,23 @@ test("corrective ambiguous-CREATE CANCEL fails closed when the completed evidenc
   });
 });
 
-test("a pre-expiry fifth-state read cannot authorize absence when corrective CANCEL finishes at the boundary", async () => {
+// Before abi-entry-cycle-recovery-convergence-v1, a recovery GET's
+// entry_order_not_found observation was purely diagnostic and could not
+// durably authorize anything — a later corrective CANCEL always had to
+// re-run its own full ambiguous-CREATE gate from scratch, independent of
+// what any prior GET had seen. Convergence changes this deliberately: a
+// recovery GET's entry_order_not_found observation is itself gated by the
+// exact same bounded/freshness evidence the corrective CANCEL path uses, so
+// once it resolves while genuinely fresh, ABI now durably converges the
+// record to `status:"absent"` immediately — the same "a positively
+// confirmed fact becomes durably trusted" pattern already used elsewhere
+// for a confirmed CANCEL. This does not weaken the corrective-CANCEL path's
+// own independent staleness check (see "corrective ambiguous-CREATE CANCEL
+// fails closed when the completed evidence is aged out" above, unaffected
+// by this change): a genuinely stale attempt with no prior durable
+// convergence still fails closed exactly as before. This test proves the
+// new, intended interaction for a GET that resolves while still fresh.
+test("a fresh recovery GET durably converges ambiguous-CREATE absence, so a later corrective CANCEL past the boundary trivially confirms it", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([]);
     bybit.orderHistoryResponse = orderList([]);
@@ -544,13 +560,17 @@ test("a pre-expiry fifth-state read cannot authorize absence when corrective CAN
     const observation = await recovery.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
     assert.equal((observation.body as { recovery_state?: string }).recovery_state, "entry_order_not_found");
 
+    const converged = repo.get("instance-1", "cycle-1");
+    assert.equal(converged?.status, "absent");
+    assert.equal(converged?.pending_action, null);
+    assert.equal(converged?.order_link_id, null);
+
     const boundaryMs = startedAtMs + BYBIT_TRUSTWORTHY_EVIDENCE_WINDOW_MS;
     bybit.serverTimeResponse = serverTimeAfter(0, Math.ceil(boundaryMs / 1000) * 1000);
     const cancelResult = await service.apply(makeCommand({ desiredEntry: null }));
 
-    assertInternalError(cancelResult);
-    assert.equal(repo.get("instance-1", "cycle-1")?.status, "unknown");
-    assert.notEqual(repo.get("instance-1", "cycle-1")?.order_link_id, null);
+    assertAbsent(cancelResult);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
   });
 });
 
