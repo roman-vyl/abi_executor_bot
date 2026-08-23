@@ -188,6 +188,68 @@ test("a fill discovered while confirming a desired-entry-change cancel fails saf
   });
 });
 
+// abi-pair-scoped-close-execution-v1 design.md Decision 8: a durably
+// unresolved close-order identity (close_order_link_id set, status not
+// terminal_closed) is protected from a conflicting entry-package mutation
+// entirely by this existing, unmodified fill-evidence check — not by any
+// new guard. Simulates CloseApplicationService's durable side effect
+// (writing close_order_link_id before dispatch) directly at the repository
+// level, since this test only needs to prove entry-package's own admission
+// path, not close's.
+test("a cancel-intent request during an unresolved close does not transition the pair to absent or touch its close identity", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.orderByLinkIdResponseByLinkId.set(
+      orderLinkId,
+      orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]),
+    );
+
+    const beforeClose = repo.get("instance-1", "cycle-1");
+    assert.ok(beforeClose);
+    await repo.save({ ...beforeClose, close_order_link_id: "abi-ep-close-in-flight" });
+
+    const result = await service.apply(makeCommand({ desiredEntry: null }));
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied", "never transitions to absent while the entry order shows a fill");
+    assert.equal(record?.close_order_link_id, "abi-ep-close-in-flight", "the durably recorded close identity is untouched");
+  });
+});
+
+test("a new non-null entry-package request during an unresolved close does not corrupt its close identity", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+    const orderLinkId = repo.get("instance-1", "cycle-1")?.order_link_id;
+    assert.ok(orderLinkId);
+
+    bybit.orderByLinkIdResponseByLinkId.set(
+      orderLinkId,
+      orderList([{ orderStatus: "Filled", cumExecQty: "0.001" }]),
+    );
+
+    const beforeClose = repo.get("instance-1", "cycle-1");
+    assert.ok(beforeClose);
+    await repo.save({ ...beforeClose, close_order_link_id: "abi-ep-close-in-flight" });
+
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({ side: "short", initial_stop_price: "101000", initial_take_price: "97000" }),
+      }),
+    );
+
+    assertInternalError(result);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.order_link_id, orderLinkId, "old binding is untouched, not replaced by a new generation");
+    assert.equal(record?.close_order_link_id, "abi-ep-close-in-flight");
+  });
+});
+
 test("a desired-entry-change cancel reuses the order's recorded exchange_symbol/exchange_category rather than re-resolving the ticker", async () => {
   let resolveCount = 0;
   const driftingResolver: ExchangeInstrumentResolver = {
@@ -547,6 +609,8 @@ test("a legacy amend pending_action never resends CREATE, even when the exchange
       calculated_quantity: "0.001",
       order_link_id: "legacy-link-1",
       order_id: "legacy-order-1",
+      close_order_link_id: null,
+      close_order_id: null,
       generation: 1,
       status: "unknown",
       early_execution_observation: null,
@@ -974,6 +1038,8 @@ function makeScopeTestRecord(
     calculated_quantity: orderLinkId === null ? null : "0.001",
     order_link_id: orderLinkId,
     order_id: orderLinkId === null ? null : "restart-order-1",
+    close_order_link_id: null,
+    close_order_id: null,
     generation: 1,
     status: overrides.status ?? "applied",
     early_execution_observation: null,
@@ -1000,6 +1066,8 @@ function makeTerminalClosedRecord(): EntryPackageExecutionRecord {
     calculated_quantity: "0.001",
     order_link_id: "closed-link-1",
     order_id: "closed-order-1",
+    close_order_link_id: null,
+    close_order_id: null,
     generation: 1,
     status: "terminal_closed",
     early_execution_observation: null,

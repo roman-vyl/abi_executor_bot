@@ -76,6 +76,17 @@ export class EntryPackageCorrelationRepository {
         return { ok: false, reason: `corrupt correlation record at line ${index + 1}` };
       }
 
+      // Durable rows written before abi-pair-scoped-close-execution-v1
+      // shipped have no close_order_link_id/close_order_id keys at all.
+      // Normalizing a missing key to null here — before validation, before
+      // indexing — guarantees every in-memory record matches its declared
+      // `string | null` type exactly, never `undefined`; downstream close
+      // logic reads these fields as `!== null` without also having to
+      // check for `undefined` at every call site. Not a schema migration:
+      // nothing is rewritten on disk, only the in-memory value read this
+      // one time.
+      normalizeLegacyCloseIdentityFields(parsed);
+
       // A syntactically-valid-but-wrong-shaped line (e.g. from a future
       // schema migration bug) is corruption too, and must fail readiness
       // the same way malformed JSON does — never be silently indexed.
@@ -343,6 +354,23 @@ function fillFactRegression(
   }
 
   return undefined;
+}
+
+// Mutates a freshly JSON.parse()'d value in place, filling in a missing
+// close_order_link_id/close_order_id key with null. Only ever called on a
+// value that has not yet been validated or indexed, before any other code
+// holds a reference to it — see the call site's comment in replay().
+function normalizeLegacyCloseIdentityFields(value: unknown): void {
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  if (!("close_order_link_id" in record)) {
+    record.close_order_link_id = null;
+  }
+  if (!("close_order_id" in record)) {
+    record.close_order_id = null;
+  }
 }
 
 function isNotFoundError(error: unknown): boolean {

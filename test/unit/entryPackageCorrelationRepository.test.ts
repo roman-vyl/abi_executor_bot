@@ -133,6 +133,30 @@ test("replay accepts a non-final legacy-pending_action line superseded by a late
   });
 });
 
+// abi-pair-scoped-close-execution-v1 design.md Decision 3: durable rows
+// written before that change shipped have no close_order_link_id/
+// close_order_id keys at all — replay must normalize the missing keys to
+// null (not merely tolerate `undefined`) so downstream code's `!== null`
+// checks behave correctly on old data.
+test("replay normalizes a pre-existing row with no close_order_link_id/close_order_id keys at all", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const record = makeRecord({ orderLinkId: "link-1", orderId: "order-1" }) as Record<string, unknown>;
+    delete record.close_order_link_id;
+    delete record.close_order_id;
+    assert.equal("close_order_link_id" in record, false);
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+    const result = await repo.replay();
+
+    assert.deepEqual(result, { ok: true });
+    const replayed = repo.get("instance-1", "cycle-1");
+    assert.equal(replayed?.close_order_link_id, null);
+    assert.equal(replayed?.close_order_id, null);
+  });
+});
+
 test("replay keeps only the last valid line per composite key", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
@@ -705,6 +729,8 @@ function makeRecord(
     tradeCycleId: string;
     orderLinkId: string;
     orderId: string;
+    closeOrderLinkId: string | null;
+    closeOrderId: string | null;
     generation: number;
     status: EntryPackageExecutionStatus;
     exchangeSymbol: string;
@@ -725,6 +751,8 @@ function makeRecord(
     calculated_quantity: null,
     order_link_id: overrides.orderLinkId ?? null,
     order_id: overrides.orderId ?? null,
+    close_order_link_id: overrides.closeOrderLinkId ?? null,
+    close_order_id: overrides.closeOrderId ?? null,
     generation: overrides.generation ?? 1,
     status: overrides.status ?? "pending_create",
     early_execution_observation: overrides.earlyExecutionObservation ?? null,

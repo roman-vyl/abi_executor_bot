@@ -76,6 +76,19 @@ function routeDeps(overrides: {
   };
 }
 
+test("the retired DELETE .../open-position route is not matched by anything", async () => {
+  const request = makeRequest(
+    "DELETE",
+    "/v1/strategy-instances/instance/trade-cycles/cycle/open-position",
+    "",
+    {},
+  );
+  const response = makeResponse();
+
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), false);
+  assert.equal(response.status(), 0);
+});
+
 test("position-management routes ignore a different method or path", async () => {
   const request = makeRequest("GET", "/health", "", {});
   const response = makeResponse();
@@ -89,9 +102,10 @@ test("non-PUT method targeting the protection path shape is not matched", () => 
   assert.deepEqual(matchProtectionRoute("DELETE", protectionRoute()), { matched: false });
 });
 
-test("non-DELETE method targeting the open-position path shape is not matched", () => {
+test("non-POST method targeting the close path shape is not matched", () => {
   assert.deepEqual(matchCloseRoute("PUT", closeRoute()), { matched: false });
   assert.deepEqual(matchCloseRoute("GET", closeRoute()), { matched: false });
+  assert.deepEqual(matchCloseRoute("DELETE", closeRoute()), { matched: false });
 });
 
 test("protection route accepts exact path and percent-decodes opaque identifiers", () => {
@@ -107,15 +121,15 @@ test("protection route accepts exact path and percent-decodes opaque identifiers
 test("close route accepts exact path and percent-decodes opaque identifiers", () => {
   assert.deepEqual(
     matchCloseRoute(
-      "DELETE",
-      "/v1/strategy-instances/instance%2Ffuture/trade-cycles/cycle%20id/open-position",
+      "POST",
+      "/v1/strategy-instances/instance%2Ffuture/trade-cycles/cycle%20id/close",
     ),
     { matched: true, strategyInstanceId: "instance/future", tradeCycleId: "cycle id" },
   );
 });
 
 test("close route rejects an empty path identifier", () => {
-  const match = matchCloseRoute("DELETE", "/v1/strategy-instances//trade-cycles/cycle/open-position");
+  const match = matchCloseRoute("POST", "/v1/strategy-instances//trade-cycles/cycle/close");
 
   assert.equal(match.matched, true);
   if (match.matched) {
@@ -239,7 +253,9 @@ test("a transport-valid protection request fails safe without dispatching when n
 });
 
 test("a transport-valid close request is dispatched to the application service once ready", async () => {
-  const request = makeRequest("DELETE", closeRoute(), "", {});
+  const request = makeRequest("POST", closeRoute(), JSON.stringify(validCloseBody()), {
+    "content-type": "application/json",
+  });
   const response = makeResponse();
   const service = new FakeCloseApplicationService();
   service.result = {
@@ -257,11 +273,15 @@ test("a transport-valid close request is dispatched to the application service o
   );
   assert.equal(response.status(), 200);
   assert.deepEqual(response.body(), service.result.body);
-  assert.deepEqual(service.calls, [{ strategyInstanceId: "instance", tradeCycleId: "cycle" }]);
+  assert.deepEqual(service.calls, [
+    { strategyInstanceId: "instance", tradeCycleId: "cycle", exposureFraction: "1" },
+  ]);
 });
 
 test("a transport-valid close request fails safe without dispatching when not ready", async () => {
-  const request = makeRequest("DELETE", closeRoute(), "", {});
+  const request = makeRequest("POST", closeRoute(), JSON.stringify(validCloseBody()), {
+    "content-type": "application/json",
+  });
   const response = makeResponse();
 
   assert.equal(
@@ -276,20 +296,52 @@ test("a transport-valid close request fails safe without dispatching when not re
   assert.deepEqual(response.body(), internalErrorResult().body);
 });
 
-test("close rejects any non-empty body without acting on its content", async () => {
-  for (const body of ['{"quantity":"1"}', '{"percentage":"50"}', '{"close_fraction":"0.5"}', " "]) {
-    const request = makeRequest("DELETE", closeRoute(), body, {});
+test("unsupported media type on close maps to 415", async () => {
+  const request = makeRequest("POST", closeRoute(), JSON.stringify(validCloseBody()), {
+    "content-type": "text/plain",
+  });
+  const response = makeResponse();
+
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+  assert.equal(response.status(), 415);
+  assert.equal(response.body().error.code, "unsupported_media_type");
+});
+
+test("missing and malformed JSON on close map to 400", async () => {
+  for (const body of ["", "{"]) {
+    const request = makeRequest("POST", closeRoute(), body, { "content-type": "application/json" });
     const response = makeResponse();
 
     assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
-    assert.equal(response.status(), 422);
-    assert.equal(response.body().error.code, "validation_failed");
-    assert.deepEqual(response.body().error.details, [{ path: "/", message: "request body must be empty" }]);
+    assert.equal(response.status(), 400);
+    assert.equal(response.body().error.code, "malformed_json");
+  }
+});
+
+test("close rejects a non-canonical exposure_fraction, or any other body shape, without acting on its content", async () => {
+  for (const body of [
+    '{"exposure_fraction":"0.5"}',
+    '{"exposure_fraction":"0"}',
+    '{"quantity":"1"}',
+    '{"percentage":"50"}',
+    "{}",
+  ]) {
+    const request = makeRequest("POST", closeRoute(), body, { "content-type": "application/json" });
+    const response = makeResponse();
+
+    assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+    assert.equal(response.status(), 422, body);
+    assert.equal(response.body().error.code, "validation_failed", body);
   }
 });
 
 test("malformed close path percent encoding maps to validation failure", async () => {
-  const request = makeRequest("DELETE", "/v1/strategy-instances/%ZZ/trade-cycles/cycle/open-position", "", {});
+  const request = makeRequest(
+    "POST",
+    "/v1/strategy-instances/%ZZ/trade-cycles/cycle/close",
+    JSON.stringify(validCloseBody()),
+    { "content-type": "application/json" },
+  );
   const response = makeResponse();
 
   assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
@@ -419,7 +471,9 @@ test("a typed, normally-returned internal_error protection result emits operatio
 });
 
 test("a successful close apply() emits operation_started then operation_completed with outcome trade_cycle_closed", async () => {
-  const request = makeRequest("DELETE", closeRoute(), "", {});
+  const request = makeRequest("POST", closeRoute(), JSON.stringify(validCloseBody()), {
+    "content-type": "application/json",
+  });
   const response = makeResponse();
   const service = new FakeCloseApplicationService();
   service.result = {
@@ -455,11 +509,15 @@ function protectionRoute(): string {
 }
 
 function closeRoute(): string {
-  return "/v1/strategy-instances/instance/trade-cycles/cycle/open-position";
+  return "/v1/strategy-instances/instance/trade-cycles/cycle/close";
 }
 
 function validProtectionBody(): Record<string, unknown> {
   return { stop_price: "99000", take_price: "103000" };
+}
+
+function validCloseBody(): Record<string, unknown> {
+  return { exposure_fraction: "1" };
 }
 
 function makeRequest(
