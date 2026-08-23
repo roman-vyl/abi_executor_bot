@@ -509,6 +509,98 @@
 > Полная truth table, точная Bybit response shape и design decisions — design-фаза Change 6 (после
 > technical spike), не здесь.
 
+> **Ревизия v16 — Change 7 переписан вокруг подтверждённого direct-amend поведения Bybit (Change 6
+> applied и archived, найдено Demo spike'ом до proposal Change 7).**
+>
+> **Что подтвердил spike.** Native `tpslMode: "Partial"` protection children можно менять **in place**
+> через `POST /v5/order/amend` по exact child `orderId` (Change 6's уже реализованная атрибуция даёт
+> этот `orderId`) — не только читать. Подтверждено против реального Bybit Demo: `orderId`,
+> `parentOrderLinkId`, `stopOrderType`, `createType`, `tpslMode: "Partial"` все сохраняются через amend;
+> `triggerPrice` меняется независимо на каждой ноге; `qty` можно resize и вниз, и вверх, одним amend
+> вместе с `triggerPrice`; изменение `qty` одной ноги **автоматически синхронизирует** `qty` sibling-ноги
+> (доказанный факт, не предположение); новых children не создаётся, дубликатов роли не возникает; Change
+> 6's classifier после amend по-прежнему возвращает `attributed`; наблюдаемого окна без активного SL не
+> было. **OCO-семантика после amend остаётся `NOT PROVEN`** — не проверялась и не может считаться
+> доказанной этим спайком.
+>
+> **Что это отменяет.** Весь объём Change 7 из ревизии v15 ("Что меняется": `cancel old legs → confirm
+> neutralized → создать новую native Partial пару под текущим qty`, "центральный нерешённый вопрос" про
+> qty=4→qty=7 через cancel/recreate, double-coverage/zero-coverage окна как риск именно cancel/recreate
+> подхода) — **superseded**, не расширен: реальное поведение Bybit устраняет саму cancel/recreate
+> проблему, которую v15 пыталась решить. Это тот же класс коррекции, что ревизия v14 уже применила к
+> Change 5 (найденный до apply факт меняет саму механику, не только детали) — тело Change 7 переписано
+> полностью, а не точечно, тем же способом, каким v15 переписало Changes 6-8 и v5 переписало Change 2.
+>
+> **Новая цель Change 7.** Production-инертный **reconciliation lifecycle**: `desired protection state`
+> (`stop_price`/`take_price | null` из `PUT .../protection`, `qty = current authoritative own
+> cumulative_filled_qty`, Change 1) против `actual attributable native Partial children` (Change 6's
+> `resolveOwnAttachedProtection()`) — если совпадает, no-op; если нет, **amend** существующих children по
+> exact `orderId`, затем fresh bounded read-back, success только если attribution/triggers/qty всё ещё
+> соответствуют desired на всех ногах. Полная sequence, design decisions и test-требования — в
+> Change 7's собственном теле ниже, переписанном этой ревизией.
+>
+> **Что явно НЕ вводится этой ревизией** (переносится как обязательные design/spike-вопросы Change 7,
+> не решается здесь): (1) как получить `STOP active + TAKE absent` — spike cleanup показал, что cancel
+> одной ноги может задеактивировать sibling тоже, поэтому "просто cancel take-ногу" не доказанно
+> безопасно; (2) fresh-evidence дисциплина против triggered/filled/deactivated-race между read и amend —
+> без слепого replacement; (3) multi-fill representability — Change 7 не должен предполагать auto-resize,
+> additional pairs или single-pair-per-parent, а обязан reconcile против того, что Change 6's classifier
+> реально способен представить, расширяя classifier только по доказанному evidence, никогда заранее;
+> (4) OCO-after-amend остаётся `NOT PROVEN` — отдельный evidence-item, нужный до Change 8/cutover, если
+> Change 8's close/activation semantics будут на него полагаться; сам ABI не проектирует OCO-engine.
+>
+> **Что не меняется этой ревизией.** Changes 1-6 не переоткрываются (Change 6 уже applied и archived).
+> Change 7 остаётся полностью production-инертен: `mapEntryPackageToBybit()` остаётся `Full`, Change 5's
+> admission guard остаётся, `shared_scope_protection_unsupported` остаётся,
+> `ProtectionApplicationService.process()`'s production-decision path остаётся на `setTradingStop`/
+> `tpslMode: "Full"` — новый reconciler тестируется исключительно напрямую, не через production path.
+> Change 8 остаётся единственной Activation программы; Change 8's тело правится этой ревизией только
+> точечно (формулировка, ссылавшаяся на несуществующие теперь "Change 7's cancel-примитивы"), не
+> redesign.
+>
+> Полная truth table аменда, точный write-plan (одна amend-транзакция на ногу vs. на пару) и design
+> decisions по всем четырём вопросам выше — design-фаза Change 7, не здесь.
+
+> **Ревизия v17 — `take_price = null` semantics закрыта по итогам отдельного Bybit Demo stop-only
+> spike (canonical evidence: `docs/spikes/bybit-demo-native-partial-stop-only.md`, evidence commit
+> `4b581220e30bce1c65ebc3f1fa945753cf0d435a`).**
+>
+> **Что подтвердил этот spike.** Attributable attached native Partial protection существует только как
+> единая, cancel-coupled `STOP + TAKE` pair: cancel exact TAKE-ноги по её `orderId` деактивирует **обе**
+> ноги (не только TAKE); direct child amend с `takeProfit: "0"` — наблюдаемый no-op, TAKE не удаляется;
+> `/v5/position/trading-stop` с `tpslMode: "Partial"` **может** материализовать native Partial stop-only
+> state, но у результата `parentOrderLinkId == ""` — он не attributable к parent entry через Change 6's
+> модель; status-agnostic `attributed` classifier не отличает live pair от terminal (`Deactivated`) pair
+> — caller обязан отдельно проверять `orderStatus`/`leavesQty` для активности.
+>
+> **Архитектурное следствие.** ABI не вводит отдельную position-scoped stop-only модель — единственный
+> доказанный attributable механизм это pair, не solo leg, и position-scoped `trading-stop` ломает
+> attribution, на которой стоит вся программа. `take_price = null` остаётся логической семантикой
+> "strategy take disabled" на уровне HTTP-контракта, но exchange representation всегда остаётся полной
+> `STOP + TAKE` парой: TAKE материализуется как детерминированный **far-away dormant surrogate**, а не
+> как отсутствующая нога. Явно не утверждается: surrogate математически эквивалентен отсутствию TAKE —
+> при экстремальном движении он теоретически может исполниться; это принятый V1-компромисс, не
+> скрываемый формулировкой.
+>
+> **Что не фиксируется этой ревизией.** Конкретная surrogate-distance формула (в частности, никакой
+> произвольный процент вроде "20%") не закрепляется в master plan — только требования к policy
+> (deterministic, привязан к стабильному cycle-owned reference вроде `average_entry_price`, а не к
+> текущей рыночной цене, направление зависит от side, нормализуется по instrument tick, идемпотентен для
+> повторного одинакового intent). Точная формула — design-фаза Change 7.
+>
+> **Изменения в тексте программы.** Change 7's старый design-вопрос №1 ("как представить `STOP active +
+> TAKE absent`") удалён как закрытый; на его месте — "как детерминированно вычислять surrogate TAKE
+> distance". Остальные три design-вопроса (triggered/race, минимальный pair-wide qty write-plan,
+> multi-fill representability) сохранены без изменения содержания, только перенумерованы. OCO-after-amend
+> остаётся отдельным `NOT PROVEN` evidence-item перед Change 8, не входит в общий numbered-список.
+> Sequencing не меняется: Change 7 остаётся полностью production-инертен (guard Change 5, mapping Full,
+> `shared_scope_protection_unsupported` — всё как есть), Change 8 остаётся единственной Activation.
+> Changes 1-6 и Change 8 не redesign'ились — только точечная синхронизация формулировок там, где они
+> прямо противоречили новой surrogate-модели.
+>
+> Полная surrogate-formula, её design decisions и требуемые тесты — design-фаза Change 7 (после этой
+> ревизии), не здесь.
+
 ## Контекст
 
 Сегодня `abi_executor_bot` (ABI) реализует **position-scope-exclusivity**: один физический Bybit-scope
@@ -707,9 +799,9 @@ multi-owner заранее — их новая ветка логики тест�
 фикстурах (репозиторий это позволяет без изменения claim-политики), пока производственная claim-политика
 всё ещё эксклюзивна. Реальная активация (разрешение второго owner) становится последним, самым маленьким
 и самым безопасным шагом среди "базовых" changes. Тот же принцип (после ревизии v3, объём переосмыслен
-ревизией v15) применён и к protection: native Partial replacement lifecycle строится и тестируется в
-Change 7 production-инертно (entry-mapping остаётся Full), активация — включая mapping cutover — только
-в Change 8.
+ревизией v15, механика переосмыслена ревизией v16) применён и к protection: native Partial reconciliation
+lifecycle строится и тестируется в Change 7 production-инертно (entry-mapping остаётся Full), активация —
+включая mapping cutover — только в Change 8.
 
 ---
 
@@ -771,7 +863,7 @@ Change 7 production-инертно (entry-mapping остаётся Full), акт
 | 4 | `abi-entry-cycle-recovery-attribution-v1` | `entry-cycle-recovery-resolution` | Consumer prep (owner-aware) |
 | 5 | `abi-same-side-virtual-exposure-ownership-v1` | `position-scope-exclusivity` (internal mechanism only); guard в `protection-execution` | **Foundation, не activation** (ревизия v14) — admission-механика и side-aware replay готовятся и тестируются на synthetic fixtures; production exclusivity (максимум один active owner на scope, любой стороны) сохраняется temporary guard'ом до Change 8 |
 | 6 | `abi-native-partial-protection-attribution-v1` | read/attribution primitives поверх уже существующей `entry-package-execution` order identity (+ additive к `protection-execution`, без новых durable-полей) | Read/decode/classification foundation, без изменения поведения — mapping остаётся `tpslMode: "Full"` (переосмыслен ревизией v15) |
-| 7 | `abi-native-partial-protection-lifecycle-v1` | `protection-execution` | Native Partial replacement lifecycle, **production-инертно** (guard из Change 5 не снимается, mapping остаётся Full; переосмыслен ревизией v15) |
+| 7 | `abi-native-partial-protection-lifecycle-v1` | `protection-execution` | Native Partial reconciliation lifecycle via direct amend, **production-инертно** (guard из Change 5 не снимается, mapping остаётся Full; переосмыслен ревизией v15, механика переосмыслена ревизией v16) |
 | 8 | `abi-native-partial-protection-cutover-v1` | `entry-package-execution` (mapping switch Full→Partial), `protection-execution`, `close-execution` (расширение) | Coordinated cutover + **единственная Activation программы** (ревизии v14/v15) — снимает Change 5's admission guard, тем самым реально включает same-side multi-owner в production |
 
 Changes 2, 3, 4 формально зависят только от Change 1 и **не зависят друг от друга** — их можно вести
@@ -1526,35 +1618,130 @@ Change 7/8); sizing/qty-coverage-логика сверх того, что нуж
 
 ---
 
-### Change 7 — `abi-native-partial-protection-lifecycle-v1` (переименован и переосмыслен ревизией v15; старый id `abi-pair-owned-protection-execution-v1` не был предложен как OpenSpec; production-инертен — guard НЕ снимается)
+### Change 7 — `abi-native-partial-protection-lifecycle-v1` (переименован и переосмыслен ревизией v15; механика переписана ревизией v16 вокруг подтверждённого direct-amend поведения; `take_price = null` semantics закрыта ревизией v17 по итогам stop-only spike; старый id `abi-pair-owned-protection-execution-v1` не был предложен как OpenSpec; production-инертен — guard НЕ снимается)
 
-**Цель.** Построить и полностью протестировать lifecycle **замены/обновления** native Partial
-protection при изменении желаемого stop/take через `PUT .../protection` — **не активируя** его для
-production multi-owner scope. Guard из Change 5 остаётся в силе; entry create остаётся на
-`tpslMode: "Full"` (mapping-cutover — Change 8). Тот же принцип, что уже применён к Changes 2/3/4/6:
-реализация готова и протестирована заранее, активация — отдельным, последним шагом (Change 8).
+**Цель.** Построить и полностью протестировать production-инертный **reconciliation lifecycle** для
+native Partial protection: привести фактически наблюдаемые attributable children (Change 6) в
+соответствие с желаемым protection-состоянием из `PUT .../protection`, изменяя существующие children
+**in place через `POST /v5/order/amend` по exact `orderId`** — не создавая и не отменяя ордера. Guard из
+Change 5 остаётся в силе; entry create остаётся на `tpslMode: "Full"` (mapping-cutover — Change 8). Тот
+же принцип, что уже применён к Changes 2/3/4/6: реализация готова и протестирована заранее, активация —
+отдельным, последним шагом (Change 8).
 
-**Центральный нерешённый вопрос, который этот change обязан закрыть в design-фазе.** Как заменить
-существующую native Partial TP/SL-пару (например stop/take на qty=4, унаследованный от предыдущего
-подтверждённого fill-состояния) на новую пару с другими ценами и qty=7 (после дальнейшего fill того же
-entry-ордера), сохранив непрерывность protection-покрытия и не создав опасного окна двойного покрытия
-(старая и новая пара одновременно защищают перекрывающийся qty) или окна нулевого покрытия (старая уже
-отменена/исполнилась, новая ещё не подтверждена)? Это execution-lifecycle вопрос, не data-model —
-не решается в Change 6, полностью в scope Change 7.
+**Почему amend, не cancel/recreate (ревизия v16).** Ревизия v15 предполагала replacement через
+`cancel old legs → confirm neutralized → create new pair`, с double/zero-coverage окном как центральным
+риском этой схемы. Demo spike, проведённый до proposal этого change, показал, что вопрос снят иначе:
+`PartialStopLoss`/`PartialTakeProfit` children можно менять in place через `/v5/order/amend` по их
+`orderId` (доступному из Change 6's атрибуции) — `orderId`, `parentOrderLinkId`, `stopOrderType`,
+`createType`, `tpslMode: "Partial"` все сохраняются через amend; `triggerPrice` меняется независимо на
+каждой ноге; `qty` можно resize вниз и вверх, одним amend вместе с `triggerPrice`; изменение `qty` одной
+ноги **автоматически синхронизирует** `qty` sibling-ноги (доказанный факт); новых children не создаётся,
+дублей роли не возникает; Change 6's classifier после amend по-прежнему `attributed`; наблюдаемого окна
+без активного SL не было. Cancel/recreate-модель v15 **superseded**, не расширена — сама
+double/zero-coverage проблема, которую она решала, не возникает при amend.
+
+**Canonical evidence для этого change.** Полный протокол экспериментов (сырые request/response, IDs,
+timestamps) — `docs/spikes/bybit-demo-native-partial-stop-only.md`
+(evidence commit `4b581220e30bce1c65ebc3f1fa945753cf0d435a`). Ниже — только выводы; сам протокол не
+копируется в master plan.
+
+**Proven stop-only findings (ревизия v17, spike выше).** Attributable attached native Partial protection
+существует только как единая, cancel-coupled `STOP + TAKE` pair — независимого `STOP`-only attached
+состояния через доступные ABI примитивы не существует:
+- Cancel exact TAKE child по его `orderId` деактивирует **обе** ноги пары (`Deactivated` на обеих,
+  одинаковый `updatedTime`), не только TAKE. "Cancel take-ногу, оставь stop" — не рабочий механизм.
+- Direct child amend с `takeProfit: "0"` на materialized TAKE — наблюдаемый no-op: TAKE остаётся
+  `Untriggered` с прежними `qty`/`triggerPrice`. Amend не умеет удалить leg, только изменить её
+  price/qty.
+- `/v5/position/trading-stop` с `tpslMode: "Partial"`, `takeProfit: "0"` **может** материализовать
+  native Partial stop-only state (подтверждено) — но у результирующего STOP `parentOrderLinkId == ""`:
+  он не attributable к конкретному entry-ордеру через Change 6's attribution model.
+- Status-agnostic classifier (`attributed`) не доказывает active coverage сам по себе: terminal
+  (`Deactivated`) pair в history классифицируется так же, как live pair — caller обязан отдельно
+  проверять `orderStatus`/`leavesQty` для активности, не полагаться на один только `attributed`.
+- **Следствие:** отдельную position-scoped stop-only модель ABI не вводит — она ломает parent
+  attribution, единственный источник cycle-owned ownership во всей программе.
+
+**Решение для `take_price = null` (ревизия v17): surrogate TAKE, не отсутствующий TAKE.**
+`take_price = null` остаётся логической семантикой "strategy take disabled" на уровне
+`PUT .../protection`'s контракта — это не меняется. Но exchange representation всегда остаётся **полной
+attributable native Partial parой `STOP + TAKE`**: когда desired `take_price` — `null`, ABI материализует
+TAKE-ногу как детерминированный **far-away surrogate/dormant take-profit**, а не пытается получить
+"TAKE отсутствует" на бирже (доказанно недостижимо без потери attribution, см. выше). То есть
+`logical take disabled` → `exchange TAKE существует, но намеренно размещён далеко за пределами обычного
+ожидаемого ценового диапазона сделки`. Сознательный V1 design choice, выбранный именно потому что он:
+- сохраняет parent attribution (единственный доказанный attributable механизм — pair, не solo leg);
+- сохраняет одну и ту же `STOP + TAKE` lifecycle-модель, без второй ветки логики для "no take" случая;
+- использует уже доказанный in-place amend (surrogate — обычная нога, amend'ится тем же путём);
+- сохраняет pair-wide qty reconciliation (surrogate участвует в том же `qty`-инварианте, что и настоящий
+  TAKE);
+- не вводит второй protection-механизм (никакого `/v5/position/trading-stop`, никакого solo-leg пути).
+
+**Явно НЕ утверждается:** surrogate TAKE математически не эквивалентен отсутствующему TAKE — при
+достаточно экстремальном движении цены он теоретически может исполниться. Это принятый, а не скрытый
+компромисс V1; сам факт остаётся видимым в design.md Change 7, не маскируется формулировкой.
+
+**Design/spike-вопросы, обязательные к закрытию до/во время design-фазы этого change** (не решаются в
+этом документе):
+
+1. **Как детерминированно вычислять exchange-valid dormant surrogate TAKE (заменяет старый blocker
+   "как представить `STOP active + TAKE absent`" — тот вопрос архитектурно закрыт surrogate-политикой
+   выше).** Требования к policy, а не готовая формула:
+   - deterministic — один и тот же logical intent должен всегда давать один и тот же surrogate;
+   - зависит от стабильного cycle-owned reference, а не от постоянно меняющейся current market price —
+     `average_entry_price` этого cycle (Change 1) выглядит естественным кандидатом на такой reference, но
+     **не фиксируется** этим документом без проверки в design-фазе;
+   - для LONG surrogate размещается достаточно далеко **выше** reference, для SHORT — достаточно далеко
+     **ниже**, чтобы normal ожидаемый trade range его не задевал;
+   - нормализуется по instrument tick/price constraints (`tickSize` и т.п.);
+   - повторный одинаковый logical intent (тот же `PUT .../protection` с тем же `take_price: null`,
+     тот же cycle) не должен двигать surrogate от бара к бару — иначе каждый reconcile был бы лишним
+     amend'ом без причины. Конкретная distance/формула — design-фаза Change 7, **не** master plan; в
+     частности, произвольный процент (например "20%") этим документом не фиксируется.
+2. **Triggered/race между read и amend.** Если между `resolveOwnAttachedProtection()`'s чтением и
+   отправкой amend старая нога уже trigger/fill/deactivate на бирже — amend не должен слепо создавать
+   replacement поверх этого. Нужна fresh-evidence дисциплина: повторное чтение непосредственно перед
+   amend и/или после него, с fail-closed/terminal интерпретацией при любом расхождении.
+3. **Минимальный pair-wide qty amend/write-plan.** Подтверждённый факт: amend `qty` одной ноги синхронно
+   меняет `qty` sibling-ноги — design обязан описывать желаемый финальный инвариант (`effective stop
+   coverage == effective take coverage == own cumulative fill`), а не заранее выбирать конкретный
+   минимальный write-plan (одна amend-транзакция на пару vs. на ногу, что именно amend'ить при изменении
+   только одной цены) — это решается в design/proposal-фазе этого change, не здесь.
+4. **Multi-fill representability.** Change 7 не доказывает и не предполагает: auto-resize существующей
+   пары при incremental fill, появление additional child pairs, или что single-pair-per-parent остаётся
+   верным при multi-fill. Reconciliation ведётся против того, что Change 6's classifier **реально
+   способен представить** сегодня (`none`/`attributed`/`ambiguous`-с-конкретной-причиной) — если реальная
+   форма state выходит за пределы этого представления, fail closed, а classifier расширяется отдельно,
+   только по доказанному evidence, никогда заранее.
+
+**OCO-after-amend — отдельно, `NOT PROVEN`.** Spike не проверял, гарантирует ли Bybit атомарную
+нейтрализацию sibling-ноги при исполнении одной ноги **после** того, как обе ноги прошли через amend
+(включая surrogate-ногу). Это отдельный evidence-item, нужный до Change 8/cutover только если Change 8's
+close/activation-semantics будут на него полагаться (см. Change 8's Future note) — сам ABI не
+проектирует OCO-engine взамен.
 
 **Что меняется.**
-- `ProtectionApplicationService`'s **новый** (не production-decision) code path: `PUT .../protection` →
-  refresh own cumulative fill (переиспользует Change 1's own-order fill facts,
-  `early_execution_observation`/`isFillFactFinal`) → `resolveOwnAttachedProtection()` (Change 6) →
-  сравнение обнаруженной пары с желаемой (`stop_price`/`take_price` команды) → если уже совпадает
-  (в пределах существующей already-satisfied semantics, `evaluateReadBack`-эквивалент) → no-op success;
-  если отличается → safe replacement sequence (cancel old legs → confirm neutralized → создать новую
-  native Partial пару под текущим qty → confirm resulting attributable coverage через Change 6's
-  классификацию ещё раз). Bounded confirmation зеркалит существующую bounded confirmation для entry
-  (`packageConfirmation.ts`).
+- `ProtectionApplicationService`'s **новый** (не production-decision) code path — reconciliation, не
+  replacement:
+  1. refresh own cumulative fill facts (Change 1: `early_execution_observation`/`isFillFactFinal`);
+  2. resolve desired protection state: `stop_price` из команды; `take_price` из команды, либо —
+     если команда несёт `take_price: null` — desired take становится surrogate TAKE-политикой (design-
+     вопрос 1); `qty = current authoritative own cumulative_filled_qty` на обеих ногах;
+  3. `resolveOwnAttachedProtection()` (Change 6) — fresh read of actual attributable children;
+  4. если actual уже соответствует desired в пределах существующей already-satisfied semantics — no-op
+     success;
+  5. если отличается — **amend** существующих native children по их exact `orderId` (никогда create,
+     никогда cancel — surrogate TAKE устраняет единственный ранее известный случай, требовавший
+     исключения);
+  6. fresh bounded read-back (не переиспользование pre-amend evidence);
+  7. success только если: attribution всё ещё держится (children всё ещё принадлежат тому же parent);
+     stop trigger соответствует desired; take trigger соответствует desired (реальному или surrogate);
+     stop/take qty соответствует current own cumulative exposure на обеих ногах (pair-wide инвариант);
+  8. query/amend race, terminal-нога вместо ожидаемой live, любая ambiguity Change 6's classifier'а, или
+     inconclusive read-back — fail closed, никогда слепой replacement.
 - **Production-decision path `ProtectionApplicationService.process()` не переключается** — существующий
   `setTradingStop`/`tpslMode: "Full"` путь и `shared_scope_protection_unsupported`-guard для multi-owner
-  scope остаются ровно как сегодня. Новый lifecycle существует как готовый, полностью протестированный,
+  scope остаются ровно как сегодня. Новый reconciler существует как готовый, полностью протестированный,
   но не вызываемый production-путём code path — тесты обращаются к нему напрямую.
 - Явно фиксируется: этот change **сознательно не активирует** multi-owner protection и не переключает
   entry-mapping в production.
@@ -1562,47 +1749,69 @@ entry-ордера), сохранив непрерывность protection-по
 **Какие инварианты отменяются/заменяются.** Ни один production-наблюдаемый — только появляется новый,
 полностью протестированный, но ещё не подключённый к production-decision code path.
 
-**Новые инварианты.** "Replacement-lifecycle для native Partial protection одного cycle никогда не
-создаёт окно двойного покрытия и никогда не оставляет окно нулевого покрытия дольше bounded-retry
-budget" (точная гарантия и её доказательство — design-фаза, см. центральный вопрос выше). "Bounded
-confirmation для protection-replacement: fail closed при неоднозначности, зеркалит entry-package."
+**Новые инварианты.** "Reconciliation native Partial protection одного cycle меняет существующие children
+in place по их exact `orderId`, никогда не создавая и не отменяя ордера для достижения desired
+same-role-pair state — включая `take_price = null`, всегда представленный surrogate TAKE-ногой, не
+отсутствием ноги." "`effective stop coverage == effective take coverage == own cumulative fill` —
+финальный инвариант (surrogate TAKE участвует в нём наравне с реальным), конкретный write-plan к нему —
+design-фаза." "Amend/read-back: fail closed при неоднозначности или fresh-evidence-расхождении, зеркалит
+entry-package's bounded confirmation дисциплину."
 
 **Затрагиваемые слои.** `src/services/protection/protectionApplicationService.ts` (добавляется новый
-lifecycle, существующий production-decision path не меняется). Не расширяет `CloseApplicationService`
+reconciler, существующий production-decision path не меняется). Не расширяет `CloseApplicationService`
 (Change 8), не меняет `bybitOrderMapper.ts`'s production mapping (Change 8).
 
 **HTTP-контракты.** `PUT .../protection` — форма и **наблюдаемое поведение** не меняются вообще (в т.ч.
 `shared_scope_protection_unsupported` из Change 5 продолжает возвращаться для multi-owner scope).
+`take_price: null` в запросе продолжает означать "strategy take disabled" с точки зрения клиента —
+surrogate TAKE это внутренняя exchange-representation деталь, не HTTP-контракт.
 
 **Обязательные тесты.**
-- Замена native Partial пары на новые цены/qty (synthetic fixture с уже materialized children из
-  Change 6's фикстур) — непрерывность покрытия и отсутствие double-coverage окна доказаны тестом, не
-  предполагаются.
-- Два same-side cycle с разными native Partial парами на одном physical scope (synthetic, lifecycle
-  вызывается напрямую, минуя production-decision path): обе атрибутируются и обновляются независимо,
+- Amend существующей native Partial пары на новые `triggerPrice`/`qty` (synthetic fixture с уже
+  materialized children из Change 6's фикстур) — итоговое attributable state доказано тестом
+  соответствовать desired на обеих ногах, не предполагается.
+- `take_price: null` материализует surrogate TAKE с deterministic price (design-вопрос 1's формула) —
+  повторный идентичный intent не двигает surrogate между reconcile-вызовами.
+- Pair-wide qty invariant: amend одной ноги, sibling's qty (включая surrogate TAKE) читается уже
+  синхронизированным в read-back — тест не предполагает синхронизацию, проверяет её на fixture-уровне.
+- Два same-side cycle с разными native Partial парами на одном physical scope (synthetic, reconciler
+  вызывается напрямую, минуя production-decision path): обе атрибутируются и reconcile'ятся независимо,
   каждая — по своему own entry orderLinkId через `parentOrderLinkId`.
-- Bybit reject/partial-confirm/ambiguous-classification сценарии при replacement — bounded retry, fail
-  closed при неоднозначности, никогда double-coverage как "безопасный" default.
-- Already-satisfied short-circuit для native Partial (обнаруженная пара уже соответствует желаемой —
-  no-op, без cancel/create).
+- Fresh-evidence/race сценарий (design-вопрос 2): между read и amend нога стала terminal на synthetic
+  fixture — reconciler fail closed, не отправляет amend поверх устаревшего evidence.
+- Status-agnostic `attributed` не принимается за доказательство active coverage: synthetic fixture с
+  terminal (`Deactivated`) parой — reconciler не считает это уже удовлетворённым desired-состоянием.
+- Bybit reject/ambiguous-classification/inconclusive-read-back сценарии — bounded retry, fail closed при
+  неоднозначности, никогда "предположим, что сработало".
+- Already-satisfied short-circuit для native Partial (обнаруженное state уже соответствует желаемому —
+  no-op, без amend-вызова).
 - Регрессия `protectionApplicationService.test.ts` для **существующего** production-decision path —
   байт-в-байт без изменений (включая guard-отказ для multi-owner scope).
 
-**Зависит от.** Change 6 (атрибуция/классификация), Change 1 (own fill facts).
+**Зависит от.** Change 6 (атрибуция/классификация — включая `orderId`, необходимый для amend), Change 1
+(own fill facts, включая `average_entry_price` как кандидат-reference для design-вопроса 1).
 
-**Состояние после.** Полный, протестированный replacement-lifecycle для native Partial protection
-существует и доказан на synthetic-данных; `PUT .../protection` в production продолжает вести себя
-идентично состоянию до Change 6.
+**Состояние после.** Полный, протестированный reconciliation lifecycle для native Partial protection
+через direct amend, с surrogate-TAKE представлением `take_price = null`, существует и доказан на
+synthetic-данных; `PUT .../protection` в production продолжает вести себя идентично состоянию до
+Change 6. Design-вопросы 1 (surrogate distance formula), 2 (race), 3 (write-plan), 4 (multi-fill) либо
+доказаны в design-фазе этого change, либо явно зафиксированы как остающиеся открытыми; OCO-after-amend
+отдельно зафиксирован как `NOT PROVEN` с прямыми последствиями для Change 8's scope.
 
 **Осознанно вне scope.** Переключение production entry-mapping `Full → Partial`; снятие Change 5's
 guard; снятие `shared_scope_protection_unsupported`; интеграция с close (все — Change 8); поддержка
-opposite-side. **[Future note, зафиксировано ревью Change 2, актуально после v15]** Долгосрочно
-protection принадлежит cycle, а не физической позиции, и должна следовать за `exposure_fraction` этого
-cycle: как только появится настоящий partial close (`exposure_fraction < 1`, вне текущей программы),
-успешное partial close того же cycle обязано соответственно уменьшить qty его native Partial protection
-(replacement-lifecycle этого change — тот же примитив, который уже решает "qty=4 → qty=7", симметрично
-решает и "qty=7 → qty=4") — resize-политика при partial close этим change не проектируется, только
-фиксируется как уже совместимый со своим replacement-примитивом сценарий.
+opposite-side; собственная ABI-side OCO-реализация (доказать биржевую гарантию, не строить замену ей);
+доказательство конкретной multi-fill auto-resize/additional-pairs семантики (reconcile против
+доказанного, не против предположенного); position-scoped stop-only protection любого вида (spike
+доказал его exchange-достижимость, но с потерей attribution — несовместимо с этой программой);
+финальная surrogate-distance формула/процент (design-фаза, не master plan).
+**[Future note, зафиксировано ревью Change 2, актуально после v15/v16/v17]** Долгосрочно protection
+принадлежит cycle, а не физической позиции, и должна следовать за `exposure_fraction` этого cycle: как
+только появится настоящий partial close (`exposure_fraction < 1`, вне текущей программы), успешное
+partial close того же cycle обязано соответственно уменьшить qty его native Partial protection — тот же
+amend-based reconciler, который уже приводит coverage к `own cumulative_filled_qty` после fill, симметрично
+приводит его к меньшему значению после partial close — resize-политика при partial close этим change не
+проектируется, только фиксируется как уже совместимый со своим reconciliation-инвариантом сценарий.
 
 ---
 
@@ -1629,10 +1838,14 @@ native Partial children — всё одним change, той же гаранти
    только internal classification.
 4. **`CloseApplicationService`**: при durable close cycle нейтрализует own remaining entry (уже
    существующий cancel-entry-order-first паттерн, Change 2) **и** own attributable native Partial
-   children (обнаруженные через Change 6's атрибуции, отменённые через Change 7's cancel-примитивы) до
-   закрытия own resolved exposure (Change 2: `exposure_fraction = "1"`). `terminal_closed` гейтится на
-   **оба** постусловия: (а) exposure этого cycle закрыта, (б) own attributable protection children
-   этого cycle неактивны (отменены, исполнились, или изначально отсутствовали).
+   children (обнаруженные через Change 6's атрибуции). **[Ревизия v16]** Change 7 больше не строит
+   отдельные "cancel-примитивы" — его reconciler работает через amend, не cancel/create — значит close's
+   собственная нейтрализация своих children это отдельный, собственный примитив этого change (прямой
+   Bybit cancel по exact `orderId`, тем же паттерном, что уже применяется к entry-ордеру в close-execution),
+   не переиспользование чего-либо из Change 7. До закрытия own resolved exposure (Change 2:
+   `exposure_fraction = "1"`). `terminal_closed` гейтится на **оба** постусловия: (а) exposure этого cycle
+   закрыта, (б) own attributable protection children этого cycle неактивны (отменены, исполнились, или
+   изначально отсутствовали).
 
 **Какие инварианты отменяются/заменяются.** Temporary guard Change 5 ("любой другой active record →
 conflict") — снимается: production claim впервые следует `classifyScopeAdmission()`'s полной семантике
@@ -1683,11 +1896,13 @@ close; long+short остаётся запрещённым, пока жива п�
 1–8 не проходил через небезопасное промежуточное production-состояние.
 
 **Осознанно вне scope.** Полноценный portfolio/netting engine; hedge mode; opposite-side coexistence.
-**[Future note, зафиксировано ревью Change 2, актуально и после v15]** Этот change покрывает "manual
+**[Future note, зафиксировано ревью Change 2, актуально и после v15/v16]** Этот change покрывает "manual
 close A neutralizes A's own protection children" — автоматическая биржевая OCO-нейтрализация (take-нога
 исполнилась → sibling stop-нога того же parent автоматически снимается биржей, и наоборот) — это гипотеза
-о нативном биржевом поведении, требующая технического подтверждения в Change 6/7's read-primitives
-работе (см. "Архитектурное решение: protection", вариант C), а не логика, которую ABI реализует сама.
+о нативном биржевом поведении. Change 6's spike подтвердил attribution/amend-механику, но **не** проверял
+OCO именно после amend (Change 7's design-вопрос 4, ревизия v16) — эта гипотеза остаётся `NOT PROVEN`.
+Если Change 8's close/activation-semantics полагаются на неё, доказательство нужно до apply Change 8, не
+предполагается здесь; ABI не реализует собственный OCO-engine взамен.
 
 ---
 
@@ -1702,7 +1917,7 @@ Change 1 (foundation: exposure state)
                               (2,3 напрямую;     │        │
                                4 — по соглас-    │        ├──> Change 6 (foundation: native Partial attribution, mapping stays Full)
                                ованности)        │        │        │
-                                                  │        │        └──> Change 7 (native Partial replacement lifecycle, guard НЕ снимается)
+                                                  │        │        └──> Change 7 (native Partial reconciliation lifecycle via amend, guard НЕ снимается)
                                                   │        │                 │
                                                   │        │                 └──> Change 8 (cutover: Full→Partial + close-cleanup + единственная Activation: снимает Change 5's guard)
                                                   │        │                          ▲
@@ -1711,9 +1926,9 @@ Change 1 (foundation: exposure state)
 
 Текстово: 1 → {2, 3, 4} (параллельно возможны) → 5 (требует 1,2,3, желательно 4; foundation, не activation
 — ревизия v14) → 6 (требует 1, может идти параллельно с 2/3/4/5; foundation: native Partial attribution,
-mapping остаётся Full — ревизия v15) → 7 (требует 6, 5, 3; native Partial replacement lifecycle,
-production-инертен) → 8 (требует 7, 2; единственная Activation программы: mapping cutover Full→Partial +
-guard removal).
+mapping остаётся Full — ревизия v15) → 7 (требует 6, 5, 3; native Partial reconciliation lifecycle через
+direct amend, production-инертен — ревизия v16) → 8 (требует 7, 2; единственная Activation программы:
+mapping cutover Full→Partial + guard removal).
 
 ---
 
@@ -1735,9 +1950,10 @@ guard removal).
   (cancel-entry-order-first, unsupported_exchange_scope, идемпотентность) сохраняется без изменений.
 - **`protection-execution`** — **изменяется четырежды**: малое дополнение в Change 5 (guard), additive
   read/attribution foundation в Change 6 (native Partial classification primitives, без изменения
-  поведения — mapping остаётся Full; переосмыслен ревизией v15), новый native Partial replacement
-  lifecycle в Change 7 (production-инертно, наблюдаемое поведение не меняется), и наконец практическая
-  замена production-decision path в Change 8 (guard снимается, включая mapping cutover Full→Partial).
+  поведения — mapping остаётся Full; переосмыслен ревизией v15), новый native Partial reconciliation
+  lifecycle через direct amend в Change 7 (production-инертно, наблюдаемое поведение не меняется;
+  механика переосмыслена ревизией v16), и наконец практическая замена production-decision path в
+  Change 8 (guard снимается, включая mapping cutover Full→Partial).
 - **`entry-cycle-recovery-resolution`** — **изменяется** Change 4 (атрибуционная логика), остальное
   (dual-query bounded retry, legacy pending_action guard, read-only гарантия) сохраняется.
 - **`entry-package-execution`** — **дополняется** Change 1 (новые additive-поля/их заполнение,
@@ -1789,17 +2005,14 @@ guard removal).
    это additive-изменение текста closed-vocabulary таблиц в
    `abi-position-management-api`/`abi-entry-package-api`). Нужно решение до Change 5.
 
-4. **[Переформулирован ревизией v15]** Технические детали нативной Bybit `tpslMode: "Partial"`
-   attached-protection модели для Change 6/7: точная response shape для materialized children (какое
-   поле реально несёт parent-attribution — `parentOrderLinkId` предполагается по названию, требует
-   подтверждения против реального Bybit V5 response, не документации на веру), какое поле надёжно
-   отличает STOP-child от TAKE-child, гарантирует ли Bybit атомарную OCO-нейтрализацию sibling-ноги при
-   исполнении одной (используется вариантом C, см. "Архитектурное решение: protection") или это нужно
-   проверять самой ABI, и как выглядит response для entry-ордера с уже materialized Partial children при
-   повторном query/replace. Рекомендуется отдельный technical spike (реальные Demo-запросы, не только
-   документация) перед написанием proposal Change 6 — этот риск теперь **более**, а не менее критичен для
-   Change 6, чем в исходной (вариант B) формулировке, поскольку вся архитектура Change 6-8 зависит от
-   того, что нативная модель действительно ведёт себя так, как предполагается.
+4. **[Закрыто для Change 6 ревизией v16; Change 7's собственные вопросы — риск 14]** Технические детали
+   нативной Bybit `tpslMode: "Partial"` attached-protection модели, изначально сформулированные для
+   Change 6/7 вместе, разделены после Change 6's apply. Для Change 6: response shape для materialized
+   children, parent-attribution field (`parentOrderLinkId`), STOP/TAKE-дискриминатор (`stopOrderType`) —
+   **подтверждены** Demo spike'ом, Change 6 applied и archived на этой основе. Для Change 7: остававшиеся
+   вопросы (OCO-нейтрализация sibling-ноги, повторный query/replace на уже-materialized children) —
+   перенесены и расширены в риск 14 (ревизия v16) по итогам отдельного Change 7 Demo spike'а, который уже
+   подтвердил direct-amend механику отдельно от OCO-вопроса.
 
 5. **Observability пробел.** Сегодня нет метрик/событий, различающих scope contention или multi-owner
    состояние (`src/observability/events.ts` не имеет соответствующих полей). Без добавления полей
@@ -1869,6 +2082,40 @@ guard removal).
     ни WebSocket-интеграция, ни background polling не вводятся ни этим ревью, ни Change 2 — чисто
     forward-note для гипотетической будущей capability, не для реализации сейчас.
 
+14. **[Новый риск, ревизия v16; уточнён ревизией v17] Change 7's design/spike-вопросы, обязательные
+    до/во время design-фазы.** Два отдельных Demo spike'а (после Change 6 applied) подтвердили: (a)
+    direct-amend механику (`orderId`/`parentOrderLinkId`/`stopOrderType`/`createType`/`tpslMode`
+    сохраняются через `/v5/order/amend`; `triggerPrice` меняется независимо на каждой ноге; `qty` resize
+    вниз/вверх; изменение `qty` одной ноги синхронизирует sibling's `qty`; Change 6's classifier
+    остаётся `attributed` после amend); (b) stop-only spike
+    (`docs/spikes/bybit-demo-native-partial-stop-only.md`, evidence commit `4b581220e...`) — attached
+    pair cancel-coupled, direct amend не умеет удалить leg, position-scoped `trading-stop` даёт
+    unattributable stop-only. Оба закрыты. Остаются:
+    - **Surrogate TAKE distance formula (переформулировано ревизией v17, закрывает старый "take-absent
+      construction" вопрос).** `take_price = null` теперь архитектурно решён — exchange representation
+      всегда `STOP + TAKE`, TAKE как deterministic far-away surrogate (см. Change 7's тело и ревизию
+      v17). Остаётся открытым только точный способ вычисления surrogate distance: deterministic,
+      привязан к стабильному cycle-owned reference (кандидат — `average_entry_price`, не зафиксирован),
+      направление по side, нормализован по instrument tick, идемпотентен для повторного intent. Никакой
+      процент/формула не фиксируется этим документом.
+    - **Triggered/race fresh-evidence дисциплина.** Между `resolveOwnAttachedProtection()`'s чтением и
+      amend старая нога может уже trigger/fill/deactivate на бирже — reconciler не должен слепо
+      amend'ить поверх устаревшего evidence.
+    - **Минимальный pair-wide qty write-plan.** Синхронизация `qty` sibling-ноги при amend подтверждена
+      — конкретный write-plan (одна транзакция на пару vs. на ногу) не выбран.
+    - **Multi-fill representability.** Change 7 SHALL NOT предполагать auto-resize существующей пары,
+      additional child pairs, или single-pair-per-parent при incremental fills — reconciliation ведётся
+      против того, что Change 6's classifier реально способен представить; расширение classifier'а —
+      только по доказанному evidence.
+    - **OCO-after-amend — `NOT PROVEN`, отдельно от списка выше.** Ни один из двух spike'ов не проверял,
+      гарантирует ли Bybit атомарную нейтрализацию sibling-ноги при исполнении одной ноги после amend
+      (включая surrogate-ногу). Отдельный evidence-item, нужный до Change 8/cutover только если
+      Change 8's close/activation-semantics будут на него полагаться (см. Change 8's Future note) — ABI
+      не проектирует собственный OCO-engine взамен.
+
+    Полная surrogate-formula, truth table и design decisions по всем вопросам — design-фаза Change 7,
+    не здесь.
+
 ---
 
 ## 7. Финальный рекомендуемый порядок реализации и smoke-verification
@@ -1876,10 +2123,12 @@ guard removal).
 0. **Housekeeping (вне программы):** заархивировать `abi-entry-package-exchange-canonical-confirmation-v1`
    в `openspec/changes/archive/`, чтобы baseline специй был чист.
 1. **Закрыть риски §6** (механизм refresh для cumulative_filled_quantity/avgPrice, точная величина
-   допуска дрейфа/tolerance-алгоритм, таксономия ошибок, нативная `tpslMode: "Partial"` response shape
-   и её technical spike (риск 4, переформулирован ревизией v15), single-owner mapping-политика в
-   protection (риск 7, переформулирован v15), **координация Runtime rollout и decommission-план для
-   `DELETE .../open-position`** — риски 11–12) — до написания первого proposal.
+   допуска дрейфа/tolerance-алгоритм, таксономия ошибок, нативная `tpslMode: "Partial"` response shape и
+   её technical spike (риск 4 — закрыт для Change 6 ревизией v16), Change 7's оставшиеся
+   surrogate-distance/race/write-plan/multi-fill/OCO-after-amend вопросы (риск 14, ревизия v16,
+   take-absent-часть закрыта ревизией v17), single-owner mapping-политика в protection (риск 7,
+   переформулирован v15), **координация Runtime rollout и decommission-план для `DELETE .../open-position`**
+   — риски 11–12) — до написания первого proposal.
 2. **Change 1** → apply → регрессия всего существующего test suite (ожидается 0 поведенческих изменений)
    → smoke: restart процесса на существующих данных, подтвердить, что single-owner scopes резолвятся
    идентично; отдельно smoke на реальном частичном fill на Bybit Demo — убедиться, что
@@ -1916,12 +2165,15 @@ guard removal).
    классификация native Partial children работают изолированно на synthetic/фикстурных данных (никакого
    реального Partial-fill на Demo — entry-mapping там всё ещё Full); `PUT .../protection` и entry create
    ведут себя байт-в-байт как до этого change.
-8. **Change 7 (native Partial replacement lifecycle — ревизия v15)** → apply → smoke: replacement-
-   lifecycle native Partial protection корректно работает при прямом вызове (synthetic fixtures, не
-   через production `PUT .../protection`) — включая замену пары с изменением qty без double/zero-coverage
-   окна; production-путь `PUT .../protection` по-прежнему `setTradingStop`/`tpslMode: "Full"`,
-   guard-отказ для multi-owner scope не изменился — явно проверить, что ничего не изменилось для
-   пользователя.
+8. **Change 7 (native Partial reconciliation lifecycle через direct amend, surrogate TAKE для
+   `take_price = null` — ревизии v15/v16/v17)** → apply → smoke: reconciler корректно работает при
+   прямом вызове (synthetic fixtures, не через production `PUT .../protection`) — включая amend
+   существующей пары на новые triggerPrice/qty, материализацию deterministic surrogate TAKE при
+   `take_price: null`, доказанным pair-wide qty sync и без слепого replacement на fresh-evidence-race;
+   production-путь `PUT .../protection` по-прежнему `setTradingStop`/`tpslMode: "Full"`, guard-отказ для
+   multi-owner scope не изменился — явно проверить, что ничего не изменилось для пользователя.
+   Surrogate-distance формула, race-дисциплина и write-plan — доказаны в design-фазе и покрыты smoke;
+   OCO-after-amend явно задокументирован как остающийся `NOT PROVEN` для Change 8.
 9. **Change 8 (единственная Activation программы — ревизии v14/v15)** → apply → smoke на Bybit Demo:
    entry create теперь прикрепляет `tpslMode: "Partial"`; Change 5's admission guard снят — впервые в
    программе два same-side entry-package на одном symbol от разных trade cycles оба успешно создаются и
