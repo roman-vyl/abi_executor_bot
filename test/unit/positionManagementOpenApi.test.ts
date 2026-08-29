@@ -126,7 +126,15 @@ test("OpenAPI introduces no internal ABI workflow or exchange detail", async () 
   const document = await readDocument();
   const serialized = JSON.stringify(document);
 
-  for (const forbidden of ["bybit", "Bybit", "adapter", "positionIdx", "orderLinkId"]) {
+  for (const forbidden of [
+    "bybit",
+    "Bybit",
+    "adapter",
+    "positionIdx",
+    "position_binding_mode",
+    "directional_position_slot",
+    "orderLinkId",
+  ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
 });

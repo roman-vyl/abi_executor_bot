@@ -1,0 +1,97 @@
+## MODIFIED Requirements
+
+### Requirement: A physical position scope is owned by at most one active trade cycle
+ABI SHALL distinguish an instrument scope from its long and short directional physical slots. The
+correlation repository SHALL be capable of reconstructing multiple active owners within one
+directional slot and distinct long and short slots under one instrument. During this foundation
+phase, production admission SHALL retain the existing conservative instrument-level policy:
+multiple same-side pairs are admissible, while any opposite-side or corrupt active owner on the
+same instrument causes the requester to fail closed before a durable claim or exchange write.
+
+#### Scenario: Same-side pair joins the existing directional ownership set
+- **WHEN** pair A is an active long owner and pair B requests a long entry for the same instrument
+- **THEN** pair B remains admissible under the existing same-side multi-owner policy
+- **AND** both virtual owners resolve to the same directional slot when their binding geometry is
+  hedge
+
+#### Scenario: Opposite directional slots remain production-gated
+- **WHEN** pair A is an active long owner and pair B requests a short entry for the same instrument
+- **THEN** pair B is rejected before its durable claim or any exchange write
+- **AND** the internal ability to distinguish the two slots does not relax production admission
+
+#### Scenario: Different instruments remain independent
+- **WHEN** two pairs concurrently request entries whose category or symbol differs
+- **THEN** neither request is rejected as an ownership conflict caused by the other instrument
+
+### Requirement: Scope ownership is derived from existing durable correlation state, not a new store
+ABI SHALL derive instrument and physical-slot ownership from the existing entry-package correlation
+log. A minimal durable binding-geometry discriminator SHALL distinguish actual one-way bindings from
+hedge bindings across restart and cutover; directional long/short slot identity SHALL be derived
+from the existing stored desired-entry side and SHALL NOT be persisted as a second truth. ABI SHALL
+NOT introduce a separate ownership store or reservation log.
+
+#### Scenario: Hedge ownership is reconstructed without duplicate slot truth
+- **WHEN** replay encounters a hedge binding with a valid stored desired-entry side
+- **THEN** ABI reconstructs its instrument scope from stored exchange category and symbol
+- **AND** derives its directional slot from that side
+
+#### Scenario: Binding geometry justifies the only durable schema addition
+- **WHEN** replay must distinguish an actual historical one-way binding from a future hedge binding
+  having the same category, symbol, and side
+- **THEN** it uses the durable binding-geometry discriminator
+- **AND** no duplicated position side or numeric exchange slot is stored
+
+### Requirement: Conflicting durable scope ownership fails startup readiness closed, evaluated on final state only
+ABI SHALL reconstruct ownership only from each pair's latest durable record. It SHALL build
+instrument-scope and directional-slot views without conflating long and short hedge slots. During
+this foundation phase, an active mixed-side final state on one instrument SHALL still prevent
+startup readiness as an unsupported production policy state, even though it is structurally
+representable as two distinct slots. Multiple active final records on the same side SHALL remain
+valid. Missing or invalid binding geometry, exchange identity, or required desired-entry side SHALL
+fail closed. Durably closed records SHALL not participate in current ownership conflicts.
+
+#### Scenario: Mixed-side hedge records are distinguished but remain unsupported
+- **WHEN** replay finds an active long hedge record and active short hedge record for the same
+  instrument
+- **THEN** replay identifies two distinct directional slots rather than a key collision
+- **AND** startup readiness remains false because mixed-side production lifecycle support has not
+  yet been activated
+
+#### Scenario: Multiple same-side records remain ready
+- **WHEN** replay finds multiple active records on the same side with valid binding geometry and
+  exchange identity
+- **THEN** startup readiness is not blocked merely by their shared directional slot
+- **AND** all owners are reconstructed
+
+#### Scenario: Historical mixed ownership does not affect latest-state readiness
+- **WHEN** intermediate log lines show conflicting ownership but each pair's latest records no
+  longer form an active mixed-side set
+- **THEN** replay evaluates only the latest records and does not fail on the superseded history
+
+### Requirement: A pair's owned scope is exactly its own stored exchange category and symbol
+While a pair holds ownership, its instrument scope SHALL be exactly its own stored exchange
+category and symbol. Its binding geometry SHALL come from its own durable discriminator. For a
+hedge binding only, its directional slot SHALL be derived from its own stored desired-entry side.
+ABI SHALL NOT re-resolve these facts from another owner's record or from aggregate position state.
+
+#### Scenario: Pair-local facts reconstruct ownership
+- **WHEN** ABI reconstructs an active hedge pair's ownership
+- **THEN** category, symbol, binding geometry, and desired-entry side all come from that pair's own
+  latest correlation record
+- **AND** no sibling record or aggregate position supplies its slot
+
+### Requirement: V1 scope excludes shared same-symbol exposure; post-fill scope release is implemented by close-execution
+This foundation SHALL preserve current production support for independently attributable same-side
+owners and verified per-pair release through `terminal_closed`. Opposite-side coexistence and Hedge
+Mode execution SHALL remain unsupported until separate entry, open-position, protection, close, and
+recovery cutovers are complete and a final admission change removes the instrument-level gate.
+
+#### Scenario: Foundation preserves supported same-side lifecycle
+- **WHEN** multiple same-side owners share an instrument during the foundation phase
+- **THEN** their existing pair-scoped entry, protection, close, and release behavior remains
+  supported
+
+#### Scenario: Directional representation does not promise lifecycle support
+- **WHEN** ABI can construct distinct long and short physical-slot identities
+- **THEN** documentation and behavior still reject simultaneous opposite-side production ownership
+  until the later cutovers are complete

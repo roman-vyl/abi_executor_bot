@@ -13,6 +13,7 @@ function record(overrides: Partial<EntryPackageExecutionRecord> = {}): EntryPack
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: NOW,
     updated_at: NOW,
     desired_entry: {

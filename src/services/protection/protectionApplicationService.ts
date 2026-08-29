@@ -2,6 +2,7 @@ import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import { instrumentPositionScope } from "../../domain/positionScope.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import type { ProtectionCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
@@ -104,21 +105,21 @@ export class ProtectionApplicationService {
     if (category !== "linear" && category !== "spot") {
       // Empty category on a non-durably-closed record contradicts the
       // correlation replay invariant; fail closed rather than call
-      // findOwnerByScope with an invalid value.
+      // the instrument ownership query with an invalid value.
       return internalErrorResult();
     }
 
     // Multi-owner-aware re-verification (abi-same-side-virtual-exposure-
-    // ownership-v1): findOwnerByScope()'s single-pointer answer cannot
-    // represent more than one active owner, so it is no longer a valid
-    // primitive for this check — findActiveRecordsForScope() is.
-    const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
+    // ownership-v1): use the complete instrument-scoped owner set.
+    const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
+      instrumentPositionScope(category, record.exchange_symbol),
+    );
     const selfIsActive = activeRecords.some(
       (active) =>
         active.strategy_instance_id === command.strategyInstanceId && active.trade_cycle_id === command.tradeCycleId,
     );
     if (!selfIsActive) {
-      // Unreachable by construction: findActiveRecordsForScope() is scanned
+      // Unreachable by construction: the instrument owner view is scanned
       // using this same record's own exchange_category/exchange_symbol, so
       // a non-durably-closed record with a valid category always finds
       // itself. Kept as defensive verification rather than an assumption —

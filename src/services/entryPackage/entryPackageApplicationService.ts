@@ -16,7 +16,7 @@ import {
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
-import { positionScopeKey } from "../../domain/positionScope.js";
+import { instrumentPositionScope, instrumentPositionScopeKey } from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
@@ -337,6 +337,7 @@ export class EntryPackageApplicationService {
       ticker: command.ticker,
       exchange_symbol: identity.symbol,
       exchange_category: identity.category,
+      position_binding_mode: "one_way",
       created_at: priorRecord?.created_at ?? now,
       updated_at: now,
       desired_entry: desiredEntry,
@@ -368,9 +369,11 @@ export class EntryPackageApplicationService {
     // holding it across external I/O would block unrelated pairs that only
     // need to prove or claim the same physical scope.
     const claim = await this.deps.scopeMutex.withKeyLock(
-      positionScopeKey(identity.category, identity.symbol),
+      instrumentPositionScopeKey(instrumentPositionScope(identity.category, identity.symbol)),
       async (): Promise<"claimed" | "conflict"> => {
-        const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(identity.category, identity.symbol);
+        const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
+          instrumentPositionScope(identity.category, identity.symbol),
+        );
         const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
 
         // Native Partial protection and pair-scoped close are now the only
@@ -758,6 +761,7 @@ export class EntryPackageApplicationService {
       ticker: command.ticker,
       exchange_symbol: "",
       exchange_category: "",
+      position_binding_mode: "one_way",
       created_at: now,
       updated_at: now,
       desired_entry: null,

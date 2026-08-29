@@ -7,6 +7,7 @@ import type { EntryPackageExecutionRecord } from "../../correlation/entryPackage
 import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
 import { compareDecimal } from "../../domain/exactDecimal.js";
+import { instrumentPositionScope } from "../../domain/positionScope.js";
 import type { CloseCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
   closeExecutionIncompleteResult,
@@ -93,7 +94,9 @@ export class CloseApplicationService {
       return unsupportedExchangeScopeResult();
     }
 
-    const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(category, record.exchange_symbol);
+    const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
+      instrumentPositionScope(category, record.exchange_symbol),
+    );
     const selfKey = correlationRecordKey(command.strategyInstanceId, command.tradeCycleId);
     if (!activeRecords.some((active) => correlationRecordKey(active.strategy_instance_id, active.trade_cycle_id) === selfKey)) {
       return internalErrorResult();

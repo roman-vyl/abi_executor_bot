@@ -7,6 +7,7 @@ import test from "node:test";
 import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../src/config/config.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
+import { instrumentPositionScope } from "../../src/domain/positionScope.js";
 import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
@@ -34,13 +35,15 @@ type Ctx = {
 };
 
 test("first APPLY creates a live order and confirms application", async () => {
-  await withService(async ({ service, bybit }) => {
+  await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
     const result = await service.apply(makeCommand());
 
     assertApplied(result, "0.001");
     assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "one_way");
+    assert.equal("positionIdx" in bybit.createOrderCalls[0]!, false);
   });
 });
 
@@ -752,6 +755,7 @@ test("a legacy amend pending_action never resends CREATE, even when the exchange
       ticker: "BTCUSDT.P",
       exchange_symbol: "BTCUSDT",
       exchange_category: "linear",
+      position_binding_mode: "one_way",
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
       desired_entry: desiredEntry,
@@ -1061,7 +1065,7 @@ test("a sequential same-side join succeeds and a retry of the first pair does no
     assertApplied(second, "0.001");
     assertApplied(retry, "0.001");
     assert.equal(bybit.createOrderCalls.length, 2);
-    assert.equal(repo.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+    assert.equal(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 2);
   });
 });
 
@@ -1236,14 +1240,14 @@ test("scope ownership survives restart with multiple same-side owners and admits
 
     const after = new EntryPackageCorrelationRepository(path);
     assert.deepEqual(await after.replay(), { ok: true });
-    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+    assert.equal(after.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 2);
 
     const result = await runServiceAgainstRepository(
       after,
       makeCommand({ strategyInstanceId: "instance-C", tradeCycleId: "cycle-C1" }),
     );
     assertApplied(result.httpResult, "0.001");
-    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 3);
+    assert.equal(after.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1310,6 +1314,7 @@ function makeScopeTestRecord(
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: orderLinkId === null ? null : makeDesiredEntry(),
@@ -1338,6 +1343,7 @@ function makeTerminalClosedRecord(): EntryPackageExecutionRecord {
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: null,
@@ -1420,6 +1426,7 @@ function makeActiveRecord(overrides: {
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: makeDesiredEntry({ side: overrides.side }),

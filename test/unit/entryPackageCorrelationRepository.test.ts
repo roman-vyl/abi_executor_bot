@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
+import { instrumentPositionScope } from "../../src/domain/positionScope.js";
 import type {
   EarlyExecutionObservation,
   EntryPackageExecutionRecord,
@@ -301,7 +302,7 @@ test("save claims a scope for a non-durably-closed record", async () => {
 
     await repo.save(record);
 
-    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), record);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), [record]);
   });
 });
 
@@ -313,7 +314,7 @@ test("save releases a scope only when the record's own pair becomes durably clos
     await repo.save(makeRecord({ orderLinkId: "link-1", status: "applied" }));
     await repo.save(makeRecord({ orderLinkId: null, status: "absent" }));
 
-    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), []);
   });
 });
 
@@ -337,8 +338,8 @@ test("two different scopes are claimed independently", async () => {
     await repo.save(btc);
     await repo.save(eth);
 
-    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), btc);
-    assert.deepEqual(repo.findOwnerByScope("linear", "ETHUSDT"), eth);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), [btc]);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "ETHUSDT")), [eth]);
   });
 });
 
@@ -368,7 +369,7 @@ test("releasing a scope never deletes a different pair's own claim on it", async
       }),
     );
 
-    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), ownerRecord);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), [ownerRecord]);
   });
 });
 
@@ -416,7 +417,7 @@ test("replay resolves a scope handed off between pairs without a false-positive 
     const result = await repo.replay();
 
     assert.deepEqual(result, { ok: true });
-    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), line2);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), [line2]);
   });
 });
 
@@ -477,7 +478,7 @@ test("replay succeeds and reconstructs both pairs when two different pairs' late
     const result = await repo.replay();
 
     assert.deepEqual(result, { ok: true });
-    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+    const active = repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT"));
     assert.equal(active.length, 2);
     assert.deepEqual(
       active.map((r) => r.strategy_instance_id).sort(),
@@ -533,7 +534,7 @@ test("replay treats sequential historical scope reuse as no conflict", async () 
     const result = await repo.replay();
 
     assert.deepEqual(result, { ok: true });
-    assert.deepEqual(repo.findOwnerByScope("linear", "BTCUSDT"), b);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), [b]);
   });
 });
 
@@ -545,7 +546,7 @@ test("a record with no real binding (exchange_category '') never claims a scope"
 
     await repo.save(neverBound);
 
-    assert.equal(repo.findOwnerByScope("linear", "BTCUSDT"), undefined);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")), []);
   });
 });
 
@@ -710,13 +711,13 @@ test("replay fails closed when a pair's fill facts regress across lines", async 
   });
 });
 
-// -- abi-virtual-exposure-state-foundation-v1: findActiveRecordsForScope --
+// -- abi-virtual-exposure-state-foundation-v1: instrument ownership view --
 // Seeded directly at the repository level, bypassing EntryPackageApplicationService's
 // single-owner claim guard entirely — proving the repository layer itself has no
 // single-owner assumption baked in, without exercising or relying on any production
 // claim-policy change (design.md Decision 6).
 
-test("findActiveRecordsForScope returns multiple synthetically seeded same-side active records for one scope", async () => {
+test("findActiveRecordsForInstrumentScope returns multiple synthetically seeded same-side active records", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
     const repo = new EntryPackageCorrelationRepository(path);
@@ -736,7 +737,7 @@ test("findActiveRecordsForScope returns multiple synthetically seeded same-side 
     await repo.save(a);
     await repo.save(b);
 
-    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+    const active = repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT"));
 
     assert.equal(active.length, 2);
     assert.deepEqual(
@@ -746,7 +747,7 @@ test("findActiveRecordsForScope returns multiple synthetically seeded same-side 
   });
 });
 
-test("findActiveRecordsForScope excludes durably-closed records", async () => {
+test("findActiveRecordsForInstrumentScope excludes durably-closed records", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
     const repo = new EntryPackageCorrelationRepository(path);
@@ -763,21 +764,21 @@ test("findActiveRecordsForScope excludes durably-closed records", async () => {
       }),
     );
 
-    const active = repo.findActiveRecordsForScope("linear", "BTCUSDT");
+    const active = repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT"));
 
     assert.equal(active.length, 1);
     assert.equal(active[0]?.trade_cycle_id, "cycle-A1");
   });
 });
 
-test("findActiveRecordsForScope returns an empty array for a scope with no matching records", async () => {
+test("findActiveRecordsForInstrumentScope returns an empty array for an instrument with no matching records", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");
     const repo = new EntryPackageCorrelationRepository(path);
 
     await repo.save(makeRecord({ orderLinkId: "link-1", status: "applied" }));
 
-    assert.deepEqual(repo.findActiveRecordsForScope("linear", "ETHUSDT"), []);
+    assert.deepEqual(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "ETHUSDT")), []);
   });
 });
 
@@ -810,6 +811,7 @@ function makeRecord(
     ticker: "BTCUSDT.P",
     exchange_symbol: overrides.exchangeSymbol ?? "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry:

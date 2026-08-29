@@ -1,8 +1,25 @@
 import type { AbiConfig } from "../config/config.js";
 import { mapEntryOrderSemantics } from "../domain/entryOrderSemantics.js";
+import type { PositionDirection } from "../domain/positionScope.js";
 
 export type BybitOrderSide = "Buy" | "Sell";
 export type BybitTriggerDirection = 1 | 2;
+
+export type PositionBindingGeometry =
+  | { mode: "one_way" }
+  | { mode: "hedge"; direction: PositionDirection };
+
+export type BybitPositionIdx = 0 | 1 | 2;
+
+// This is the sole encoding boundary for Bybit's numeric position slots.
+// Foundation-only: production order builders continue their existing
+// one-way behavior until the later execution and lifecycle cutovers.
+export function encodeBybitPositionIdx(binding: PositionBindingGeometry): BybitPositionIdx {
+  if (binding.mode === "one_way") {
+    return 0;
+  }
+  return binding.direction === "long" ? 1 : 2;
+}
 
 export type BybitCreateOrderPayload = {
   category: string;
