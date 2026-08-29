@@ -93,7 +93,11 @@ export function startServer(config: AbiConfig): void {
   // Correlation-store replay runs asynchronously so account/system routes can
   // come up before entry-package state is ready; entry-package and position
   // management routes fail closed until readiness flips true.
-  void replayCorrelationStore(correlationRepository, readiness);
+  void replayCorrelationStore(correlationRepository, readiness, {
+    bybit,
+    linearPolicy: config.bybitLinearPositionBindingMode,
+    getActiveRecords: () => correlationRepository.findAllActiveRecords(),
+  });
 
   const server = createServer(async (request, response) => {
     if (await handleSystemRoutes({ request, response, config, entryPackageReady: readiness.isReady })) {

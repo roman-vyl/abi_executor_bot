@@ -850,6 +850,7 @@ Configuration читается из environment.
 | `ABI_ENTRY_PACKAGE_CORRELATION_PATH` | `./var/abi_entry_package_correlation.jsonl` | durable correlation store |
 | `ABI_INSTRUMENT_RULES_CACHE_TTL_MS` | `300000` | trading-rules cache TTL |
 | `ABI_BYBIT_REQUEST_TIMEOUT_MS` | `10000` | Bybit request timeout |
+| `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |
 | `BYBIT_API_KEY` | empty | Bybit API key |
 | `BYBIT_API_SECRET` | empty | Bybit API secret |

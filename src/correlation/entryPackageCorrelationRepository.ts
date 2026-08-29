@@ -141,6 +141,15 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
+  // Canonical active view across all instruments. This is derived from the
+  // latest record per pair and deliberately does not introduce a second
+  // durable ownership store. Startup activation gates use it after replay.
+  findAllActiveRecords(): EntryPackageExecutionRecord[] {
+    return [...this.byCompositeKey.values()].filter(
+      (record) => !isDurablyClosedEntryPackageStatus(record.status),
+    );
+  }
+
   // Authoritative multi-owner instrument view. Scanning the latest record
   // per pair avoids a second mutable ownership store and cannot discard
   // siblings. It intentionally includes one-way owners and both future
@@ -248,7 +257,7 @@ export class EntryPackageCorrelationRepository {
     // These local derived views prove instrument and directional-slot
     // identities can be reconstructed without another durable store. The
     // canonical query methods continue scanning the latest pair records.
-    const activeSideByInstrument = new Map<string, "long" | "short">();
+    const activeSideByOneWayInstrument = new Map<string, "long" | "short">();
     const activeModeByInstrument = new Map<string, "one_way" | "hedge">();
     const activeOwnerKeysByDirectionalSlot = new Map<string, Set<string>>();
 
@@ -333,14 +342,16 @@ export class EntryPackageCorrelationRepository {
         activeOwnerKeysByDirectionalSlot.set(slotKey, owners);
       }
 
-      const existingSide = activeSideByInstrument.get(scopeKey);
-      if (existingSide !== undefined && existingSide !== side) {
-        return (
-          `unsupported_mixed_side_active_state for ${scopeKey}: ` +
-          `(saw both "${existingSide}" and "${side}")`
-        );
+      if (record.position_binding_mode === "one_way") {
+        const existingSide = activeSideByOneWayInstrument.get(scopeKey);
+        if (existingSide !== undefined && existingSide !== side) {
+          return (
+            `unsupported_mixed_side_active_state for ${scopeKey}: ` +
+            `(saw both "${existingSide}" and "${side}")`
+          );
+        }
+        activeSideByOneWayInstrument.set(scopeKey, side);
       }
-      activeSideByInstrument.set(scopeKey, side);
     }
 
     return undefined;

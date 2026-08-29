@@ -1,6 +1,10 @@
 import type { CorrelationReplayResult } from "../correlation/entryPackageCorrelationRepository.js";
 import { emitEvent } from "../observability/events.js";
 import type { EntryPackageReadiness } from "./entryPackageReadiness.js";
+import type { EntryPackageExecutionRecord } from "../correlation/entryPackageExecutionRecord.js";
+import type { BybitAdapter } from "../exchange/bybitAdapter.js";
+import type { LinearPositionBindingPolicy } from "../domain/positionBindingPolicy.js";
+import { assureConfiguredActiveBindings } from "./positionModeAssuranceSeams.js";
 
 export type CorrelationReplayer = {
   replay(): Promise<CorrelationReplayResult>;
@@ -12,6 +16,11 @@ export type CorrelationReplayer = {
 export async function replayCorrelationStore(
   repository: CorrelationReplayer,
   readiness: Pick<EntryPackageReadiness, "markReady" | "markNotReady">,
+  activation?: {
+    bybit: BybitAdapter;
+    linearPolicy: LinearPositionBindingPolicy;
+    getActiveRecords(): EntryPackageExecutionRecord[];
+  },
 ): Promise<void> {
   emitEvent("info", "correlation_replay_started");
 
@@ -28,6 +37,26 @@ export async function replayCorrelationStore(
 
   if (result.ok) {
     emitEvent("info", "correlation_replay_succeeded");
+    if (activation !== undefined) {
+      let assurance: Awaited<ReturnType<typeof assureConfiguredActiveBindings>>;
+      try {
+        assurance = await assureConfiguredActiveBindings({
+          bybit: activation.bybit,
+          activeRecords: activation.getActiveRecords(),
+          linearPolicy: activation.linearPolicy,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "position mode assurance failed";
+        emitEvent("error", "readiness_failed", { reason });
+        readiness.markNotReady(reason);
+        return;
+      }
+      if (!assurance.ok) {
+        emitEvent("error", "readiness_failed", { reason: assurance.reason });
+        readiness.markNotReady(assurance.reason);
+        return;
+      }
+    }
     readiness.markReady();
     emitEvent("info", "readiness_ready");
     return;

@@ -25,6 +25,7 @@ import {
   instrumentPositionScopeKey,
   type PositionBindingGeometry,
 } from "../../domain/positionScope.js";
+import { effectivePositionBindingMode } from "../../domain/positionBindingPolicy.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
@@ -45,6 +46,7 @@ import {
   completedObservationIsFresh,
   observeAmbiguousCreateAbsenceAttempt,
 } from "./ambiguousCreateAbsence.js";
+import { assureBindingBeforeAdmission } from "../../app/positionModeAssuranceSeams.js";
 
 export type EntryPackageApplicationServiceDeps = {
   config: AbiConfig;
@@ -339,6 +341,12 @@ export class EntryPackageApplicationService {
     // generation as priorRecord), preserve the binding's real start time
     // rather than resetting it on every retry attempt.
     const isRetryOfSameBinding = priorRecord !== undefined && priorRecord.generation === generation;
+    const positionBindingMode = isRetryOfSameBinding
+      ? priorRecord.position_binding_mode
+      : effectivePositionBindingMode(identity.category, this.deps.config.bybitLinearPositionBindingMode);
+    if (positionBindingMode === null) {
+      return internalErrorResult();
+    }
     const currentBindingStartedAt = isRetryOfSameBinding
       ? priorRecord.current_binding_started_at ?? priorRecord.updated_at
       : now;
@@ -349,7 +357,7 @@ export class EntryPackageApplicationService {
       ticker: command.ticker,
       exchange_symbol: identity.symbol,
       exchange_category: identity.category,
-      position_binding_mode: "one_way",
+      position_binding_mode: positionBindingMode,
       created_at: priorRecord?.created_at ?? now,
       updated_at: now,
       desired_entry: desiredEntry,
@@ -386,14 +394,33 @@ export class EntryPackageApplicationService {
         const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
           instrumentPositionScope(identity.category, identity.symbol),
         );
-        const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
+        const binding = requirePositionBindingGeometry(provisional);
+        const classification = classifyScopeAdmission(activeRecords, command, {
+          side: desiredEntry.side,
+          binding,
+        });
 
-        // Native Partial protection and pair-scoped close are now the only
-        // production paths. A same-side sibling can therefore claim this
-        // scope without sharing or overwriting another cycle's lifecycle;
-        // opposite-side and structurally corrupt ownership still fail closed
-        // before the provisional durable write or any exchange write.
-        if (classification !== "empty" && classification !== "same_side") {
+        // Same-binding siblings remain independently attributable. Opposite
+        // sides are admitted only as explicit hedge slots; one-way opposite
+        // sides and incompatible/corrupt geometry fail before durable or
+        // exchange writes.
+        if (
+          classification !== "empty" &&
+          classification !== "same_side" &&
+          classification !== "opposite_hedge_slot"
+        ) {
+          return "conflict";
+        }
+
+        if (
+          classification === "empty" &&
+          binding.mode === "hedge" &&
+          !(await assureBindingBeforeAdmission({
+            bybit: this.deps.bybit,
+            instrumentScope: instrumentPositionScope(identity.category, identity.symbol),
+            expected: binding,
+          }))
+        ) {
           return "conflict";
         }
 
@@ -424,7 +451,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: calculatedQuantity,
       orderLinkId,
-      binding: { mode: "one_way" },
+      binding: requirePositionBindingGeometry(provisional),
     });
 
     let executionResult;
@@ -890,18 +917,31 @@ function isOwnedBySamePair(owner: EntryPackageExecutionRecord, command: EntryPac
 // check. A `null` desired_entry on any other active record is a structural
 // contradiction no current write path produces — classified as "corrupt"
 // rather than silently excluded or guessed through.
-export type ScopeAdmissionClassification = "empty" | "same_side" | "opposite_side" | "corrupt";
+export type ScopeAdmissionClassification =
+  | "empty"
+  | "same_side"
+  | "opposite_side"
+  | "opposite_hedge_slot"
+  | "incompatible_geometry"
+  | "corrupt";
 
 export function classifyScopeAdmission(
   activeRecords: EntryPackageExecutionRecord[],
   command: EntryPackageCommand,
-  requestedSide: DesiredEntryDto["side"],
+  requested: { side: DesiredEntryDto["side"]; binding: PositionBindingGeometry },
 ): ScopeAdmissionClassification {
   const otherActiveRecords = activeRecords.filter((record) => !isOwnedBySamePair(record, command));
 
   for (const other of otherActiveRecords) {
-    if (other.desired_entry === null) {
+    if (
+      other.desired_entry === null ||
+      other.position_binding_mode === null ||
+      (other.position_binding_mode === "hedge" && other.exchange_category !== "linear")
+    ) {
       return "corrupt";
+    }
+    if (other.position_binding_mode !== requested.binding.mode) {
+      return "incompatible_geometry";
     }
   }
 
@@ -909,8 +949,16 @@ export function classifyScopeAdmission(
     return "empty";
   }
 
-  const allSameSide = otherActiveRecords.every((other) => other.desired_entry?.side === requestedSide);
-  return allSameSide ? "same_side" : "opposite_side";
+  if (requested.binding.mode === "one_way") {
+    const allSameSide = otherActiveRecords.every(
+      (other) => other.desired_entry?.side === requested.side,
+    );
+    return allSameSide ? "same_side" : "opposite_side";
+  }
+
+  const requestedDirection = requested.binding.direction;
+  const allSameSlot = otherActiveRecords.every((other) => other.desired_entry?.side === requestedDirection);
+  return allSameSlot ? "same_side" : "opposite_hedge_slot";
 }
 
 // Exported for reuse by entry-cycle-recovery's Recovery Convergence policy

@@ -145,7 +145,7 @@ test("hedge position decoding returns only the target slot and rejects missing o
   );
 });
 
-test("read-only position mode assurance is explicit, strict, isolated, and unactivated", async () => {
+test("read-only position mode assurance is explicit, strict, and production-composable", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.openPositionsResponse = { retCode: 0, result: { category: "linear", list: [positionRow(1, { size: "0", side: "", avgPrice: "0", openTime: 0 }), positionRow(2, { size: "0", side: "", avgPrice: "0", openTime: 0 })] } };
   assert.deepEqual(await assureBybitPositionMode({ bybit, instrumentScope: scope, expected: { mode: "hedge", direction: "long" } }), { kind: "verified" });
@@ -159,12 +159,12 @@ test("read-only position mode assurance is explicit, strict, isolated, and unact
     readFile("src/config/config.ts", "utf8"),
     readFile("src/app/server.ts", "utf8"),
   ]);
-  assert.equal(configSource.includes("POSITION_BINDING_MODE"), false);
+  assert.equal(configSource.includes("ABI_BYBIT_LINEAR_POSITION_BINDING_MODE"), true);
   assert.equal(configSource.includes("HEDGE_MODE"), false);
   assert.equal(serverSource.includes("assureBybitPositionMode"), false);
 });
 
-test("controlled startup and lazy seams verify explicit bindings without production wiring", async () => {
+test("startup and lazy seams verify explicit bindings with production wiring", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.openPositionsResponse = {
     retCode: 0,
@@ -180,7 +180,7 @@ test("controlled startup and lazy seams verify explicit bindings without product
     { ok: false },
   );
   const serverSource = await readFile("src/app/server.ts", "utf8");
-  assert.equal(serverSource.includes("positionModeAssuranceSeams"), false);
+  assert.equal(serverSource.includes("replayCorrelationStore"), true);
 });
 
 test("Runtime-facing OpenAPI contracts remain free of binding geometry and numeric slots", async () => {
@@ -289,7 +289,7 @@ test("hedge close confirmation rejects a slot mismatch and accepts the durable t
   assert.deepEqual(await classifyOwnCloseOrderOutcome({ bybit, getCloseOrderPayload: query, getCloseOrderHistoryPayload: query, expectedQty: "1", binding: { mode: "hedge", direction: "short" } }), { kind: "ambiguous" });
 });
 
-test("replay distinguishes structural hedge slots, retains mixed-side policy, and rejects one-way/hedge aliasing", async () => {
+test("replay accepts structural hedge slots and rejects one-way/hedge aliasing", async () => {
   const directory = await mkdtemp(join(tmpdir(), "abi-hedge-replay-"));
   const path = join(directory, "correlation.jsonl");
   try {
@@ -298,8 +298,7 @@ test("replay distinguishes structural hedge slots, retains mixed-side policy, an
     await writeFile(path, `${JSON.stringify(long)}\n${JSON.stringify(short)}\n`, "utf8");
     const mixed = new EntryPackageCorrelationRepository(path);
     const mixedResult = await mixed.replay();
-    assert.equal(mixedResult.ok, false);
-    assert.match(mixedResult.ok ? "" : mixedResult.reason, /unsupported_mixed_side_active_state/);
+    assert.deepEqual(mixedResult, { ok: true });
     assert.equal(mixed.findActiveRecordsForDirectionalSlot({ instrumentScope: scope, direction: "long" }).length, 1);
     assert.equal(mixed.findActiveRecordsForDirectionalSlot({ instrumentScope: scope, direction: "short" }).length, 1);
 

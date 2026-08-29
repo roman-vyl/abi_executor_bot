@@ -58,7 +58,7 @@ export type StoredEntryPackagePendingAction = EntryPackagePendingAction | Legacy
 
 // Actual exchange geometry for the current binding. null exists only for
 // discriminator-less legacy rows normalized during replay; every current
-// production write persists "one_way" explicitly. A hedge record's
+// production write persists an explicit mode. A hedge record's
 // directional slot is derived from desired_entry.side, never stored again.
 export type PositionBindingMode = "one_way" | "hedge";
 

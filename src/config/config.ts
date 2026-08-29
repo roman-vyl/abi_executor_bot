@@ -15,6 +15,7 @@ export type AbiConfig = {
   bybitCategory: string;
   bybitSettleCoin: string;
   bybitTriggerBy: string;
+  bybitLinearPositionBindingMode: "one_way" | "hedge";
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
@@ -45,7 +46,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     bybitCategory: readString("BYBIT_CATEGORY", env.BYBIT_CATEGORY, "linear", (value) => value.toLowerCase()),
     bybitSettleCoin: readString("BYBIT_SETTLE_COIN", env.BYBIT_SETTLE_COIN, "USDT", (value) => value.toUpperCase()),
     bybitTriggerBy: readString("BYBIT_TRIGGER_BY", env.BYBIT_TRIGGER_BY, "LastPrice"),
+    bybitLinearPositionBindingMode: readLinearPositionBindingMode(env.ABI_BYBIT_LINEAR_POSITION_BINDING_MODE),
   };
+}
+
+function readLinearPositionBindingMode(value: string | undefined): "one_way" | "hedge" {
+  if (value === undefined) {
+    return "one_way";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "one_way" || normalized === "hedge") {
+    return normalized;
+  }
+
+  throw new Error("ABI_BYBIT_LINEAR_POSITION_BINDING_MODE must be one of: one_way, hedge");
 }
 
 function readBybitEnvironment(env: NodeJS.ProcessEnv): "demo" | "testnet" | "mainnet" {

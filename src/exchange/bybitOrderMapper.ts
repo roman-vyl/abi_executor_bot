@@ -168,8 +168,8 @@ export function mapEntryPackageToBybit(
     tpOrderType: "Market",
   };
 
-  // Preserve the ordinary production one-way payload exactly. Controlled
-  // hedge paths opt in explicitly and are the only paths that encode 1/2.
+  // Preserve one-way payloads exactly. An explicit durable hedge binding is
+  // the only input that opts into the exchange-private 1/2 encoding.
   if (input.binding?.mode === "hedge") {
     createEntryOrder.positionIdx = encodeBybitPositionIdx(input.binding);
   }

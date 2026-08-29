@@ -18,6 +18,7 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     bybitCategory: "linear",
     bybitSettleCoin: "USDT",
     bybitTriggerBy: "LastPrice",
+    bybitLinearPositionBindingMode: "one_way",
     ...overrides,
   };
 }

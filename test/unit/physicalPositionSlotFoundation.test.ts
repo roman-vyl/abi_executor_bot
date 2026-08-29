@@ -123,7 +123,7 @@ test("binding geometry cannot change within one durable generation", async () =>
   });
 });
 
-test("mixed hedge slots are reconstructed separately but remain an unsupported readiness state", async () => {
+test("mixed hedge slots are reconstructed separately as structurally valid active state", async () => {
   await withRepository(async ({ path, repo }) => {
     const long = makeRecord({
       bindingMode: "hedge",
@@ -141,8 +141,7 @@ test("mixed hedge slots are reconstructed separately but remain an unsupported r
 
     const result = await repo.replay();
 
-    assert.equal(result.ok, false);
-    assert.match(result.ok ? "" : result.reason, /unsupported_mixed_side_active_state/);
+    assert.deepEqual(result, { ok: true });
     assert.deepEqual(repo.findActiveRecordsForDirectionalSlot(longSlot()).map((record) => record.strategy_instance_id), [
       "instance-long",
     ]);
@@ -164,6 +163,45 @@ test("active hedge record without a desired-entry side fails closed", async () =
     const result = await repo.replay();
     assert.equal(result.ok, false);
     assert.match(result.ok ? "" : result.reason, /no usable desired_entry\.side/);
+  });
+});
+
+test("findAllActiveRecords enumerates latest active bindings and excludes inactive legacy/history", async () => {
+  await withRepository(async ({ path, repo }) => {
+    const oneWay = makeRecord({ strategyInstanceId: "one-way", tradeCycleId: "one-way-cycle" });
+    const hedge = {
+      ...makeRecord({
+        bindingMode: "hedge",
+        strategyInstanceId: "hedge",
+        tradeCycleId: "hedge-cycle",
+        desiredSide: "short",
+      }),
+      ticker: "ETHUSDT.P",
+      exchange_symbol: "ETHUSDT",
+    };
+    const inactiveHedge = {
+      ...makeRecord({
+        bindingMode: "hedge",
+        strategyInstanceId: "closed-hedge",
+        tradeCycleId: "closed-hedge-cycle",
+      }),
+      status: "terminal_closed" as const,
+    };
+    const inactiveLegacy = withoutBindingMode({
+      ...makeRecord({ strategyInstanceId: "legacy", tradeCycleId: "legacy-cycle" }),
+      status: "absent",
+    });
+    await writeFile(
+      path,
+      `${JSON.stringify(oneWay)}\n${JSON.stringify(hedge)}\n${JSON.stringify(inactiveHedge)}\n${JSON.stringify(inactiveLegacy)}\n`,
+      "utf8",
+    );
+
+    assert.deepEqual(await repo.replay(), { ok: true });
+    assert.deepEqual(
+      repo.findAllActiveRecords().map((record) => record.strategy_instance_id).sort(),
+      ["hedge", "one-way"],
+    );
   });
 });
 

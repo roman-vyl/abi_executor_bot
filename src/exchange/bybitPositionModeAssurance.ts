@@ -7,9 +7,8 @@ export type PositionModeAssuranceOutcome =
   | { kind: "mismatch" }
   | { kind: "unavailable" };
 
-// Read-only and deliberately uncomposed with current startup/admission.
-// A later activation may call this seam with its deployment expectation;
-// this change adds no config capable of selecting hedge production.
+// Read-only assurance used by hedge startup/admission. It accepts an
+// explicit internal expectation and never switches exchange position mode.
 export async function assureBybitPositionMode(input: {
   bybit: BybitAdapter;
   instrumentScope: InstrumentPositionScope;

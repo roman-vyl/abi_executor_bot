@@ -6,9 +6,11 @@ import {
 import { instrumentPositionScopeKey, type InstrumentPositionScope, type PositionBindingGeometry } from "../domain/positionScope.js";
 import type { BybitAdapter } from "../exchange/bybitAdapter.js";
 import { assureBybitPositionMode } from "../exchange/bybitPositionModeAssurance.js";
+import { effectivePositionBindingMode, type LinearPositionBindingPolicy } from "../domain/positionBindingPolicy.js";
 
-// Controlled composition seam for the later activation. It is deliberately
-// not imported by current server startup and receives no deployment config.
+// Startup assurance for explicit active bindings. The caller first checks
+// deployment-policy compatibility; this seam proves current exchange
+// geometry without mutating Bybit.
 export async function assureReplayedActiveBindings(input: {
   bybit: BybitAdapter;
   activeRecords: EntryPackageExecutionRecord[];
@@ -37,15 +39,46 @@ export async function assureReplayedActiveBindings(input: {
   return { ok: true };
 }
 
-// Future admission must call this while holding the instrument mutex. The
-// seam itself owns no lock and performs no durable write, preventing it from
-// becoming an accidental activation path in this readiness-only change.
+// Admission calls this while holding the instrument mutex. The seam itself
+// owns no lock and performs no durable write.
 export async function assureBindingBeforeAdmission(input: {
   bybit: BybitAdapter;
   instrumentScope: InstrumentPositionScope;
   expected: PositionBindingGeometry;
 }): Promise<boolean> {
   return (await assureBybitPositionMode(input)).kind === "verified";
+}
+
+export async function assureConfiguredActiveBindings(input: {
+  bybit: BybitAdapter;
+  activeRecords: EntryPackageExecutionRecord[];
+  linearPolicy: LinearPositionBindingPolicy;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  for (const record of input.activeRecords) {
+    if (record.position_binding_mode === null) {
+      return { ok: false, reason: "active_legacy_one_way_record_requires_drain" };
+    }
+    if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+      return { ok: false, reason: "active_record_has_no_exchange_binding" };
+    }
+    const expectedMode = effectivePositionBindingMode(record.exchange_category, input.linearPolicy);
+    if (record.position_binding_mode !== expectedMode) {
+      return {
+        ok: false,
+        reason: `active_binding_incompatible_with_configured_policy:${record.exchange_category}:${record.exchange_symbol}`,
+      };
+    }
+  }
+
+  // The one-way default deliberately preserves the prior startup behavior:
+  // production Hedge Mode activation alone introduces the exchange-read
+  // readiness dependency.
+  if (input.linearPolicy === "one_way") {
+    return { ok: true };
+  }
+
+  const result = await assureReplayedActiveBindings({ bybit: input.bybit, activeRecords: input.activeRecords });
+  return result.ok ? result : { ok: false, reason: "active_binding_position_mode_assurance_failed" };
 }
 
 function sameGeometry(a: PositionBindingGeometry, b: PositionBindingGeometry): boolean {
