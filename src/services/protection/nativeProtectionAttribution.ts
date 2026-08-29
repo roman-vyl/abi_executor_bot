@@ -1,5 +1,6 @@
 import { compareDecimal } from "../../domain/exactDecimal.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import type { BybitChildOrderCandidate } from "../entryPackage/orderQueryResponseDecoder.js";
 import { decodeChildOrderListResponse } from "../entryPackage/orderQueryResponseDecoder.js";
 
@@ -58,6 +59,7 @@ export async function resolveOwnAttachedProtection(input: {
   category: "linear" | "spot";
   symbol: string;
   entryOrderLinkId: string;
+  binding?: PositionBindingGeometry;
 }): Promise<AttachedProtectionResolution> {
   let realtimeResponse: unknown;
   let historyResponse: unknown;
@@ -78,11 +80,11 @@ export async function resolveOwnAttachedProtection(input: {
 
   const decodedRealtime = decodeChildOrderListResponse({
     response: realtimeResponse,
-    expected: { category: input.category, symbol: input.symbol },
+    expected: { category: input.category, symbol: input.symbol, binding: input.binding },
   });
   const decodedHistory = decodeChildOrderListResponse({
     response: historyResponse,
-    expected: { category: input.category, symbol: input.symbol },
+    expected: { category: input.category, symbol: input.symbol, binding: input.binding },
   });
 
   if (decodedRealtime.kind === "protocol_failure" || decodedHistory.kind === "protocol_failure") {

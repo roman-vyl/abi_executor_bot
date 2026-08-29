@@ -7,7 +7,11 @@ import type {
   BindingHistoryEntry,
   EntryPackageExecutionRecord,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
@@ -16,7 +20,11 @@ import {
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
-import { instrumentPositionScope, instrumentPositionScopeKey } from "../../domain/positionScope.js";
+import {
+  instrumentPositionScope,
+  instrumentPositionScopeKey,
+  type PositionBindingGeometry,
+} from "../../domain/positionScope.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
@@ -150,6 +158,7 @@ export class EntryPackageApplicationService {
     const category = requireCategory(record.exchange_category);
     const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
     const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    const binding = requirePositionBindingGeometry(record);
     let cleanAbsenceAttempts = 0;
     let absenceTainted = false;
 
@@ -158,6 +167,7 @@ export class EntryPackageApplicationService {
         bybit: this.deps.bybit,
         getEntryOrderPayload,
         getEntryOrderHistoryPayload,
+        binding,
       });
 
       if (orderSignal.kind === "live_unfilled") {
@@ -179,6 +189,7 @@ export class EntryPackageApplicationService {
           symbol,
           orderLinkId,
           desiredSide: candidate.desiredSide,
+          binding,
         });
         if (attemptEvidence === "clean_absent") {
           cleanAbsenceAttempts += 1;
@@ -235,6 +246,7 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload,
       getEntryOrderHistoryPayload,
+      binding: requirePositionBindingGeometry(record),
     });
 
     if (classification.kind === "ambiguous") {
@@ -412,6 +424,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: calculatedQuantity,
       orderLinkId,
+      binding: { mode: "one_way" },
     });
 
     let executionResult;
@@ -466,6 +479,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: record.calculated_quantity ?? "0",
       orderLinkId: record.order_link_id,
+      binding: requirePositionBindingGeometry(record),
     });
 
     const confirmation = await confirmEntryPackage({
@@ -474,6 +488,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: record.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(record),
       },
     });
 
@@ -551,6 +566,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: updated.calculated_quantity ?? "0",
       orderLinkId: updated.order_link_id,
+      binding: requirePositionBindingGeometry(updated),
     });
 
     const confirmation = await confirmEntryPackage({
@@ -559,6 +575,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: updated.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(updated),
       },
     });
 
@@ -639,6 +656,7 @@ export class EntryPackageApplicationService {
       getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" },
       getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" },
       desiredQty: record.calculated_quantity ?? "0",
+      binding: requirePositionBindingGeometry(record),
     });
 
     const now = new Date().toISOString();
@@ -692,6 +710,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: record.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(record),
       },
     });
 
@@ -930,4 +949,12 @@ function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstru
   }
 
   throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
+}
+
+function requirePositionBindingGeometry(record: EntryPackageExecutionRecord): PositionBindingGeometry {
+  const binding = resolveRecordPhysicalPositionBinding(record);
+  if (binding === undefined) {
+    throw new Error("record has no usable physical position binding");
+  }
+  return positionBindingGeometry(binding);
 }

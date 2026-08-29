@@ -13,6 +13,8 @@ import type {
   BybitMarketCloseOrderPayload,
   BybitAmendOrderPayload,
 } from "./bybitOrderMapper.js";
+import { encodeBybitPositionIdx } from "./bybitOrderMapper.js";
+import type { PositionBindingGeometry } from "../domain/positionScope.js";
 
 export type BybitOrderSide = "Buy" | "Sell";
 
@@ -28,13 +30,13 @@ export type BybitPosition = {
 export type PositionQueryInput = {
   category: string;
   symbol: string;
+  binding?: PositionBindingGeometry;
 };
 
 export type ValidatedOpenPositionRow = {
   symbol: string;
   side: BybitOrderSide;
   size: string;
-  positionIdx: 0;
   avgPrice: string;
   openTime: number;
   // Raw exact-decimal strings, present only when Bybit's response carries a
@@ -58,6 +60,7 @@ export type PositionQueryFailureReason =
   | "malformed_item"
   | "symbol_mismatch"
   | "invalid_position_idx"
+  | "unproven_flat_hedge_shape"
   | "invalid_size"
   | "invalid_side"
   | "invalid_avg_price"
@@ -541,11 +544,43 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
   if (list.length === 0) {
     return { kind: "failure", reason: "no_row_returned" };
   }
-  if (list.length > 1) {
+  const binding = input.binding ?? { mode: "one_way" as const };
+  if (binding.mode === "one_way" && list.length > 1) {
     return { kind: "failure", reason: "multiple_rows_returned" };
   }
 
-  const item = list[0];
+  const expectedPositionIdx = encodeBybitPositionIdx(binding);
+  const rowsByPositionIdx = new Map<number, unknown>();
+  for (const candidate of list) {
+    if (typeof candidate !== "object" || candidate === null) {
+      return { kind: "failure", reason: "malformed_item" };
+    }
+    const candidateRecord = candidate as Record<string, unknown>;
+    if (candidateRecord.symbol !== input.symbol) {
+      return { kind: "failure", reason: "symbol_mismatch" };
+    }
+    const idx = candidateRecord.positionIdx;
+    if (typeof idx !== "number" || !Number.isInteger(idx) || ![0, 1, 2].includes(idx)) {
+      return { kind: "failure", reason: "invalid_position_idx" };
+    }
+    if (binding.mode === "hedge" && idx === 0) {
+      return { kind: "failure", reason: "invalid_position_idx" };
+    }
+    if (binding.mode === "one_way" && idx !== 0) {
+      return { kind: "failure", reason: "invalid_position_idx" };
+    }
+    if (rowsByPositionIdx.has(idx)) {
+      return { kind: "failure", reason: "multiple_rows_returned" };
+    }
+    rowsByPositionIdx.set(idx, candidate);
+  }
+
+  const item = rowsByPositionIdx.get(expectedPositionIdx);
+  // Until Demo evidence proves omission means flat, absence of the requested
+  // hedge row remains inconclusive rather than fabricated no-position.
+  if (item === undefined) {
+    return { kind: "failure", reason: "no_row_returned" };
+  }
   if (typeof item !== "object" || item === null) {
     return { kind: "failure", reason: "malformed_item" };
   }
@@ -558,7 +593,7 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
   }
 
   const positionIdx = record.positionIdx;
-  if (typeof positionIdx !== "number" || !Number.isInteger(positionIdx) || positionIdx !== 0) {
+  if (typeof positionIdx !== "number" || !Number.isInteger(positionIdx) || positionIdx !== expectedPositionIdx) {
     return { kind: "failure", reason: "invalid_position_idx" };
   }
 
@@ -572,10 +607,13 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
     return { kind: "failure", reason: "invalid_size" };
   }
 
-  // Exactly-zero size, with positionIdx already confirmed 0: a flat row.
+  // Exactly-zero size in the requested binding: a proven flat target row.
   // side/avgPrice/openTime are Bybit's documented empty/default values on
   // such a row and are not read or validated here.
   if (sizeClassification.zero) {
+    if (binding.mode === "hedge") {
+      return { kind: "failure", reason: "unproven_flat_hedge_shape" };
+    }
     return { kind: "no_position" };
   }
 
@@ -598,7 +636,6 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
     symbol: itemSymbol,
     side,
     size: size as string,
-    positionIdx: 0,
     avgPrice,
     openTime,
   };

@@ -117,9 +117,9 @@ geometry.
 ### 5. Position-mode assurance reuses strict position geometry but remains unactivated
 
 Add a read-only internal assurance port/service backed by a symbol-scoped Bybit position read. It
-classifies whether the observed geometry is compatible with an internally expected one-way or hedge
-policy and returns typed verified/mismatch/unavailable outcomes. It never calls
-`/v5/position/switch-mode`.
+accepts an explicit closed one-way-or-hedge expectation from its ABI caller, classifies whether the
+observed geometry is compatible, and returns typed verified/mismatch/unavailable outcomes. It never
+calls `/v5/position/switch-mode`.
 
 The later activation will use it in two places:
 
@@ -128,8 +128,10 @@ The later activation will use it in two places:
    provisional claim.
 
 This change provides the primitive, composition seam, evidence tests, and activation contract, but
-does not add an exchange dependency to current one-way startup and does not expose an enabled hedge
-configuration. A fresh verification is scoped to one instrument; it cannot authorize another.
+does not add a deployment policy, configuration field, or exchange dependency to current one-way
+startup. Controlled tests can pass a hedge expectation directly; production cannot. The later
+activation change will introduce the deployment policy and connect it to these seams. A fresh
+verification is scoped to one instrument; it cannot authorize another.
 
 Alternative: let ABI switch mode and trust the acknowledgement. Rejected because Bybit mode is an
 account/symbol operational mutation with open-order/position preconditions and override precedence;

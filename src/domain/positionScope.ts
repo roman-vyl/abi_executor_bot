@@ -17,6 +17,14 @@ export type DirectionalPositionSlot = {
   direction: PositionDirection;
 };
 
+export type PositionBindingGeometry =
+  | { mode: "one_way" }
+  | { mode: "hedge"; direction: PositionDirection };
+
+export type PhysicalPositionBinding =
+  | { mode: "one_way"; instrumentScope: InstrumentPositionScope }
+  | { mode: "hedge"; slot: DirectionalPositionSlot };
+
 export function instrumentPositionScope(
   category: ExchangeInstrumentCategory,
   symbol: string,

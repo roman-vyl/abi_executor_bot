@@ -1,7 +1,12 @@
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
-import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  isDurablyClosedEntryPackageStatus,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import { instrumentPositionScope } from "../../domain/positionScope.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import type { ProtectionCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
@@ -77,6 +82,7 @@ export class ProtectionApplicationService {
       symbol: record.exchange_symbol,
       entryOrderLinkId: record.order_link_id,
       desired: desiredResult.desired,
+      binding: positionBindingGeometry(requirePhysicalBinding(record)),
     });
   }
 
@@ -111,9 +117,18 @@ export class ProtectionApplicationService {
 
     // Multi-owner-aware re-verification (abi-same-side-virtual-exposure-
     // ownership-v1): use the complete instrument-scoped owner set.
-    const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
-      instrumentPositionScope(category, record.exchange_symbol),
-    );
+    const physicalBinding = resolveRecordPhysicalPositionBinding(record);
+    if (physicalBinding === undefined) {
+      return internalErrorResult();
+    }
+    const instrumentScope = instrumentPositionScope(category, record.exchange_symbol);
+    const allInstrumentRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(instrumentScope);
+    if (allInstrumentRecords.some((active) => active.position_binding_mode !== record.position_binding_mode)) {
+      return internalErrorResult();
+    }
+    const activeRecords = physicalBinding.mode === "one_way"
+      ? allInstrumentRecords
+      : this.deps.correlationRepository.findActiveRecordsForDirectionalSlot(physicalBinding.slot);
     const selfIsActive = activeRecords.some(
       (active) =>
         active.strategy_instance_id === command.strategyInstanceId && active.trade_cycle_id === command.tradeCycleId,
@@ -208,7 +223,10 @@ export async function resolveCurrentOwnFilledQty(input: {
       orderLinkId: record.order_link_id,
       limit: "1",
     },
-    expected: { qty: record.calculated_quantity ?? "0" },
+    expected: {
+      qty: record.calculated_quantity ?? "0",
+      binding: positionBindingGeometry(requirePhysicalBinding(record)),
+    },
   });
 
   if (outcome.kind === "partial_fill" || outcome.kind === "full_fill") {
@@ -217,6 +235,14 @@ export async function resolveCurrentOwnFilledQty(input: {
 
   // pending_confirmed | terminal_without_fill | not_found | ambiguous
   return { ok: false, reason: "no_authoritative_qty" };
+}
+
+function requirePhysicalBinding(record: EntryPackageExecutionRecord) {
+  const binding = resolveRecordPhysicalPositionBinding(record);
+  if (binding === undefined) {
+    throw new Error("record has no usable physical position binding");
+  }
+  return binding;
 }
 
 export type DesiredProtectionStateResolutionFailure = "no_authoritative_qty" | "trading_rules_unavailable";

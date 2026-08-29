@@ -1,5 +1,11 @@
 import type { DesiredEntryDto } from "../domain/entryPackageApi.js";
 import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
+import {
+  directionalPositionSlot,
+  instrumentPositionScope,
+  type PhysicalPositionBinding,
+  type PositionBindingGeometry,
+} from "../domain/positionScope.js";
 
 export type EntryPackageExecutionStatus =
   | "pending_create"
@@ -129,6 +135,36 @@ export type EntryPackageExecutionRecord = {
   // recent write.
   current_binding_started_at: string | null;
 };
+
+// Resolves the immutable physical binding owned by one durable generation.
+// Numeric Bybit slots never leave the exchange boundary. Legacy active rows,
+// malformed hedge rows, and never-bound rows deliberately have no binding.
+export function resolveRecordPhysicalPositionBinding(
+  record: EntryPackageExecutionRecord,
+): PhysicalPositionBinding | undefined {
+  if (
+    (record.exchange_category !== "linear" && record.exchange_category !== "spot") ||
+    record.exchange_symbol === "" ||
+    record.position_binding_mode === null
+  ) {
+    return undefined;
+  }
+
+  const instrumentScope = instrumentPositionScope(record.exchange_category, record.exchange_symbol);
+  if (record.position_binding_mode === "one_way") {
+    return { mode: "one_way", instrumentScope };
+  }
+  if (record.exchange_category !== "linear" || record.desired_entry === null) {
+    return undefined;
+  }
+  return { mode: "hedge", slot: directionalPositionSlot(instrumentScope, record.desired_entry.side) };
+}
+
+export function positionBindingGeometry(binding: PhysicalPositionBinding): PositionBindingGeometry {
+  return binding.mode === "one_way"
+    ? { mode: "one_way" }
+    : { mode: "hedge", direction: binding.slot.direction };
+}
 
 // Opaque path identifiers may contain any decoded character, so the
 // composite key is built from a JSON array rather than a delimited string

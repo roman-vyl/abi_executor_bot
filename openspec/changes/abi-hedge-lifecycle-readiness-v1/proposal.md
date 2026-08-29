@@ -63,7 +63,7 @@ safely.
 
 - Affects internal exchange payload/decoder contracts, entry-package confirmation and absence
   evidence, position-query primitives, open-position, protection, close, recovery, correlation
-  replay policy, readiness composition, configuration, and focused unit/integration/restart tests.
+  replay policy, readiness composition seams, and focused unit/integration/restart tests.
 - Depends on `abi-physical-position-slot-foundation-v1`, including `InstrumentPositionScope`,
   `DirectionalPositionSlot`, durable `position_binding_mode`, slot-aware repository queries, and
   `encodeBybitPositionIdx()`.

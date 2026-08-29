@@ -4,21 +4,28 @@ Define read-only assurance that each Bybit instrument uses the physical position
 
 ## ADDED Requirements
 
-### Requirement: ABI has one internal expected position geometry policy
-ABI SHALL have an internal deployment policy describing the position binding geometry it expects
-for execution. The policy SHALL default to the current one-way behavior and SHALL NOT be supplied
-or overridden by Strategy Runtime requests. This readiness change SHALL NOT use an expected hedge
-policy to create production hedge records or orders.
+### Requirement: Position-mode assurance receives one explicit internal geometry expectation
+The read-only assurance primitive SHALL evaluate one instrument against an explicit closed internal
+expectation of one-way or hedge geometry supplied by its ABI caller. This readiness change SHALL
+NOT add a deployment-selectable binding policy, an enabled hedge configuration, or a
+Runtime-selectable geometry field. The ordinary production lifecycle SHALL continue selecting
+one-way geometry directly; the later activation change will own the deployment policy and
+production wiring that can supply a hedge expectation.
 
 #### Scenario: Runtime cannot select Hedge Mode
 - **WHEN** Runtime submits an otherwise valid entry-package request
 - **THEN** no request field can select one-way or hedge account geometry
-- **AND** production behavior remains governed exclusively by ABI's internal policy and activation
-  gates
+- **AND** the request cannot supply or override the assurance primitive's expected geometry
 
-#### Scenario: Readiness release retains one-way production policy
+#### Scenario: Readiness release adds no hedge deployment policy
 - **WHEN** this change is deployed normally
 - **THEN** ABI's production provisional records and entry writes continue using one-way geometry
+- **AND** there is no deploy-time setting that can activate hedge geometry
+
+#### Scenario: Controlled assurance can evaluate hedge geometry
+- **WHEN** a controlled internal test invokes assurance with an explicit hedge expectation
+- **THEN** the primitive can classify the instrument evidence against hedge geometry
+- **AND** that invocation does not change production configuration or authorize an entry write
 
 ### Requirement: Position-mode assurance is read-only and fail closed
 ABI SHALL verify expected Bybit position geometry using authenticated read-only exchange evidence.

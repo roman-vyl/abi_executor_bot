@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { compareDecimal, subtractDecimal } from "../../domain/exactDecimal.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import type { EarlyExecutionObservation } from "../../correlation/entryPackageExecutionRecord.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type {
@@ -35,6 +36,7 @@ export const TERMINAL_WITHOUT_FILL_STATUSES = new Set(["Rejected", "Deactivated"
 
 export type ExpectedPackageFields = {
   qty: string;
+  binding?: PositionBindingGeometry;
 };
 
 export type PackageConfirmationOutcome =
@@ -82,8 +84,8 @@ export async function confirmEntryPackage(input: {
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
   expected: ExpectedPackageFields;
 }): Promise<PackageConfirmationOutcome> {
-  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
-  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const realtimeIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderPayload, binding: input.expected.binding };
+  const historyIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderHistoryPayload, binding: input.expected.binding };
 
   let sawQueryFailure = false;
   let sawInconclusiveFinding = false;
@@ -183,9 +185,10 @@ export async function confirmEntryPackageCancelled(input: {
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
   desiredQty: string;
+  binding?: PositionBindingGeometry;
 }): Promise<CancelConfirmationOutcome> {
-  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
-  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const realtimeIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderPayload, binding: input.binding };
+  const historyIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderHistoryPayload, binding: input.binding };
 
   for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
     const realtime = await queryOrderView(
@@ -272,9 +275,10 @@ export async function classifyEntryOrderTerminality(input: {
   bybit: BybitAdapter;
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+  binding?: PositionBindingGeometry;
 }): Promise<EntryOrderTerminality> {
-  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
-  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const realtimeIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderPayload, binding: input.binding };
+  const historyIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderHistoryPayload, binding: input.binding };
 
   const realtime = await queryOrderView(
     () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
@@ -331,8 +335,9 @@ export async function classifyEntryOrderForRecovery(input: {
   bybit: BybitAdapter;
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+  binding?: PositionBindingGeometry;
 }): Promise<RecoveryEntryOrderSignal> {
-  const realtimeIdentity: ExpectedOrderIdentity = input.getEntryOrderPayload;
+  const realtimeIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderPayload, binding: input.binding };
   const realtime = await queryOrderView(
     () => input.bybit.getOrderByLinkId(input.getEntryOrderPayload),
     realtimeIdentity,
@@ -354,7 +359,7 @@ export async function classifyEntryOrderForRecovery(input: {
     }
   }
 
-  const historyIdentity: ExpectedOrderIdentity = input.getEntryOrderHistoryPayload;
+  const historyIdentity: ExpectedOrderIdentity = { ...input.getEntryOrderHistoryPayload, binding: input.binding };
   const history = await queryOrderView(
     () => input.bybit.getOrderHistory(input.getEntryOrderHistoryPayload),
     historyIdentity,
@@ -405,6 +410,7 @@ export async function confirmEntryOrderNeutralized(input: {
   bybit: BybitAdapter;
   getEntryOrderPayload: BybitGetOrderByLinkIdPayload;
   getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload;
+  binding?: PositionBindingGeometry;
 }): Promise<"neutralized" | "ambiguous"> {
   for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
     const classification = await classifyEntryOrderTerminality(input);
@@ -447,11 +453,13 @@ export async function classifyOwnCloseOrderOutcome(input: {
   getCloseOrderPayload: BybitGetOrderByLinkIdPayload;
   getCloseOrderHistoryPayload: BybitGetOrderHistoryPayload;
   expectedQty: string;
+  binding?: PositionBindingGeometry;
 }): Promise<OwnCloseOrderOutcome> {
   const terminality = await classifyEntryOrderTerminality({
     bybit: input.bybit,
     getEntryOrderPayload: input.getCloseOrderPayload,
     getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
+    binding: input.binding,
   });
 
   if (terminality.kind !== "terminal") {
@@ -462,7 +470,7 @@ export async function classifyOwnCloseOrderOutcome(input: {
     bybit: input.bybit,
     getEntryOrderPayload: input.getCloseOrderPayload,
     getEntryOrderHistoryPayload: input.getCloseOrderHistoryPayload,
-    expected: { qty: input.expectedQty },
+    expected: { qty: input.expectedQty, binding: input.binding },
   });
 
   if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {

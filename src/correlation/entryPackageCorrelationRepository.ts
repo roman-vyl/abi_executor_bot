@@ -249,6 +249,7 @@ export class EntryPackageCorrelationRepository {
     // identities can be reconstructed without another durable store. The
     // canonical query methods continue scanning the latest pair records.
     const activeSideByInstrument = new Map<string, "long" | "short">();
+    const activeModeByInstrument = new Map<string, "one_way" | "hedge">();
     const activeOwnerKeysByDirectionalSlot = new Map<string, Set<string>>();
 
     for (const record of this.byCompositeKey.values()) {
@@ -303,6 +304,14 @@ export class EntryPackageCorrelationRepository {
 
       const scope = instrumentPositionScope(record.exchange_category, record.exchange_symbol);
       const scopeKey = instrumentPositionScopeKey(scope);
+      const existingMode = activeModeByInstrument.get(scopeKey);
+      if (existingMode !== undefined && existingMode !== record.position_binding_mode) {
+        return (
+          `incompatible_active_position_binding_geometry for ${scopeKey}: ` +
+          `(saw both "${existingMode}" and "${record.position_binding_mode}")`
+        );
+      }
+      activeModeByInstrument.set(scopeKey, record.position_binding_mode);
 
       const side = record.desired_entry?.side;
       if (side === undefined) {

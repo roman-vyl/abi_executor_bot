@@ -1,4 +1,6 @@
 import { compareDecimal } from "../../domain/exactDecimal.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
+import { encodeBybitPositionIdx } from "../../exchange/bybitOrderMapper.js";
 
 export type BybitOrderView = {
   orderStatus: string;
@@ -18,6 +20,7 @@ export type OrderQueryProtocolFailureReason =
   | "malformed_item"
   | "symbol_mismatch"
   | "order_link_id_mismatch"
+  | "invalid_position_idx"
   | "invalid_order_status"
   | "invalid_qty"
   | "invalid_cumulative_filled_qty"
@@ -35,6 +38,7 @@ export type ExpectedOrderIdentity = {
   category: string;
   symbol: string;
   orderLinkId: string;
+  binding?: PositionBindingGeometry;
 };
 
 // Pure decoder for a single `order/realtime` or `order/history` response,
@@ -89,6 +93,16 @@ export function decodeOrderQueryResponse(input: {
   }
   if (record.orderLinkId !== expected.orderLinkId) {
     return { kind: "protocol_failure", reason: "order_link_id_mismatch" };
+  }
+  if (expected.binding !== undefined) {
+    const positionIdx = record.positionIdx;
+    if (
+      typeof positionIdx !== "number" ||
+      !Number.isInteger(positionIdx) ||
+      positionIdx !== encodeBybitPositionIdx(expected.binding)
+    ) {
+      return { kind: "protocol_failure", reason: "invalid_position_idx" };
+    }
   }
 
   const orderStatus = record.orderStatus;
@@ -175,7 +189,8 @@ export type ChildOrderListProtocolFailureReason =
   | "invalid_order_status"
   | "invalid_trigger_price"
   | "invalid_qty"
-  | "invalid_leaves_qty";
+  | "invalid_leaves_qty"
+  | "invalid_position_idx";
 
 export type DecodedChildOrderList =
   | { kind: "ok"; items: BybitChildOrderCandidate[] }
@@ -184,6 +199,7 @@ export type DecodedChildOrderList =
 export type ExpectedChildOrderListScope = {
   category: string;
   symbol: string;
+  binding?: PositionBindingGeometry;
 };
 
 // Pure decoder for a symbol-scoped `order/realtime` or `order/history`
@@ -281,6 +297,17 @@ export function decodeChildOrderListResponse(input: {
     const leavesQtyField = readOptionalStringField(record, "leavesQty");
     if (!leavesQtyField.ok || !isNonNegativeOrEmptyExactDecimal(leavesQtyField.value)) {
       return { kind: "protocol_failure", reason: "invalid_leaves_qty" };
+    }
+
+    if (expected.binding !== undefined) {
+      const value = record.positionIdx;
+      if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value !== encodeBybitPositionIdx(expected.binding)
+      ) {
+        return { kind: "protocol_failure", reason: "invalid_position_idx" };
+      }
     }
 
     items.push({

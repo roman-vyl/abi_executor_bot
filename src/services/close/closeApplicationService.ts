@@ -4,10 +4,14 @@ import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
 import { compareDecimal } from "../../domain/exactDecimal.js";
-import { instrumentPositionScope } from "../../domain/positionScope.js";
+import { instrumentPositionScope, type PositionBindingGeometry } from "../../domain/positionScope.js";
 import type { CloseCommand, PositionManagementHttpResult } from "../../domain/positionManagementApi.js";
 import {
   closeExecutionIncompleteResult,
@@ -17,8 +21,7 @@ import {
   unsupportedExchangeScopeResult,
 } from "../../domain/positionManagementApi.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
-import type { BybitMarketCloseOrderPayload } from "../../exchange/bybitOrderMapper.js";
-import { readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
+import { mapBindingAwareMarketCloseOrder, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import { cancelEntryOrder, executeMarketCloseOrder } from "../../execution/execution.js";
 import {
   classifyEntryOrderTerminality,
@@ -94,9 +97,20 @@ export class CloseApplicationService {
       return unsupportedExchangeScopeResult();
     }
 
-    const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
+    const physicalBinding = resolveRecordPhysicalPositionBinding(record);
+    if (physicalBinding === undefined) {
+      return internalErrorResult();
+    }
+    const binding = positionBindingGeometry(physicalBinding);
+    const allInstrumentRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
       instrumentPositionScope(category, record.exchange_symbol),
     );
+    if (allInstrumentRecords.some((active) => active.position_binding_mode !== record.position_binding_mode)) {
+      return internalErrorResult();
+    }
+    const activeRecords = physicalBinding.mode === "one_way"
+      ? allInstrumentRecords
+      : this.deps.correlationRepository.findActiveRecordsForDirectionalSlot(physicalBinding.slot);
     const selfKey = correlationRecordKey(command.strategyInstanceId, command.tradeCycleId);
     if (!activeRecords.some((active) => correlationRecordKey(active.strategy_instance_id, active.trade_cycle_id) === selfKey)) {
       return internalErrorResult();
@@ -113,7 +127,7 @@ export class CloseApplicationService {
 
     const symbol = record.exchange_symbol;
     const entryQuery = { category, symbol, orderLinkId, limit: "1" as const };
-    if (!(await this.neutralizeEntry(entryQuery))) {
+    if (!(await this.neutralizeEntry(entryQuery, binding))) {
       return internalErrorResult();
     }
 
@@ -124,7 +138,7 @@ export class CloseApplicationService {
 
     // MASTER-PLAN SAFETY GATE: protection is neutralized before aggregate
     // inspection, close identity recovery, dispatch, or resend.
-    const protectionProof = await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure);
+    const protectionProof = await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure, binding);
     if (protectionProof === undefined) {
       return internalErrorResult();
     }
@@ -148,11 +162,12 @@ export class CloseApplicationService {
     symbol: string;
     orderLinkId: string;
     limit: "1";
-  }): Promise<boolean> {
+  }, binding: PositionBindingGeometry): Promise<boolean> {
     const initial = await classifyEntryOrderTerminality({
       bybit: this.deps.bybit,
       getEntryOrderPayload: entryQuery,
       getEntryOrderHistoryPayload: entryQuery,
+      binding,
     });
 
     if (initial.kind === "terminal") {
@@ -176,6 +191,7 @@ export class CloseApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: entryQuery,
       getEntryOrderHistoryPayload: entryQuery,
+      binding,
     });
     return outcome !== "ambiguous";
   }
@@ -192,7 +208,10 @@ export class CloseApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: { category, symbol: record.exchange_symbol, orderLinkId, limit: "1" },
       getEntryOrderHistoryPayload: { category, symbol: record.exchange_symbol, orderLinkId, limit: "1" },
-      expected: { qty: calculatedQuantity },
+      expected: {
+        qty: calculatedQuantity,
+        binding: positionBindingGeometry(requirePhysicalBinding(record)),
+      },
     });
 
     if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
@@ -209,8 +228,9 @@ export class CloseApplicationService {
     symbol: string,
     entryOrderLinkId: string,
     ownExposure: string,
+    binding: PositionBindingGeometry,
   ): Promise<ProtectionNeutralizationProof | undefined> {
-    let resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId });
+    let resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId, binding });
     let expectedStopOrderId: string | null = null;
     let expectedTakeOrderId: string | null = null;
     let cleanAbsenceAllowed = compareDecimal(ownExposure, "0") === 0;
@@ -260,7 +280,7 @@ export class CloseApplicationService {
 
       if (attempt < BOUNDED_ATTEMPTS - 1) {
         await sleep(RETRY_DELAY_MS);
-        resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId });
+        resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId, binding });
       }
     }
 
@@ -268,7 +288,11 @@ export class CloseApplicationService {
   }
 
   private async aggregateIsCompatible(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
-    const result = await this.deps.bybit.queryPositionForInstrument({ category: "linear", symbol: record.exchange_symbol });
+    const result = await this.deps.bybit.queryPositionForInstrument({
+      category: "linear",
+      symbol: record.exchange_symbol,
+      binding: positionBindingGeometry(requirePhysicalBinding(record)),
+    });
     const ownIsZero = compareDecimal(ownExposure, "0") === 0;
 
     if (result.kind === "failure") {
@@ -309,7 +333,13 @@ export class CloseApplicationService {
       return internalErrorResult();
     }
 
-    const outcome = await this.resolveCloseOrderOutcome("linear", current.exchange_symbol, closeOrderLinkId, ownExposure);
+    const outcome = await this.resolveCloseOrderOutcome(
+      "linear",
+      current.exchange_symbol,
+      closeOrderLinkId,
+      ownExposure,
+      positionBindingGeometry(requirePhysicalBinding(current)),
+    );
     if (outcome === "incomplete") {
       return closeExecutionIncompleteResult();
     }
@@ -326,6 +356,7 @@ export class CloseApplicationService {
         current.exchange_symbol,
         closeOrderLinkId,
         ownExposure,
+        positionBindingGeometry(requirePhysicalBinding(current)),
       );
       if (resentOutcome === "incomplete") {
         return closeExecutionIncompleteResult();
@@ -357,16 +388,17 @@ export class CloseApplicationService {
       await this.deps.correlationRepository.save(current);
     }
 
-    const closePayload: BybitMarketCloseOrderPayload = {
+    if (record.desired_entry === null) {
+      return undefined;
+    }
+    const closePayload = mapBindingAwareMarketCloseOrder({
       category: "linear",
       symbol: record.exchange_symbol,
-      side: record.desired_entry?.side === "long" ? "Sell" : "Buy",
-      orderType: "Market",
+      entrySide: record.desired_entry.side,
       qty: ownExposure,
-      reduceOnly: true,
-      positionIdx: 0,
       orderLinkId: closeOrderLinkId,
-    };
+      binding: positionBindingGeometry(requirePhysicalBinding(record)),
+    });
 
     let result;
     try {
@@ -386,6 +418,7 @@ export class CloseApplicationService {
     symbol: string,
     closeOrderLinkId: string,
     ownExposure: string,
+    binding: PositionBindingGeometry,
   ): Promise<"matched" | "incomplete" | "not_found" | "ambiguous"> {
     const query = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
 
@@ -395,6 +428,7 @@ export class CloseApplicationService {
         getCloseOrderPayload: query,
         getCloseOrderHistoryPayload: query,
         expectedQty: ownExposure,
+        binding,
       });
 
       if (outcome.kind === "matched") {
@@ -434,12 +468,14 @@ export class CloseApplicationService {
         bybit: this.deps.bybit,
         getEntryOrderPayload: entryQuery,
         getEntryOrderHistoryPayload: entryQuery,
+        binding: positionBindingGeometry(requirePhysicalBinding(record)),
       });
       const protection = await resolveOwnAttachedProtection({
         bybit: this.deps.bybit,
         category: "linear",
         symbol: record.exchange_symbol,
         entryOrderLinkId: orderLinkId,
+        binding: positionBindingGeometry(requirePhysicalBinding(record)),
       });
 
       let closeMatched = compareDecimal(ownExposure, "0") === 0;
@@ -450,6 +486,7 @@ export class CloseApplicationService {
             record.exchange_symbol,
             record.close_order_link_id,
             ownExposure,
+            positionBindingGeometry(requirePhysicalBinding(record)),
           )) === "matched";
       }
 
@@ -495,6 +532,14 @@ function protectionMatchesProof(
     isTerminalOrderStatus(resolution.stop.orderStatus) &&
     isTerminalOrderStatus(resolution.take.orderStatus)
   );
+}
+
+function requirePhysicalBinding(record: EntryPackageExecutionRecord) {
+  const binding = resolveRecordPhysicalPositionBinding(record);
+  if (binding === undefined) {
+    throw new Error("record has no usable physical position binding");
+  }
+  return binding;
 }
 
 function isTerminalOrderStatus(orderStatus: string): boolean {
