@@ -133,16 +133,78 @@ test("hedge position decoding returns only the target slot and rejects missing o
     { kind: "failure", reason: "no_row_returned" },
   );
   assert.deepEqual(
-    evaluatePositionQueryResponse(
-      { retCode: 0, result: { category: "linear", list: [positionRow(1, { side: "", size: "0", avgPrice: "0", openTime: 0 }), positionRow(2, { side: "", size: "0", avgPrice: "0", openTime: 0 })] } },
-      { ...scope, binding: { mode: "hedge", direction: "long" } },
-    ),
-    { kind: "failure", reason: "unproven_flat_hedge_shape" },
-  );
-  assert.deepEqual(
     evaluatePositionQueryResponse({ retCode: 0, result: { category: "linear", list: [positionRow(1), positionRow(1)] } }, { ...scope, binding: { mode: "hedge", direction: "long" } }),
     { kind: "failure", reason: "multiple_rows_returned" },
   );
+});
+
+test("captured Bybit Demo flat Hedge Mode fixture proves exactly two canonical flat slots", async () => {
+  const fixture = JSON.parse(
+    await readFile("test/fixtures/bybit-demo-flat-hedge-position-list.json", "utf8"),
+  ) as { response: { body: unknown } };
+  const input = { category: "linear", symbol: "ZROUSDT" };
+
+  assert.deepEqual(
+    evaluatePositionQueryResponse(fixture.response.body, {
+      ...input,
+      binding: { mode: "hedge", direction: "long" },
+    }),
+    { kind: "no_position" },
+  );
+  assert.deepEqual(
+    evaluatePositionQueryResponse(fixture.response.body, {
+      ...input,
+      binding: { mode: "hedge", direction: "short" },
+    }),
+    { kind: "no_position" },
+  );
+
+  const raw = fixture.response.body as {
+    result: { list: Array<Record<string, unknown>> };
+  };
+  assert.deepEqual(
+    raw.result.list.map(({ positionIdx, side, size, avgPrice, openTime, stopLoss, takeProfit }) => ({
+      positionIdx,
+      side,
+      size,
+      avgPrice,
+      openTime,
+      stopLoss,
+      takeProfit,
+    })),
+    [
+      { positionIdx: 1, side: "", size: "0", avgPrice: "0", openTime: 0, stopLoss: "", takeProfit: "" },
+      { positionIdx: 2, side: "", size: "0", avgPrice: "0", openTime: 0, stopLoss: "", takeProfit: "" },
+    ],
+  );
+});
+
+test("flat Hedge Mode decoding fails closed for every unproven omission or field geometry", () => {
+  const flat = (positionIdx: 1 | 2, overrides: Record<string, unknown> = {}) =>
+    positionRow(positionIdx, {
+      side: "",
+      size: "0",
+      avgPrice: "0",
+      openTime: 0,
+      stopLoss: "",
+      takeProfit: "",
+      ...overrides,
+    });
+  const input = { ...scope, binding: { mode: "hedge" as const, direction: "long" as const } };
+
+  for (const list of [
+    [flat(1)],
+    [flat(1), flat(2, { side: "Sell", size: "1", avgPrice: "100000", openTime: 1 })],
+    [flat(1), flat(2, { avgPrice: "" })],
+    [flat(1), flat(2, { openTime: undefined })],
+    [flat(1), flat(2, { stopLoss: undefined })],
+    [flat(1), flat(2, { takeProfit: undefined })],
+  ]) {
+    assert.deepEqual(
+      evaluatePositionQueryResponse({ retCode: 0, result: { category: "linear", list } }, input),
+      { kind: "failure", reason: "unproven_flat_hedge_shape" },
+    );
+  }
 });
 
 test("read-only position mode assurance is explicit, strict, and production-composable", async () => {

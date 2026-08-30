@@ -607,12 +607,15 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
     return { kind: "failure", reason: "invalid_size" };
   }
 
-  // Exactly-zero size in the requested binding: a proven flat target row.
-  // side/avgPrice/openTime are Bybit's documented empty/default values on
-  // such a row and are not read or validated here.
+  // Exactly-zero size in the requested binding. One-way keeps its established
+  // single-row contract. Hedge flatness is accepted only for the exact
+  // two-slot geometry captured from Bybit Demo on 2026-08-30; every other
+  // zero-size hedge shape remains unproven and fails closed.
   if (sizeClassification.zero) {
     if (binding.mode === "hedge") {
-      return { kind: "failure", reason: "unproven_flat_hedge_shape" };
+      if (!isObservedFlatHedgeGeometry(rowsByPositionIdx)) {
+        return { kind: "failure", reason: "unproven_flat_hedge_shape" };
+      }
     }
     return { kind: "no_position" };
   }
@@ -651,6 +654,37 @@ export function evaluatePositionQueryResponse(response: unknown, input: Position
   }
 
   return { kind: "position", row };
+}
+
+function isObservedFlatHedgeGeometry(rowsByPositionIdx: ReadonlyMap<number, unknown>): boolean {
+  if (rowsByPositionIdx.size !== 2 || !rowsByPositionIdx.has(1) || !rowsByPositionIdx.has(2)) {
+    return false;
+  }
+
+  for (const positionIdx of [1, 2] as const) {
+    const row = rowsByPositionIdx.get(positionIdx);
+    if (typeof row !== "object" || row === null) {
+      return false;
+    }
+
+    const record = row as Record<string, unknown>;
+    const size = record.size;
+    const sizeClassification = typeof size === "string" ? classifyExactDecimalText(size) : undefined;
+    if (
+      sizeClassification === undefined ||
+      !sizeClassification.valid ||
+      !sizeClassification.zero ||
+      record.side !== "" ||
+      record.avgPrice !== "0" ||
+      record.openTime !== 0 ||
+      record.stopLoss !== "" ||
+      record.takeProfit !== ""
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function readTickerLastPrice(response: unknown): string {

@@ -1,7 +1,7 @@
 ## 1. Evidence and Contract Baseline
 
-- [ ] 1.1 Capture a read-only `/v5/position/list` response for an operator-preconfigured, flat Bybit Demo hedge-mode linear symbol without switching mode or placing an order, and record the exact cardinality, indexes, and flat-row fields as repository evidence.
-- [ ] 1.2 Turn the captured flat hedge response into a deterministic contract fixture and document which response shapes are proven admissible versus fail-closed.
+- [x] 1.1 Capture a read-only `/v5/position/list` response for an operator-preconfigured, flat Bybit Demo hedge-mode linear symbol without switching mode or placing an order, and record the exact cardinality, indexes, and flat-row fields as repository evidence.
+- [x] 1.2 Turn the captured flat hedge response into a deterministic contract fixture and document which response shapes are proven admissible versus fail-closed.
 - [x] 1.3 Extend public-contract structural tests to keep `positionIdx`, directional-slot encodings, binding mode, and assurance policy absent from every Runtime-facing entry, open-position, protection, close, and recovery schema.
 
 ## 2. Shared Binding and Order Evidence
@@ -15,7 +15,7 @@
 ## 3. Binding-Aware Position Query and Mode Assurance
 
 - [x] 3.1 Replace the one-way-only internal position result with a binding-aware target-position result that represents target exposure, proven target flatness, and typed fail-closed reasons.
-- [ ] 3.2 Implement strict one-way decoding as a regression-preserving branch and hedge decoding from the Demo contract fixture, rejecting malformed envelopes, unexpected indexes, duplicate target slots, and every unproven missing-row shape.
+- [x] 3.2 Implement strict one-way decoding as a regression-preserving branch and hedge decoding from the Demo contract fixture, rejecting malformed envelopes, unexpected indexes, duplicate target slots, and every unproven missing-row shape.
 - [x] 3.3 Ensure the hedge decoder selects only the expected directional slot and never returns opposite-slot size, side, average price, stop-loss, or take-profit as target evidence.
 - [x] 3.4 Add a read-only position-mode assurance primitive that accepts one explicit internal one-way-or-hedge expectation and returns verified, mismatch, or unavailable for one instrument, with no deployment policy and no dependency on the Bybit switch-mode endpoint.
 - [x] 3.5 Add controlled startup and lazy-assurance orchestration seams for the later activation while proving that current one-way startup readiness and production admission do not call them.
