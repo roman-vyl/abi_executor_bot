@@ -7,6 +7,11 @@ directional physical slot from that same side. The durable binding-geometry disc
 state only whether the binding is one-way or hedge and SHALL NOT duplicate which side or slot it
 uses.
 
+#### Scenario: Side is read from the cycle's own desired entry
+- **WHEN** ABI or a lifecycle consumer needs the side a trade cycle's exposure belongs to
+- **THEN** ABI reads it from that trade cycle's own stored desired entry
+- **AND** ABI does not maintain a separate stored side field
+
 #### Scenario: Side and hedge slot derive from desired entry
 - **WHEN** ABI needs the side and physical slot for a hedge-bound trade cycle
 - **THEN** ABI reads the side from that cycle's own stored desired entry
@@ -23,6 +28,13 @@ instrument scope, multiple owners sharing one directional physical slot, and dis
 slots under one instrument. Repository representation SHALL remain independent of production
 admission policy: during this foundation, mixed-side ownership remains fail-closed even though the
 records and their distinct slots are structurally distinguishable.
+
+#### Scenario: The repository can enumerate synthetic multi-owner state without activating it
+- **WHEN** multiple active records sharing an instrument scope are seeded directly for a
+  repository-level test
+- **THEN** the appropriate instrument and directional-slot queries enumerate them without dropping
+  siblings
+- **AND** this representation alone does not relax production admission policy
 
 #### Scenario: Multiple owners share one directional slot
 - **WHEN** two active hedge records for different owner pairs have the same instrument and desired
