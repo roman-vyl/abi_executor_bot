@@ -1,5 +1,6 @@
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import type { BybitAdapter, BybitOrderSide } from "../../exchange/bybitAdapter.js";
 import { resolveFirstAttributableFillAtMs } from "./packageConfirmation.js";
 
@@ -44,6 +45,7 @@ export async function observeAmbiguousCreateAbsenceAttempt(input: {
   symbol: string;
   orderLinkId: string;
   desiredSide: DesiredEntryDto["side"];
+  binding: PositionBindingGeometry;
 }): Promise<"clean_absent" | "tainted"> {
   const executionEvidence = await resolveFirstAttributableFillAtMs({
     bybit: input.bybit,
@@ -60,6 +62,7 @@ export async function observeAmbiguousCreateAbsenceAttempt(input: {
     positionEvidence = await input.bybit.queryPositionForInstrument({
       category: input.category,
       symbol: input.symbol,
+      binding: input.binding,
     });
   } catch {
     return "tainted";

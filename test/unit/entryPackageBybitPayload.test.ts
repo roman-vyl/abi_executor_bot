@@ -26,6 +26,7 @@ test("long package produces Buy side, falls_to trigger, and always includes take
   assert.equal(payloads.createEntryOrder.qty, "0.001");
   assert.equal(payloads.createEntryOrder.stopLoss, "99000");
   assert.equal(payloads.createEntryOrder.takeProfit, "103000");
+  assert.equal("positionIdx" in payloads.createEntryOrder, false);
   assert.equal(payloads.cancelEntryOrder.orderLinkId, "abi-ep-0000000000000000abcd");
   assert.equal(payloads.getEntryOrder.limit, "1");
   assert.equal(payloads.getEntryOrderHistory.limit, "1");

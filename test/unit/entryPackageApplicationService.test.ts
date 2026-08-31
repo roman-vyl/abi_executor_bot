@@ -7,6 +7,7 @@ import test from "node:test";
 import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../src/config/config.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
+import { instrumentPositionScope } from "../../src/domain/positionScope.js";
 import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
@@ -34,13 +35,15 @@ type Ctx = {
 };
 
 test("first APPLY creates a live order and confirms application", async () => {
-  await withService(async ({ service, bybit }) => {
+  await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
 
     const result = await service.apply(makeCommand());
 
     assertApplied(result, "0.001");
     assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "one_way");
+    assert.equal("positionIdx" in bybit.createOrderCalls[0]!, false);
   });
 });
 
@@ -752,6 +755,7 @@ test("a legacy amend pending_action never resends CREATE, even when the exchange
       ticker: "BTCUSDT.P",
       exchange_symbol: "BTCUSDT",
       exchange_category: "linear",
+      position_binding_mode: "one_way",
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
       desired_entry: desiredEntry,
@@ -972,7 +976,7 @@ test("a failing first request releases the mutex so a subsequent request for the
 
 test("classifyScopeAdmission: no other active records classifies as empty", () => {
   const self = makeActiveRecord({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1", side: "long" });
-  const classification = classifyScopeAdmission([self], makeCommand(), "long");
+  const classification = classifyScopeAdmission([self], makeCommand(), { side: "long", binding: { mode: "one_way" } });
   assert.equal(classification, "empty");
 });
 
@@ -986,7 +990,7 @@ test("classifyScopeAdmission: the requesting pair's own record is excluded — s
   const classification = classifyScopeAdmission(
     [self],
     makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
-    "long",
+    { side: "long", binding: { mode: "one_way" } },
   );
   assert.equal(classification, "empty");
 });
@@ -997,20 +1001,20 @@ test("classifyScopeAdmission: the requesting pair's own record is excluded even 
   const classification = classifyScopeAdmission(
     [self, sibling],
     makeCommand({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" }),
-    "long",
+    { side: "long", binding: { mode: "one_way" } },
   );
   assert.equal(classification, "same_side");
 });
 
 test("classifyScopeAdmission: another active record on the opposite side classifies as opposite_side", () => {
   const other = makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "short" });
-  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  const classification = classifyScopeAdmission([other], makeCommand(), { side: "long", binding: { mode: "one_way" } });
   assert.equal(classification, "opposite_side");
 });
 
 test("classifyScopeAdmission: another active record with no usable desired_entry classifies as corrupt", () => {
   const other = { ...makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }), desired_entry: null };
-  const classification = classifyScopeAdmission([other], makeCommand(), "long");
+  const classification = classifyScopeAdmission([other], makeCommand(), { side: "long", binding: { mode: "one_way" } });
   assert.equal(classification, "corrupt");
 });
 
@@ -1019,8 +1023,47 @@ test("classifyScopeAdmission: multiple other active records all sharing the requ
     makeActiveRecord({ strategyInstanceId: "instance-2", tradeCycleId: "cycle-2", side: "long" }),
     makeActiveRecord({ strategyInstanceId: "instance-3", tradeCycleId: "cycle-3", side: "long" }),
   ];
-  const classification = classifyScopeAdmission(others, makeCommand(), "long");
+  const classification = classifyScopeAdmission(others, makeCommand(), { side: "long", binding: { mode: "one_way" } });
   assert.equal(classification, "same_side");
+});
+
+test("classifyScopeAdmission: explicit hedge slots coexist but geometry mixtures fail closed", () => {
+  const long = {
+    ...makeActiveRecord({ strategyInstanceId: "long", tradeCycleId: "long-cycle", side: "long" }),
+    position_binding_mode: "hedge" as const,
+  };
+  const short = {
+    ...makeActiveRecord({ strategyInstanceId: "short", tradeCycleId: "short-cycle", side: "short" }),
+    position_binding_mode: "hedge" as const,
+  };
+  assert.equal(
+    classifyScopeAdmission([long], makeCommand(), {
+      side: "short",
+      binding: { mode: "hedge", direction: "short" },
+    }),
+    "opposite_hedge_slot",
+  );
+  assert.equal(
+    classifyScopeAdmission([long, short], makeCommand(), {
+      side: "long",
+      binding: { mode: "hedge", direction: "long" },
+    }),
+    "opposite_hedge_slot",
+  );
+  assert.equal(
+    classifyScopeAdmission([makeActiveRecord({ strategyInstanceId: "one", tradeCycleId: "one-cycle", side: "long" })], makeCommand(), {
+      side: "long",
+      binding: { mode: "hedge", direction: "long" },
+    }),
+    "incompatible_geometry",
+  );
+  assert.equal(
+    classifyScopeAdmission([{ ...long, position_binding_mode: null }], makeCommand(), {
+      side: "long",
+      binding: { mode: "hedge", direction: "long" },
+    }),
+    "corrupt",
+  );
 });
 
 // Cross-pair scope tests deliberately vary both strategy_instance_id and
@@ -1061,7 +1104,7 @@ test("a sequential same-side join succeeds and a retry of the first pair does no
     assertApplied(second, "0.001");
     assertApplied(retry, "0.001");
     assert.equal(bybit.createOrderCalls.length, 2);
-    assert.equal(repo.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+    assert.equal(repo.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 2);
   });
 });
 
@@ -1092,6 +1135,160 @@ test("opposite-side and corrupt scope ownership fail before correlation or excha
     assert.equal(bybit.createOrderCalls.length, 0);
     assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
   });
+});
+
+test("hedge policy admits opposite slots and same-slot siblings after one serialized assurance", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = flatHedgePositionResponse();
+    bybit.getOrderByLinkId = async (payload) => {
+      bybit.getOrderByLinkIdCalls.push(payload);
+      const record = repo.findByOrderLinkId(payload.orderLinkId);
+      const positionIdx = record?.desired_entry?.side === "short" ? 2 : 1;
+      return {
+        retCode: 0,
+        result: {
+          category: payload.category,
+          list: [{
+            ...liveOrder({ positionIdx }),
+            symbol: payload.symbol,
+            orderLinkId: payload.orderLinkId,
+          }],
+        },
+      };
+    };
+
+    const [long, short] = await Promise.all([
+      service.apply(makeCommand({ strategyInstanceId: "long-A", tradeCycleId: "long-A-cycle" })),
+      service.apply(
+        makeCommand({
+          strategyInstanceId: "short-B",
+          tradeCycleId: "short-B-cycle",
+          desiredEntry: makeDesiredEntry({ side: "short" }),
+        }),
+      ),
+    ]);
+    const longSibling = await service.apply(
+      makeCommand({ strategyInstanceId: "long-C", tradeCycleId: "long-C-cycle" }),
+    );
+
+    assertApplied(long, "0.001");
+    assertApplied(short, "0.001");
+    assertApplied(longSibling, "0.001");
+    assert.deepEqual(bybit.createOrderCalls.map((call) => call.positionIdx).sort(), [1, 1, 2]);
+    assert.equal(bybit.getOpenPositionsCalls.length, 1);
+    assert.equal(repo.findActiveRecordsForDirectionalSlot({
+      instrumentScope: instrumentPositionScope("linear", "BTCUSDT"),
+      direction: "long",
+    }).length, 2);
+    assert.equal(repo.findActiveRecordsForDirectionalSlot({
+      instrumentScope: instrumentPositionScope("linear", "BTCUSDT"),
+      direction: "short",
+    }).length, 1);
+  }, { bybitLinearPositionBindingMode: "hedge" });
+});
+
+test("hedge lazy assurance failure writes no record and sends no create", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = flatPositionResponse();
+
+    const result = await service.apply(makeCommand());
+
+    assertInternalError(result);
+    assert.equal(repo.get("instance-1", "cycle-1"), undefined);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 1);
+  }, { bybitLinearPositionBindingMode: "hedge" });
+});
+
+test("a drained hedge instrument requires fresh assurance for its next first owner", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = flatHedgePositionResponse();
+    bybit.orderByLinkIdResponses = [
+      orderList([liveOrder({ positionIdx: 1 })]),
+      orderList([liveOrder({ positionIdx: 2 })]),
+    ];
+    assertApplied(await service.apply(makeCommand()), "0.001");
+    const first = repo.get("instance-1", "cycle-1");
+    assert.ok(first !== undefined);
+    await repo.save({ ...first, status: "terminal_unfilled", pending_action: null });
+
+    assertApplied(
+      await service.apply(
+        makeCommand({
+          strategyInstanceId: "instance-2",
+          tradeCycleId: "cycle-2",
+          desiredEntry: makeDesiredEntry({ side: "short" }),
+        }),
+      ),
+      "0.001",
+    );
+    assert.equal(bybit.getOpenPositionsCalls.length, 2);
+  }, { bybitLinearPositionBindingMode: "hedge" });
+});
+
+test("spot remains one-way under hedge linear policy and requires no mode assurance", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    const result = await service.apply(makeCommand({ ticker: "BTCUSDT" }));
+    assertApplied(result, "0.001");
+    assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "one_way");
+    assert.equal("positionIdx" in bybit.createOrderCalls[0]!, false);
+    assert.equal(bybit.getOpenPositionsCalls.length, 0);
+  }, { bybitLinearPositionBindingMode: "hedge" });
+});
+
+test("retry after config change confirms against the generation's durable hedge binding", async () => {
+  await withService(async ({ service, bybit, repo, rulesProvider }) => {
+    bybit.openPositionsResponse = flatHedgePositionResponse();
+    bybit.createOrder = async (payload) => {
+      bybit.createOrderCalls.push(payload);
+      throw new Error("lost create response");
+    };
+    assertInternalError(await service.apply(makeCommand()));
+    assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "hedge");
+
+    const oneWayConfig = makeTestConfig({
+      dryRun: false,
+      liveTradingEnabled: true,
+      bybitApiKey: "test-key",
+      bybitApiSecret: "test-secret",
+      bybitEnvironment: "testnet",
+      bybitLinearPositionBindingMode: "one_way",
+    });
+    bybit.createOrder = async (payload) => {
+      bybit.createOrderCalls.push(payload);
+      return { retCode: 0, result: { orderLinkId: "fake-create" } };
+    };
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ positionIdx: 1 })]);
+    const restarted = new EntryPackageApplicationService({
+      config: oneWayConfig,
+      bybit,
+      correlationRepository: repo,
+      positionSizeCalculator: new FixedMinimumPositionSizeCalculator(rulesProvider),
+      mutex: new KeyedMutex(),
+      scopeMutex: new KeyedMutex(),
+      exchangeInstrumentResolver: new BybitExchangeInstrumentResolver(),
+    });
+
+    assertApplied(await restarted.apply(makeCommand()), "0.001");
+    assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "hedge");
+  }, { bybitLinearPositionBindingMode: "hedge" });
+});
+
+test("hedge policy never bypasses dry-run or mainnet live guards", async () => {
+  for (const overrides of [
+    { dryRun: true, bybitEnvironment: "testnet" as const },
+    { dryRun: false, bybitEnvironment: "mainnet" as const },
+  ]) {
+    await withService(async ({ service, bybit, repo }) => {
+      bybit.openPositionsResponse = flatHedgePositionResponse();
+      const result = await service.apply(makeCommand());
+      assertInternalError(result);
+      assert.equal(bybit.createOrderCalls.length, 0);
+      assert.equal(repo.get("instance-1", "cycle-1")?.position_binding_mode, "hedge");
+      assert.equal(repo.get("instance-1", "cycle-1")?.status, "pending_create");
+    }, { ...overrides, bybitLinearPositionBindingMode: "hedge" });
+  }
 });
 
 test("two different pairs on different scopes both succeed independently", async () => {
@@ -1236,14 +1433,14 @@ test("scope ownership survives restart with multiple same-side owners and admits
 
     const after = new EntryPackageCorrelationRepository(path);
     assert.deepEqual(await after.replay(), { ok: true });
-    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 2);
+    assert.equal(after.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 2);
 
     const result = await runServiceAgainstRepository(
       after,
       makeCommand({ strategyInstanceId: "instance-C", tradeCycleId: "cycle-C1" }),
     );
     assertApplied(result.httpResult, "0.001");
-    assert.equal(after.findActiveRecordsForScope("linear", "BTCUSDT").length, 3);
+    assert.equal(after.findActiveRecordsForInstrumentScope(instrumentPositionScope("linear", "BTCUSDT")).length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1310,6 +1507,7 @@ function makeScopeTestRecord(
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: orderLinkId === null ? null : makeDesiredEntry(),
@@ -1338,6 +1536,7 @@ function makeTerminalClosedRecord(): EntryPackageExecutionRecord {
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: null,
@@ -1420,6 +1619,7 @@ function makeActiveRecord(overrides: {
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: makeDesiredEntry({ side: overrides.side }),
@@ -1446,6 +1646,7 @@ function liveOrder(
     qty: string;
     stopLoss: string;
     takeProfit: string;
+    positionIdx: number;
   }> = {},
 ) {
   return {
@@ -1455,6 +1656,19 @@ function liveOrder(
     stopLoss: "99000",
     takeProfit: "103000",
     ...overrides,
+  };
+}
+
+function flatHedgePositionResponse(): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [
+        { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 1, avgPrice: "", openTime: 0 },
+        { symbol: "BTCUSDT", side: "", size: "0", positionIdx: 2, avgPrice: "", openTime: 0 },
+      ],
+    },
   };
 }
 

@@ -2,10 +2,9 @@
 
 ## Purpose
 
-TBD - Update Purpose after archive: domain logic that resolves one Runtime-owned trade
-cycle's exchange ground truth (order + position) for recovery purposes, returning a
-terminal outcome only on positive evidence. Distinct from, and never a substitute for,
-`open-position-resolution`'s live-truth answer on the normal path.
+Define the domain logic that resolves one Runtime-owned trade cycle's exchange ground truth for
+recovery, returning terminal outcomes only from positive order and position evidence. This remains
+distinct from, and never substitutes for, `open-position-resolution` on the normal path.
 
 ## Requirements
 

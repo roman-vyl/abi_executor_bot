@@ -347,6 +347,113 @@ test("sole and shared owners use exact own fill quantity and preserve sibling ch
   });
 });
 
+test("simultaneous hedge close A neutralizes only slot-1 protection and creates exact long close", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A", orderLinkId: "link-a", calculatedQuantity: "0.004", side: "long", positionBindingMode: "hedge" }));
+    await repo.save(makeRecord({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B", orderLinkId: "link-b", calculatedQuantity: "0.006", side: "short", positionBindingMode: "hedge" }));
+    setOrder(bybit, "link-a", "Filled", "0.004", "0.004", 1);
+    setOrder(bybit, "link-b", "Filled", "0.006", "0.006", 2);
+    const aRows = activeProtectionRows("link-a", "0.004", 1);
+    const bRows = activeProtectionRows("link-b", "0.006", 2);
+    bybit.activeOrdersResponse = childList([...bRows, ...aRows]);
+    bybit.orderHistoryForSymbolResponse = childList([]);
+    bybit.openPositionsResponse = hedgePositions("0.004", "0.006");
+    const expectedClose = closeIdentity("instance-A", "cycle-A");
+    installFilledCloseAfterCreate(bybit, expectedClose, "0.004", 1);
+    const siblingBefore = repo.get("instance-B", "cycle-B");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-a") {
+        bybit.activeOrdersResponse = childList(bRows);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(bybit.cancelOrderCalls, [{ category: "linear", symbol: "BTCUSDT", orderId: "stop-link-a" }]);
+    assert.deepEqual(bybit.createOrderCalls, [{
+      category: "linear",
+      symbol: "BTCUSDT",
+      side: "Sell",
+      orderType: "Market",
+      qty: "0.004",
+      reduceOnly: true,
+      positionIdx: 1,
+      orderLinkId: expectedClose,
+    }]);
+    assert.equal(bRows.every((row) => row.orderStatus === "Untriggered"), true);
+    assert.deepEqual(repo.get("instance-B", "cycle-B"), siblingBefore);
+  });
+});
+
+test("simultaneous hedge close B neutralizes only slot-2 protection and creates exact short close", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A", orderLinkId: "link-a", calculatedQuantity: "0.004", side: "long", positionBindingMode: "hedge" }));
+    await repo.save(makeRecord({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B", orderLinkId: "link-b", calculatedQuantity: "0.006", side: "short", positionBindingMode: "hedge" }));
+    setOrder(bybit, "link-a", "Filled", "0.004", "0.004", 1);
+    setOrder(bybit, "link-b", "Filled", "0.006", "0.006", 2);
+    const aRows = activeProtectionRows("link-a", "0.004", 1);
+    const bRows = activeProtectionRows("link-b", "0.006", 2);
+    bybit.activeOrdersResponse = childList([...aRows, ...bRows]);
+    bybit.orderHistoryForSymbolResponse = childList([]);
+    bybit.openPositionsResponse = hedgePositions("0.004", "0.006");
+    const expectedClose = closeIdentity("instance-B", "cycle-B");
+    installFilledCloseAfterCreate(bybit, expectedClose, "0.006", 2);
+    const siblingBefore = repo.get("instance-A", "cycle-A");
+
+    const realCancel = bybit.cancelOrder.bind(bybit);
+    bybit.cancelOrder = async (payload) => {
+      const response = await realCancel(payload);
+      if (payload.orderId === "stop-link-b") {
+        bybit.activeOrdersResponse = childList(aRows);
+      }
+      return response;
+    };
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B" }));
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(bybit.cancelOrderCalls, [{ category: "linear", symbol: "BTCUSDT", orderId: "stop-link-b" }]);
+    assert.deepEqual(bybit.createOrderCalls, [{
+      category: "linear",
+      symbol: "BTCUSDT",
+      side: "Buy",
+      orderType: "Market",
+      qty: "0.006",
+      reduceOnly: true,
+      positionIdx: 2,
+      orderLinkId: expectedClose,
+    }]);
+    assert.equal(aRows.every((row) => row.orderStatus === "Untriggered"), true);
+    assert.deepEqual(repo.get("instance-A", "cycle-A"), siblingBefore);
+  });
+});
+
+test("hedge recovery reuses durable close identity without cross-attributing opposite-slot protection", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const identity = closeIdentity("instance-A", "cycle-A");
+    await repo.save(makeRecord({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A", orderLinkId: "link-a", calculatedQuantity: "0.004", side: "long", positionBindingMode: "hedge", closeOrderLinkId: identity }));
+    await repo.save(makeRecord({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B", orderLinkId: "link-b", calculatedQuantity: "0.006", side: "short", positionBindingMode: "hedge" }));
+    setOrder(bybit, "link-a", "Filled", "0.004", "0.004", 1);
+    const aRows = terminalProtectionRows("link-a", "0.004", 1);
+    const bRows = activeProtectionRows("link-b", "0.006", 2);
+    bybit.activeOrdersResponse = childList([...bRows, ...aRows]);
+    bybit.orderHistoryForSymbolResponse = childList([]);
+    bybit.openPositionsResponse = hedgePositions("0.004", "0.006");
+    installFilledCloseAfterCreate(bybit, identity, "0.004", 1);
+
+    const result = await service.apply(makeCommand({ strategyInstanceId: "instance-A", tradeCycleId: "cycle-A" }));
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls[0].orderLinkId, identity);
+    assert.equal(bybit.createOrderCalls[0].positionIdx, 1);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assert.equal(bRows.every((row) => row.orderStatus === "Untriggered"), true);
+  });
+});
+
 test("an already-filled exact close identity is recovered without resend", async () => {
   await withService(async ({ service, bybit, repo }) => {
     const identity = closeId();
@@ -507,6 +614,7 @@ function makeRecord(
     side: "long" | "short";
     generation: number;
     closeOrderLinkId: string | null;
+    positionBindingMode: "one_way" | "hedge";
   }> = {},
 ): EntryPackageExecutionRecord {
   return {
@@ -515,6 +623,7 @@ function makeRecord(
     ticker: "BTCUSDT.P",
     exchange_symbol: overrides.exchangeSymbol ?? "BTCUSDT",
     exchange_category: overrides.exchangeCategory ?? "linear",
+    position_binding_mode: overrides.positionBindingMode ?? "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {
@@ -557,22 +666,23 @@ function setOrder(
   orderStatus: string,
   cumExecQty: string,
   qty: string,
+  positionIdx?: 0 | 1 | 2,
 ): void {
   const response = {
     retCode: 0,
     result: {
-      list: [{ orderStatus, triggerPrice: "100000", qty, cumExecQty, stopLoss: "99000", takeProfit: "103000" }],
+      list: [{ orderStatus, triggerPrice: "100000", qty, cumExecQty, stopLoss: "99000", takeProfit: "103000", ...(positionIdx === undefined ? {} : { positionIdx }) }],
     },
   };
   bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
   bybit.orderHistoryResponseByLinkId.set(orderLinkId, response);
 }
 
-function installFilledCloseAfterCreate(bybit: FakeBybitAdapter, orderLinkId: string, qty: string): void {
+function installFilledCloseAfterCreate(bybit: FakeBybitAdapter, orderLinkId: string, qty: string, positionIdx?: 0 | 1 | 2): void {
   const realCreate = bybit.createOrder.bind(bybit);
   bybit.createOrder = async (payload) => {
     const response = await realCreate(payload);
-    if (payload.orderLinkId === orderLinkId) setOrder(bybit, orderLinkId, "Filled", qty, qty);
+    if (payload.orderLinkId === orderLinkId) setOrder(bybit, orderLinkId, "Filled", qty, qty, positionIdx);
     return response;
   };
 }
@@ -594,12 +704,13 @@ function installTerminalProtection(bybit: FakeBybitAdapter, parentOrderLinkId: s
   bybit.orderHistoryForSymbolResponse = childList([]);
 }
 
-function activeProtectionRows(parentOrderLinkId: string, qty: string): Record<string, unknown>[] {
-  return [stopRow(parentOrderLinkId, qty), takeRow(parentOrderLinkId, qty)];
+function activeProtectionRows(parentOrderLinkId: string, qty: string, positionIdx?: 0 | 1 | 2): Record<string, unknown>[] {
+  const binding = positionIdx === undefined ? {} : { positionIdx };
+  return [stopRow(parentOrderLinkId, qty, binding), takeRow(parentOrderLinkId, qty, binding)];
 }
 
-function terminalProtectionRows(parentOrderLinkId: string, qty: string): Record<string, unknown>[] {
-  return activeProtectionRows(parentOrderLinkId, qty).map((row) => ({ ...row, orderStatus: "Deactivated", leavesQty: "0" }));
+function terminalProtectionRows(parentOrderLinkId: string, qty: string, positionIdx?: 0 | 1 | 2): Record<string, unknown>[] {
+  return activeProtectionRows(parentOrderLinkId, qty, positionIdx).map((row) => ({ ...row, orderStatus: "Deactivated", leavesQty: "0" }));
 }
 
 function terminalize(rows: Record<string, unknown>[]): void {
@@ -660,6 +771,19 @@ function flatPosition(): unknown {
     result: {
       category: "linear",
       list: [{ symbol: "BTCUSDT", side: "", size: "0", positionIdx: 0, avgPrice: "", openTime: 0 }],
+    },
+  };
+}
+
+function hedgePositions(longSize: string, shortSize: string): unknown {
+  return {
+    retCode: 0,
+    result: {
+      category: "linear",
+      list: [
+        { symbol: "BTCUSDT", side: "Sell", size: shortSize, positionIdx: 2, avgPrice: "100000", openTime: 2 },
+        { symbol: "BTCUSDT", side: "Buy", size: longSize, positionIdx: 1, avgPrice: "100000", openTime: 1 },
+      ],
     },
   };
 }

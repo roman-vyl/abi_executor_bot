@@ -90,6 +90,9 @@ test("OpenAPI owns transport shape without constraining Runtime value formats", 
     "initial_stop_reference",
     "initial_take_reference",
     "execution_status",
+    "positionIdx",
+    "position_binding_mode",
+    "directional_position_slot",
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }

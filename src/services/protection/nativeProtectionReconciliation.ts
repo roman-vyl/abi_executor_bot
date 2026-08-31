@@ -1,5 +1,6 @@
 import { ceilToStep, compareDecimal, floorToStep, multiplyDecimal } from "../../domain/exactDecimal.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import { FILLED_STATUSES, TERMINAL_WITHOUT_FILL_STATUSES } from "../entryPackage/packageConfirmation.js";
 import type { AttachedProtectionLeg } from "./nativeProtectionAttribution.js";
 import { resolveOwnAttachedProtection } from "./nativeProtectionAttribution.js";
@@ -127,10 +128,11 @@ export async function reconcileNativePartialProtection(input: {
   symbol: string;
   entryOrderLinkId: string;
   desired: DesiredProtectionState;
+  binding?: PositionBindingGeometry;
 }): Promise<ReconciliationOutcome> {
   const { bybit, category, symbol, entryOrderLinkId, desired } = input;
 
-  const initial = await resolveOwnAttachedProtection({ bybit, category, symbol, entryOrderLinkId });
+  const initial = await resolveOwnAttachedProtection({ bybit, category, symbol, entryOrderLinkId, binding: input.binding });
 
   if (initial.kind === "none") {
     return { kind: "fail_closed", reason: "attribution_lost" };
@@ -175,7 +177,7 @@ export async function reconcileNativePartialProtection(input: {
     }
   }
 
-  const readBack = await resolveOwnAttachedProtection({ bybit, category, symbol, entryOrderLinkId });
+  const readBack = await resolveOwnAttachedProtection({ bybit, category, symbol, entryOrderLinkId, binding: input.binding });
 
   if (readBack.kind !== "attributed") {
     // Any mismatch against the desired state is read_back_mismatch by

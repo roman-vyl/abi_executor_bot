@@ -1,8 +1,22 @@
 import type { AbiConfig } from "../config/config.js";
 import { mapEntryOrderSemantics } from "../domain/entryOrderSemantics.js";
+import type { PositionBindingGeometry, PositionDirection } from "../domain/positionScope.js";
+export type { PositionBindingGeometry } from "../domain/positionScope.js";
 
 export type BybitOrderSide = "Buy" | "Sell";
 export type BybitTriggerDirection = 1 | 2;
+
+export type BybitPositionIdx = 0 | 1 | 2;
+
+// This is the sole encoding boundary for Bybit's numeric position slots.
+// Foundation-only: production order builders continue their existing
+// one-way behavior until the later execution and lifecycle cutovers.
+export function encodeBybitPositionIdx(binding: PositionBindingGeometry): BybitPositionIdx {
+  if (binding.mode === "one_way") {
+    return 0;
+  }
+  return binding.direction === "long" ? 1 : 2;
+}
 
 export type BybitCreateOrderPayload = {
   category: string;
@@ -21,6 +35,7 @@ export type BybitCreateOrderPayload = {
   tpslMode?: "Partial";
   tpOrderType?: "Market";
   slOrderType?: "Market";
+  positionIdx?: BybitPositionIdx;
 };
 
 export type BybitMarketCloseOrderPayload = {
@@ -30,7 +45,7 @@ export type BybitMarketCloseOrderPayload = {
   orderType: "Market";
   qty: string;
   reduceOnly: true;
-  positionIdx?: number;
+  positionIdx?: BybitPositionIdx;
   // Only the multi-owner close path (abi-pair-scoped-close-execution-v1)
   // sets this — a stable, attributable identity so a crash/retry can
   // resolve this specific close order's own fate before ever sending a
@@ -112,6 +127,7 @@ export type EntryPackageOrderInput = {
   initialTakePrice: string;
   qty: string;
   orderLinkId: string;
+  binding?: PositionBindingGeometry;
 };
 
 export type EntryPackageOrderPayloads = {
@@ -152,6 +168,12 @@ export function mapEntryPackageToBybit(
     tpOrderType: "Market",
   };
 
+  // Preserve one-way payloads exactly. An explicit durable hedge binding is
+  // the only input that opts into the exchange-private 1/2 encoding.
+  if (input.binding?.mode === "hedge") {
+    createEntryOrder.positionIdx = encodeBybitPositionIdx(input.binding);
+  }
+
   return {
     createEntryOrder,
     cancelEntryOrder: {
@@ -176,6 +198,26 @@ export function mapEntryPackageToBybit(
 
 export function mapPositionSideToCloseSide(side: string): BybitOrderSide {
   return side === "Buy" ? "Sell" : "Buy";
+}
+
+export function mapBindingAwareMarketCloseOrder(input: {
+  category: "linear";
+  symbol: string;
+  entrySide: PositionDirection;
+  qty: string;
+  orderLinkId: string;
+  binding: PositionBindingGeometry;
+}): BybitMarketCloseOrderPayload {
+  return {
+    category: input.category,
+    symbol: input.symbol,
+    side: input.entrySide === "long" ? "Sell" : "Buy",
+    orderType: "Market",
+    qty: input.qty,
+    reduceOnly: true,
+    positionIdx: encodeBybitPositionIdx(input.binding),
+    orderLinkId: input.orderLinkId,
+  };
 }
 
 // Reads Bybit's own assigned orderId out of a create-order response.

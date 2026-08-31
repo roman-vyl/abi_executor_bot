@@ -144,6 +144,42 @@ curl "http://127.0.0.1:8787/execution/mode"
 The response's `canExecuteLive` field is `true` only when every condition above holds;
 otherwise `blockedReasons` lists what is missing.
 
+## Linear position binding mode and Hedge Mode activation
+
+`ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` is ABI's internal expected geometry for newly created
+linear bindings. It accepts only `one_way` or `hedge` and defaults to the safe `one_way` value.
+It does not affect spot bindings, which remain one-way. Runtime requests cannot select this value,
+and ABI never calls Bybit's position-mode switch operation. `positionIdx` remains an internal
+exchange mapping derived from each durable binding.
+
+Do not set the policy to `hedge` for production until all of the following are true:
+
+1. `abi-hedge-lifecycle-readiness-v1` tasks 1.1, 1.2, and 3.2 have accepted real flat Bybit Demo
+   Hedge Mode evidence. Synthetic fixtures are not a substitute.
+2. New admission is stopped and every active discriminator-less legacy or explicit one-way
+   correlation binding has reached a durably closed state.
+3. Operators have verified all relevant ABI-owned entry, protection, and close orders absent and
+   all relevant physical positions flat. Do not rewrite inactive durable history as hedge.
+4. An operator switches the Bybit linear account/instrument position mode outside ABI.
+5. The hedge-aware build is deployed with `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE=hedge`.
+   Startup replay must succeed; any incompatible active record or unavailable/mismatched read-only
+   position-mode evidence keeps lifecycle readiness false.
+6. The first admission for each inactive instrument passes a fresh read-only mode check before its
+   provisional durable claim. Begin with a controlled Demo/testnet rollout and retain a cleanup
+   plan. Mainnet execution remains blocked by the existing live guard.
+
+If any check fails, keep admission stopped and leave the policy at `one_way`; ABI must not attempt
+to repair the exchange mode. The current repository intentionally ships no deployment override
+that selects `hedge`.
+
+Rollback before the first durable production hedge record may restore the prior one-way build only
+after confirming no hedge exchange write occurred and restoring compatible Bybit mode externally.
+After the first durable hedge record, every rollback build must remain hedge-aware. To return to
+one-way: stop admission, recover or resolve every hedge-bound lifecycle, drain all relevant orders
+and positions, verify flatness, switch Bybit externally, select `one_way`, and require successful
+startup replay/policy validation before reopening admission. Never downgrade to a decoder or
+lifecycle that ignores durable hedge geometry.
+
 ## Health and execution-mode checks
 
 ```bash
@@ -197,7 +233,9 @@ npm run smoke:entry-package:fake
 
 - **`/health` never reports `entryPackageReady: true`** — check the correlation-store file at
   `ABI_ENTRY_PACKAGE_CORRELATION_PATH` for a non-final corrupt line; replay fails readiness on
-  any corruption other than a truncated final line.
+  any corruption other than a truncated final line. Under hedge policy, also check for active
+  legacy/one-way bindings and `readiness_failed` mode-assurance diagnostics; unavailable or
+  mismatched read-only evidence is intentionally fail-closed.
 - **`/execution/mode` reports `canExecuteLive: false`** — read `blockedReasons` in the response;
   each entry names exactly which condition (dry-run flag, live-trading flag, credentials,
   environment) is unmet.

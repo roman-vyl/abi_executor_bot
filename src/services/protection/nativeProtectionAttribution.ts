@@ -1,5 +1,7 @@
 import { compareDecimal } from "../../domain/exactDecimal.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
+import { encodeBybitPositionIdx } from "../../exchange/bybitOrderMapper.js";
 import type { BybitChildOrderCandidate } from "../entryPackage/orderQueryResponseDecoder.js";
 import { decodeChildOrderListResponse } from "../entryPackage/orderQueryResponseDecoder.js";
 
@@ -58,6 +60,7 @@ export async function resolveOwnAttachedProtection(input: {
   category: "linear" | "spot";
   symbol: string;
   entryOrderLinkId: string;
+  binding?: PositionBindingGeometry;
 }): Promise<AttachedProtectionResolution> {
   let realtimeResponse: unknown;
   let historyResponse: unknown;
@@ -78,11 +81,11 @@ export async function resolveOwnAttachedProtection(input: {
 
   const decodedRealtime = decodeChildOrderListResponse({
     response: realtimeResponse,
-    expected: { category: input.category, symbol: input.symbol },
+    expected: { category: input.category, symbol: input.symbol, binding: input.binding },
   });
   const decodedHistory = decodeChildOrderListResponse({
     response: historyResponse,
-    expected: { category: input.category, symbol: input.symbol },
+    expected: { category: input.category, symbol: input.symbol, binding: input.binding },
   });
 
   if (decodedRealtime.kind === "protocol_failure" || decodedHistory.kind === "protocol_failure") {
@@ -95,6 +98,20 @@ export async function resolveOwnAttachedProtection(input: {
   const ownHistoryCandidates = decodedHistory.items.filter(
     (candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId,
   );
+
+  if (input.binding !== undefined) {
+    const expectedPositionIdx = encodeBybitPositionIdx(input.binding);
+    // The predecessor contract requires this ordering: exact-parent first,
+    // then physical binding. A valid foreign owner in the opposite hedge
+    // slot is not evidence for this owner and is not a protocol failure.
+    if (
+      [...ownRealtimeCandidates, ...ownHistoryCandidates].some(
+        (candidate) => candidate.positionIdx !== expectedPositionIdx,
+      )
+    ) {
+      return { kind: "ambiguous", reason: "query_failed" };
+    }
+  }
 
   const deduped = dedupeByOrderId(ownRealtimeCandidates, ownHistoryCandidates);
   if (deduped.kind === "inconsistent") {
@@ -135,7 +152,7 @@ function dedupeByOrderId(
 }
 
 function isConsistentDuplicate(a: BybitChildOrderCandidate, b: BybitChildOrderCandidate): boolean {
-  return a.stopOrderType === b.stopOrderType && decimalEquals(a.qty, b.qty);
+  return a.stopOrderType === b.stopOrderType && decimalEquals(a.qty, b.qty) && a.positionIdx === b.positionIdx;
 }
 
 function decimalEquals(a: string, b: string): boolean {

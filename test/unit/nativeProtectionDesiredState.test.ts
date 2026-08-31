@@ -16,6 +16,7 @@ function baseRecord(overrides: Partial<EntryPackageExecutionRecord> = {}): Entry
     ticker: "BTCUSDT.P",
     exchange_symbol: "BTCUSDT",
     exchange_category: "linear",
+    position_binding_mode: "one_way",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {

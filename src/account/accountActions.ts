@@ -66,7 +66,7 @@ export function buildMarketCloseOrdersFromPositions(
       reduceOnly: true,
     };
 
-    if (positionIdx !== undefined) {
+    if (positionIdx === 0 || positionIdx === 1 || positionIdx === 2) {
       closeOrder.positionIdx = positionIdx;
     }
 

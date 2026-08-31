@@ -102,7 +102,7 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async getActiveOrders(input: GetActiveOrdersInput = {}): Promise<unknown> {
     void input;
-    return this.activeOrdersResponse;
+    return withDefaultOrderPositionIdx(this.activeOrdersResponse);
   }
 
   async getOpenPositions(input: GetOpenPositionsInput = {}): Promise<unknown> {
@@ -217,6 +217,25 @@ export class FakeBybitAdapter implements BybitAdapter {
 
 }
 
+function withDefaultOrderPositionIdx(response: unknown): unknown {
+  if (typeof response !== "object" || response === null) return response;
+  const responseRecord = response as Record<string, unknown>;
+  const result = responseRecord.result;
+  if (typeof result !== "object" || result === null) return response;
+  const resultRecord = result as Record<string, unknown>;
+  if (!Array.isArray(resultRecord.list)) return response;
+  return {
+    ...responseRecord,
+    result: {
+      ...resultRecord,
+      list: resultRecord.list.map((row) => {
+        if (typeof row !== "object" || row === null || "positionIdx" in row) return row;
+        return { ...row, positionIdx: 0 };
+      }),
+    },
+  };
+}
+
 // Same category/symbol defaulting as withDefaultOrderIdentity below, for a
 // symbol-scoped query that has no single orderLinkId to default rows to —
 // a test fixture is expected to set each row's own orderLinkId/orderId/
@@ -248,9 +267,9 @@ function withDefaultCategoryAndSymbol(
       }
       const rowRecord = row as Record<string, unknown>;
       if ("symbol" in rowRecord) {
-        return rowRecord;
+        return "positionIdx" in rowRecord ? rowRecord : { ...rowRecord, positionIdx: 0 };
       }
-      return { ...rowRecord, symbol: payload.symbol };
+      return { ...rowRecord, symbol: payload.symbol, positionIdx: 0 };
     });
   }
 
@@ -295,6 +314,9 @@ function withDefaultOrderIdentity(
       }
       if (!("orderLinkId" in rowRecord)) {
         nextRow.orderLinkId = payload.orderLinkId;
+      }
+      if (!("positionIdx" in rowRecord)) {
+        nextRow.positionIdx = 0;
       }
       return nextRow;
     });

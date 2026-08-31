@@ -78,3 +78,23 @@ test("loadConfig fails closed on explicit invalid BYBIT_ENV, port, and timeout v
     /ABI_BYBIT_REQUEST_TIMEOUT_MS must be greater than 0/,
   );
 });
+
+test("linear position binding mode defaults one-way and accepts only the closed policy", () => {
+  assert.equal(loadConfig({}).bybitLinearPositionBindingMode, "one_way");
+  assert.equal(
+    loadConfig({ ABI_BYBIT_LINEAR_POSITION_BINDING_MODE: "hedge" }).bybitLinearPositionBindingMode,
+    "hedge",
+  );
+  assert.equal(
+    loadConfig({ ABI_BYBIT_LINEAR_POSITION_BINDING_MODE: " ONE_WAY " }).bybitLinearPositionBindingMode,
+    "one_way",
+  );
+  assert.throws(
+    () => loadConfig({ ABI_BYBIT_LINEAR_POSITION_BINDING_MODE: "auto" }),
+    /must be one of: one_way, hedge/,
+  );
+  assert.throws(
+    () => loadConfig({ ABI_BYBIT_LINEAR_POSITION_BINDING_MODE: "" }),
+    /must be one of: one_way, hedge/,
+  );
+});

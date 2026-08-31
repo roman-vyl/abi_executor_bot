@@ -7,7 +7,11 @@ import type {
   BindingHistoryEntry,
   EntryPackageExecutionRecord,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
@@ -16,7 +20,12 @@ import {
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
-import { positionScopeKey } from "../../domain/positionScope.js";
+import {
+  instrumentPositionScope,
+  instrumentPositionScopeKey,
+  type PositionBindingGeometry,
+} from "../../domain/positionScope.js";
+import { effectivePositionBindingMode } from "../../domain/positionBindingPolicy.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
 import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
@@ -37,6 +46,7 @@ import {
   completedObservationIsFresh,
   observeAmbiguousCreateAbsenceAttempt,
 } from "./ambiguousCreateAbsence.js";
+import { assureBindingBeforeAdmission } from "../../app/positionModeAssuranceSeams.js";
 
 export type EntryPackageApplicationServiceDeps = {
   config: AbiConfig;
@@ -150,6 +160,7 @@ export class EntryPackageApplicationService {
     const category = requireCategory(record.exchange_category);
     const getEntryOrderPayload = { category, symbol, orderLinkId, limit: "1" as const };
     const getEntryOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" as const };
+    const binding = requirePositionBindingGeometry(record);
     let cleanAbsenceAttempts = 0;
     let absenceTainted = false;
 
@@ -158,6 +169,7 @@ export class EntryPackageApplicationService {
         bybit: this.deps.bybit,
         getEntryOrderPayload,
         getEntryOrderHistoryPayload,
+        binding,
       });
 
       if (orderSignal.kind === "live_unfilled") {
@@ -179,6 +191,7 @@ export class EntryPackageApplicationService {
           symbol,
           orderLinkId,
           desiredSide: candidate.desiredSide,
+          binding,
         });
         if (attemptEvidence === "clean_absent") {
           cleanAbsenceAttempts += 1;
@@ -235,6 +248,7 @@ export class EntryPackageApplicationService {
       bybit: this.deps.bybit,
       getEntryOrderPayload,
       getEntryOrderHistoryPayload,
+      binding: requirePositionBindingGeometry(record),
     });
 
     if (classification.kind === "ambiguous") {
@@ -327,6 +341,12 @@ export class EntryPackageApplicationService {
     // generation as priorRecord), preserve the binding's real start time
     // rather than resetting it on every retry attempt.
     const isRetryOfSameBinding = priorRecord !== undefined && priorRecord.generation === generation;
+    const positionBindingMode = isRetryOfSameBinding
+      ? priorRecord.position_binding_mode
+      : effectivePositionBindingMode(identity.category, this.deps.config.bybitLinearPositionBindingMode);
+    if (positionBindingMode === null) {
+      return internalErrorResult();
+    }
     const currentBindingStartedAt = isRetryOfSameBinding
       ? priorRecord.current_binding_started_at ?? priorRecord.updated_at
       : now;
@@ -337,6 +357,7 @@ export class EntryPackageApplicationService {
       ticker: command.ticker,
       exchange_symbol: identity.symbol,
       exchange_category: identity.category,
+      position_binding_mode: positionBindingMode,
       created_at: priorRecord?.created_at ?? now,
       updated_at: now,
       desired_entry: desiredEntry,
@@ -368,17 +389,38 @@ export class EntryPackageApplicationService {
     // holding it across external I/O would block unrelated pairs that only
     // need to prove or claim the same physical scope.
     const claim = await this.deps.scopeMutex.withKeyLock(
-      positionScopeKey(identity.category, identity.symbol),
+      instrumentPositionScopeKey(instrumentPositionScope(identity.category, identity.symbol)),
       async (): Promise<"claimed" | "conflict"> => {
-        const activeRecords = this.deps.correlationRepository.findActiveRecordsForScope(identity.category, identity.symbol);
-        const classification = classifyScopeAdmission(activeRecords, command, desiredEntry.side);
+        const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
+          instrumentPositionScope(identity.category, identity.symbol),
+        );
+        const binding = requirePositionBindingGeometry(provisional);
+        const classification = classifyScopeAdmission(activeRecords, command, {
+          side: desiredEntry.side,
+          binding,
+        });
 
-        // Native Partial protection and pair-scoped close are now the only
-        // production paths. A same-side sibling can therefore claim this
-        // scope without sharing or overwriting another cycle's lifecycle;
-        // opposite-side and structurally corrupt ownership still fail closed
-        // before the provisional durable write or any exchange write.
-        if (classification !== "empty" && classification !== "same_side") {
+        // Same-binding siblings remain independently attributable. Opposite
+        // sides are admitted only as explicit hedge slots; one-way opposite
+        // sides and incompatible/corrupt geometry fail before durable or
+        // exchange writes.
+        if (
+          classification !== "empty" &&
+          classification !== "same_side" &&
+          classification !== "opposite_hedge_slot"
+        ) {
+          return "conflict";
+        }
+
+        if (
+          classification === "empty" &&
+          binding.mode === "hedge" &&
+          !(await assureBindingBeforeAdmission({
+            bybit: this.deps.bybit,
+            instrumentScope: instrumentPositionScope(identity.category, identity.symbol),
+            expected: binding,
+          }))
+        ) {
           return "conflict";
         }
 
@@ -409,6 +451,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: calculatedQuantity,
       orderLinkId,
+      binding: requirePositionBindingGeometry(provisional),
     });
 
     let executionResult;
@@ -463,6 +506,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: record.calculated_quantity ?? "0",
       orderLinkId: record.order_link_id,
+      binding: requirePositionBindingGeometry(record),
     });
 
     const confirmation = await confirmEntryPackage({
@@ -471,6 +515,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: record.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(record),
       },
     });
 
@@ -548,6 +593,7 @@ export class EntryPackageApplicationService {
       initialTakePrice: desiredEntry.initial_take_price,
       qty: updated.calculated_quantity ?? "0",
       orderLinkId: updated.order_link_id,
+      binding: requirePositionBindingGeometry(updated),
     });
 
     const confirmation = await confirmEntryPackage({
@@ -556,6 +602,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: updated.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(updated),
       },
     });
 
@@ -636,6 +683,7 @@ export class EntryPackageApplicationService {
       getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" },
       getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" },
       desiredQty: record.calculated_quantity ?? "0",
+      binding: requirePositionBindingGeometry(record),
     });
 
     const now = new Date().toISOString();
@@ -689,6 +737,7 @@ export class EntryPackageApplicationService {
       getEntryOrderHistoryPayload: payloads.getEntryOrderHistory,
       expected: {
         qty: record.calculated_quantity ?? "0",
+        binding: requirePositionBindingGeometry(record),
       },
     });
 
@@ -758,6 +807,7 @@ export class EntryPackageApplicationService {
       ticker: command.ticker,
       exchange_symbol: "",
       exchange_category: "",
+      position_binding_mode: "one_way",
       created_at: now,
       updated_at: now,
       desired_entry: null,
@@ -867,18 +917,31 @@ function isOwnedBySamePair(owner: EntryPackageExecutionRecord, command: EntryPac
 // check. A `null` desired_entry on any other active record is a structural
 // contradiction no current write path produces — classified as "corrupt"
 // rather than silently excluded or guessed through.
-export type ScopeAdmissionClassification = "empty" | "same_side" | "opposite_side" | "corrupt";
+export type ScopeAdmissionClassification =
+  | "empty"
+  | "same_side"
+  | "opposite_side"
+  | "opposite_hedge_slot"
+  | "incompatible_geometry"
+  | "corrupt";
 
 export function classifyScopeAdmission(
   activeRecords: EntryPackageExecutionRecord[],
   command: EntryPackageCommand,
-  requestedSide: DesiredEntryDto["side"],
+  requested: { side: DesiredEntryDto["side"]; binding: PositionBindingGeometry },
 ): ScopeAdmissionClassification {
   const otherActiveRecords = activeRecords.filter((record) => !isOwnedBySamePair(record, command));
 
   for (const other of otherActiveRecords) {
-    if (other.desired_entry === null) {
+    if (
+      other.desired_entry === null ||
+      other.position_binding_mode === null ||
+      (other.position_binding_mode === "hedge" && other.exchange_category !== "linear")
+    ) {
       return "corrupt";
+    }
+    if (other.position_binding_mode !== requested.binding.mode) {
+      return "incompatible_geometry";
     }
   }
 
@@ -886,8 +949,16 @@ export function classifyScopeAdmission(
     return "empty";
   }
 
-  const allSameSide = otherActiveRecords.every((other) => other.desired_entry?.side === requestedSide);
-  return allSameSide ? "same_side" : "opposite_side";
+  if (requested.binding.mode === "one_way") {
+    const allSameSide = otherActiveRecords.every(
+      (other) => other.desired_entry?.side === requested.side,
+    );
+    return allSameSide ? "same_side" : "opposite_side";
+  }
+
+  const requestedDirection = requested.binding.direction;
+  const allSameSlot = otherActiveRecords.every((other) => other.desired_entry?.side === requestedDirection);
+  return allSameSlot ? "same_side" : "opposite_hedge_slot";
 }
 
 // Exported for reuse by entry-cycle-recovery's Recovery Convergence policy
@@ -926,4 +997,12 @@ function requireCategory(value: ExchangeInstrumentCategory | ""): ExchangeInstru
   }
 
   throw new Error(`Invalid stored exchange category: ${JSON.stringify(value)}`);
+}
+
+function requirePositionBindingGeometry(record: EntryPackageExecutionRecord): PositionBindingGeometry {
+  const binding = resolveRecordPhysicalPositionBinding(record);
+  if (binding === undefined) {
+    throw new Error("record has no usable physical position binding");
+  }
+  return positionBindingGeometry(binding);
 }

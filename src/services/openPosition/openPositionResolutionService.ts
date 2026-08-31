@@ -4,7 +4,12 @@ import type {
   EntryPackageExecutionRecord,
   EntryPackageExecutionStatus,
 } from "../../correlation/entryPackageExecutionRecord.js";
-import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  isDurablyClosedEntryPackageStatus,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import { compareDecimal } from "../../domain/exactDecimal.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
 import type { OpenPositionHttpResult } from "../../domain/openPositionApi.js";
@@ -129,6 +134,11 @@ export class OpenPositionResolutionService {
     if (record.exchange_category !== "linear") {
       return { kind: "unsupported_scope" };
     }
+    const physicalBinding = resolveRecordPhysicalPositionBinding(record);
+    if (physicalBinding === undefined) {
+      return { kind: "error" };
+    }
+    const binding = positionBindingGeometry(physicalBinding);
 
     const ownFacts = await this.resolveOwnFillFacts(record);
     if (ownFacts === undefined) {
@@ -154,6 +164,7 @@ export class OpenPositionResolutionService {
     const queryResult = await this.deps.bybit.queryPositionForInstrument({
       category: record.exchange_category,
       symbol: record.exchange_symbol,
+      binding,
     });
 
     if (queryResult.kind === "failure" || queryResult.kind === "no_position") {
@@ -206,7 +217,10 @@ export class OpenPositionResolutionService {
       bybit: this.deps.bybit,
       getEntryOrderPayload: { category, symbol, orderLinkId, limit: "1" as const },
       getEntryOrderHistoryPayload: { category, symbol, orderLinkId, limit: "1" as const },
-      expected: { qty: calculatedQuantity },
+      expected: {
+        qty: calculatedQuantity,
+        binding: positionBindingGeometry(requirePhysicalBinding(record)),
+      },
     });
 
     if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
@@ -307,6 +321,14 @@ export class OpenPositionResolutionService {
         return exhaustiveNonOpenDetermination(determination);
     }
   }
+}
+
+function requirePhysicalBinding(record: EntryPackageExecutionRecord) {
+  const binding = resolveRecordPhysicalPositionBinding(record);
+  if (binding === undefined) {
+    throw new Error("record has no usable physical position binding");
+  }
+  return binding;
 }
 
 function classifyStatus(status: EntryPackageExecutionStatus): StatusBucket {

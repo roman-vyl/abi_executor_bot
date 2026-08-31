@@ -2,8 +2,13 @@ import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { compareDecimal } from "../domain/exactDecimal.js";
-import { positionScopeKey } from "../domain/positionScope.js";
-import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
+import {
+  directionalPositionSlotKey,
+  instrumentPositionScope,
+  instrumentPositionScopeKey,
+  type DirectionalPositionSlot,
+  type InstrumentPositionScope,
+} from "../domain/positionScope.js";
 import type { EntryPackageExecutionRecord } from "./entryPackageExecutionRecord.js";
 import {
   correlationRecordKey,
@@ -23,12 +28,6 @@ export class EntryPackageCorrelationRepository {
   private readonly byCompositeKey = new Map<string, EntryPackageExecutionRecord>();
   private readonly byOrderLinkId = new Map<string, EntryPackageExecutionRecord>();
   private readonly byOrderId = new Map<string, EntryPackageExecutionRecord>();
-  // Current physical-position-scope ownership, derived from byCompositeKey.
-  // Unlike the two indexes above (append-only forever), this one has
-  // release semantics and is maintained differently for live writes vs.
-  // replay — see applyScopeClaimOnWrite() and rebuildScopeIndexFromReplay()
-  // for the two ordering rules.
-  private readonly byScope = new Map<string, EntryPackageExecutionRecord>();
 
   // FIFO queue serializing physical appends across all keys, since every
   // write shares one file. This is independent of the per-key business-logic
@@ -86,6 +85,7 @@ export class EntryPackageCorrelationRepository {
       // nothing is rewritten on disk, only the in-memory value read this
       // one time.
       normalizeLegacyCloseIdentityFields(parsed);
+      normalizeLegacyPositionBindingMode(parsed);
 
       // A syntactically-valid-but-wrong-shaped line (e.g. from a future
       // schema migration bug) is corruption too, and must fail readiness
@@ -121,7 +121,7 @@ export class EntryPackageCorrelationRepository {
 
     // Phase 2: ownership is evaluated once, only from each pair's latest
     // (post-Phase-1) record — never from a superseded intermediate one.
-    const conflict = this.rebuildScopeIndexFromReplay();
+    const conflict = this.validateOwnershipViewsFromReplay();
     if (conflict !== undefined) {
       return { ok: false, reason: conflict };
     }
@@ -141,41 +141,21 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
-  // The most recent non-durably-closed writer of this physical scope, if
-  // any — a single-pointer index, `byScope.set(scope, record)` on every
-  // such write. Correct at what it actually promises (the latest writer),
-  // but NOT a valid primitive for any ownership/admission decision as of
-  // abi-same-side-virtual-exposure-ownership-v1: it cannot represent more
-  // than one active owner, so it cannot answer "is pair X one of this
-  // scope's active owners" once more than one can exist. Both remaining
-  // production call sites that used to ask that question
-  // (EntryPackageApplicationService.createOrder()'s scope-claim guard,
-  // ProtectionApplicationService's ownership re-verification) have moved to
-  // findActiveRecordsForScope() below. Kept only as a cheap,
-  // non-authoritative existence check — do not add a new decision-making
-  // caller of this method.
-  findOwnerByScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord | undefined {
-    return this.byScope.get(positionScopeKey(category, symbol));
+  // Canonical active view across all instruments. This is derived from the
+  // latest record per pair and deliberately does not introduce a second
+  // durable ownership store. Startup activation gates use it after replay.
+  findAllActiveRecords(): EntryPackageExecutionRecord[] {
+    return [...this.byCompositeKey.values()].filter(
+      (record) => !isDurablyClosedEntryPackageStatus(record.status),
+    );
   }
 
-  // Every active (non-durably-closed) record currently sharing a physical
-  // scope, regardless of which pair holds it. A plain scan over
-  // byCompositeKey (already the authoritative "latest record per pair"
-  // collection) rather than a second maintained index — nothing here can
-  // drift out of sync with it. This is the canonical multi-owner-aware
-  // ownership lookup — EntryPackageApplicationService.createOrder()'s
-  // scope-claim guard and ProtectionApplicationService's ownership
-  // re-verification both use it. In production this can still only ever
-  // return zero or one record today: createOrder()'s own admission
-  // classification is gated by a temporary guard
-  // (abi-same-side-virtual-exposure-ownership-v1) that keeps single
-  // ownership in effect until a later change removes it. This also exists
-  // so a repository-level test can seed multiple same-side records
-  // directly (bypassing that guard) and prove the repository layer itself
-  // has no single-owner assumption baked in — see virtual-exposure-state
-  // spec.md.
-  findActiveRecordsForScope(category: ExchangeInstrumentCategory, symbol: string): EntryPackageExecutionRecord[] {
-    const targetScope = positionScopeKey(category, symbol);
+  // Authoritative multi-owner instrument view. Scanning the latest record
+  // per pair avoids a second mutable ownership store and cannot discard
+  // siblings. It intentionally includes one-way owners and both future
+  // hedge directions because foundation admission remains instrument-wide.
+  findActiveRecordsForInstrumentScope(scope: InstrumentPositionScope): EntryPackageExecutionRecord[] {
+    const targetScope = instrumentPositionScopeKey(scope);
     const results: EntryPackageExecutionRecord[] = [];
 
     for (const record of this.byCompositeKey.values()) {
@@ -185,7 +165,10 @@ export class EntryPackageCorrelationRepository {
       if (isDurablyClosedEntryPackageStatus(record.status)) {
         continue;
       }
-      if (positionScopeKey(record.exchange_category, record.exchange_symbol) !== targetScope) {
+      if (
+        instrumentPositionScopeKey(instrumentPositionScope(record.exchange_category, record.exchange_symbol)) !==
+        targetScope
+      ) {
         continue;
       }
       results.push(record);
@@ -194,7 +177,28 @@ export class EntryPackageCorrelationRepository {
     return results;
   }
 
+  // Directional physical slots exist only for records whose actual durable
+  // geometry is hedge. One-way records remain instrument-scoped and never
+  // alias long or short merely because their virtual desired entry has a side.
+  findActiveRecordsForDirectionalSlot(slot: DirectionalPositionSlot): EntryPackageExecutionRecord[] {
+    const targetSlot = directionalPositionSlotKey(slot);
+    return this.findActiveRecordsForInstrumentScope(slot.instrumentScope).filter((record) => {
+      if (record.position_binding_mode !== "hedge" || record.desired_entry === null) {
+        return false;
+      }
+      return (
+        directionalPositionSlotKey({
+          instrumentScope: slot.instrumentScope,
+          direction: record.desired_entry.side,
+        }) === targetSlot
+      );
+    });
+  }
+
   async save(record: EntryPackageExecutionRecord): Promise<void> {
+    if (record.position_binding_mode !== "one_way" && record.position_binding_mode !== "hedge") {
+      throw new Error("current correlation writes require an explicit position_binding_mode");
+    }
     const regression = fillFactRegression(
       this.byCompositeKey.get(correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)),
       record,
@@ -212,13 +216,6 @@ export class EntryPackageCorrelationRepository {
     await task;
 
     this.indexRecord(record);
-    // Live-write-only scope claim/release. Correct here specifically because
-    // live save() calls are already strictly
-    // ordered by the pair-lock and scope-lock, so this record is always
-    // already the latest for its pair the instant this runs — unlike
-    // replay, there is no later line still to arrive that could change the
-    // answer. See rebuildScopeIndexFromReplay() for the startup path.
-    this.applyScopeClaimOnWrite(record);
   }
 
   private async appendDurable(line: string): Promise<void> {
@@ -250,43 +247,19 @@ export class EntryPackageCorrelationRepository {
     }
   }
 
-  // Live-write scope claim/release. Never call this from replay() — see
-  // rebuildScopeIndexFromReplay() for why the same per-line step is unsound
-  // there.
-  private applyScopeClaimOnWrite(record: EntryPackageExecutionRecord): void {
-    if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
-      return;
-    }
-
-    const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
-
-    if (!isDurablyClosedEntryPackageStatus(record.status)) {
-      this.byScope.set(scope, record);
-      return;
-    }
-
-    // Durably closed: release, but only if this pair is still the
-    // recorded owner — never delete a different pair's legitimate claim.
-    const currentOwner = this.byScope.get(scope);
-    if (currentOwner !== undefined && isSamePair(currentOwner, record)) {
-      this.byScope.delete(scope);
-    }
-  }
-
   // Phase 2 of replay: evaluated once, after every line has been indexed
   // into byCompositeKey, using only each pair's final latest record — never
   // an intermediate one a later line for the same pair has since superseded.
   // byCompositeKey.values() yields exactly one record per pair, so a scope
   // collision found here is necessarily between two different pairs' latest
   // durable state, not a sequencing artifact.
-  private rebuildScopeIndexFromReplay(): string | undefined {
-    this.byScope.clear();
-    // Local to this one replay pass, discarded on return — not a new
-    // persisted index. Tracks the side already seen active for each scope
-    // so two or more same-side active records no longer fail readiness by
-    // themselves (abi-same-side-virtual-exposure-ownership-v1 design.md
-    // Decision 3); only a genuine mixed-side conflict does.
-    const activeSideByScope = new Map<string, "long" | "short">();
+  private validateOwnershipViewsFromReplay(): string | undefined {
+    // These local derived views prove instrument and directional-slot
+    // identities can be reconstructed without another durable store. The
+    // canonical query methods continue scanning the latest pair records.
+    const activeSideByOneWayInstrument = new Map<string, "long" | "short">();
+    const activeModeByInstrument = new Map<string, "one_way" | "hedge">();
+    const activeOwnerKeysByDirectionalSlot = new Map<string, Set<string>>();
 
     for (const record of this.byCompositeKey.values()) {
       if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
@@ -324,7 +297,30 @@ export class EntryPackageCorrelationRepository {
         continue;
       }
 
-      const scope = positionScopeKey(record.exchange_category, record.exchange_symbol);
+      if (record.position_binding_mode === null) {
+        return (
+          `active_legacy_one_way_record_requires_drain for ` +
+          `${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)}`
+        );
+      }
+
+      if (record.position_binding_mode === "hedge" && record.exchange_category !== "linear") {
+        return (
+          `active hedge binding for ${correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id)} ` +
+          `uses unsupported category ${record.exchange_category}`
+        );
+      }
+
+      const scope = instrumentPositionScope(record.exchange_category, record.exchange_symbol);
+      const scopeKey = instrumentPositionScopeKey(scope);
+      const existingMode = activeModeByInstrument.get(scopeKey);
+      if (existingMode !== undefined && existingMode !== record.position_binding_mode) {
+        return (
+          `incompatible_active_position_binding_geometry for ${scopeKey}: ` +
+          `(saw both "${existingMode}" and "${record.position_binding_mode}")`
+        );
+      }
+      activeModeByInstrument.set(scopeKey, record.position_binding_mode);
 
       const side = record.desired_entry?.side;
       if (side === undefined) {
@@ -339,23 +335,27 @@ export class EntryPackageCorrelationRepository {
         );
       }
 
-      const existingSide = activeSideByScope.get(scope);
-      if (existingSide !== undefined && existingSide !== side) {
-        return (
-          `conflicting scope ownership for ${scope}: mixed sides among active records ` +
-          `(saw both "${existingSide}" and "${side}")`
-        );
+      if (record.position_binding_mode === "hedge") {
+        const slotKey = directionalPositionSlotKey({ instrumentScope: scope, direction: side });
+        const owners = activeOwnerKeysByDirectionalSlot.get(slotKey) ?? new Set<string>();
+        owners.add(correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id));
+        activeOwnerKeysByDirectionalSlot.set(slotKey, owners);
       }
-      activeSideByScope.set(scope, side);
-      this.byScope.set(scope, record);
+
+      if (record.position_binding_mode === "one_way") {
+        const existingSide = activeSideByOneWayInstrument.get(scopeKey);
+        if (existingSide !== undefined && existingSide !== side) {
+          return (
+            `unsupported_mixed_side_active_state for ${scopeKey}: ` +
+            `(saw both "${existingSide}" and "${side}")`
+          );
+        }
+        activeSideByOneWayInstrument.set(scopeKey, side);
+      }
     }
 
     return undefined;
   }
-}
-
-function isSamePair(a: EntryPackageExecutionRecord, b: EntryPackageExecutionRecord): boolean {
-  return a.strategy_instance_id === b.strategy_instance_id && a.trade_cycle_id === b.trade_cycle_id;
 }
 
 // A pair's own recorded cumulative_filled_qty must never regress across
@@ -373,6 +373,19 @@ function fillFactRegression(
   previous: EntryPackageExecutionRecord | undefined,
   incoming: EntryPackageExecutionRecord,
 ): string | undefined {
+  if (
+    previous !== undefined &&
+    previous.position_binding_mode !== null &&
+    previous.generation === incoming.generation &&
+    incoming.position_binding_mode !== previous.position_binding_mode
+  ) {
+    return (
+      `position_binding_mode changed within generation for ` +
+      `${correlationRecordKey(incoming.strategy_instance_id, incoming.trade_cycle_id)}: ` +
+      `${JSON.stringify(previous.position_binding_mode)} -> ${JSON.stringify(incoming.position_binding_mode)}`
+    );
+  }
+
   // first_fill_at_ms is a strict immutability check (not monotonic
   // non-decrease like cumulative_filled_qty below): once captured
   // (abi-pair-scoped-open-position-resolution-v1), it must never change,
@@ -423,6 +436,19 @@ function normalizeLegacyCloseIdentityFields(value: unknown): void {
   // abi-pair-scoped-open-position-resolution-v1 shipped.
   if (!("first_fill_at_ms" in record)) {
     record.first_fill_at_ms = null;
+  }
+}
+
+// Missing means a record was written before this foundation, when every
+// real binding used one-way positionIdx 0. null preserves that provenance
+// in memory; it is never written by current save() calls.
+function normalizeLegacyPositionBindingMode(value: unknown): void {
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  if (!("position_binding_mode" in record)) {
+    record.position_binding_mode = null;
   }
 }
 

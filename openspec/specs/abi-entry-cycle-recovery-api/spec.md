@@ -2,8 +2,8 @@
 
 ## Purpose
 
-TBD - Update Purpose after archive: the public V1 Runtime → ABI HTTP contract for the new
-read-only recovery-state lookup.
+Define the public V1 Runtime → ABI HTTP contract for the read-only recovery-state lookup used to
+resolve one Runtime-owned trade cycle after uncertain exchange outcomes.
 
 ## Requirements
 

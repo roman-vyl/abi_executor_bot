@@ -48,6 +48,8 @@ test("OpenAPI owns transport shape without constraining Runtime value formats", 
     "early_execution_observation",
     "entry_bar_open_time_ms",
     "positionIdx",
+    "position_binding_mode",
+    "directional_position_slot",
     "queryPositionForInstrument",
     "OpenPositionResolutionServicePort",
   ]) {

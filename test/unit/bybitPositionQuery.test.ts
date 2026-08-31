@@ -44,7 +44,7 @@ test("a single valid size>0 row is returned as the position", () => {
   const result = evaluatePositionQueryResponse(envelope([validRow()]), INPUT);
   assert.deepEqual(result, {
     kind: "position",
-    row: { symbol: SYMBOL, side: "Buy", size: "0.5", positionIdx: 0, avgPrice: "100000", openTime: 1785000012345 },
+    row: { symbol: SYMBOL, side: "Buy", size: "0.5", avgPrice: "100000", openTime: 1785000012345 },
   });
 });
 

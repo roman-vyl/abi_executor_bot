@@ -13,9 +13,15 @@ import {
 } from "../../domain/entryCycleRecoveryApi.js";
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
-import { correlationRecordKey, isDurablyClosedEntryPackageStatus } from "../../correlation/entryPackageExecutionRecord.js";
+import {
+  correlationRecordKey,
+  isDurablyClosedEntryPackageStatus,
+  positionBindingGeometry,
+  resolveRecordPhysicalPositionBinding,
+} from "../../correlation/entryPackageExecutionRecord.js";
 import type { EntryPackageExecutionRecord } from "../../correlation/entryPackageExecutionRecord.js";
 import type { DesiredEntryDto } from "../../domain/entryPackageApi.js";
+import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import type { BybitAdapter, BybitOrderSide, PositionQueryResult } from "../../exchange/bybitAdapter.js";
 import type { BybitGetOrderByLinkIdPayload, BybitGetOrderHistoryPayload } from "../../exchange/bybitOrderMapper.js";
 import {
@@ -147,6 +153,11 @@ export class EntryCycleRecoveryResolutionService {
     }
 
     const symbol = record.exchange_symbol;
+    const physicalBinding = resolveRecordPhysicalPositionBinding(record);
+    if (physicalBinding === undefined) {
+      return internalErrorResult();
+    }
+    const binding = positionBindingGeometry(physicalBinding);
     const getEntryOrderPayload: BybitGetOrderByLinkIdPayload = { category, symbol, orderLinkId, limit: "1" };
     const getEntryOrderHistoryPayload: BybitGetOrderHistoryPayload = { category, symbol, orderLinkId, limit: "1" };
 
@@ -165,6 +176,7 @@ export class EntryCycleRecoveryResolutionService {
         bybit: this.deps.bybit,
         getEntryOrderPayload,
         getEntryOrderHistoryPayload,
+        binding,
       });
 
       if (absenceCandidate !== undefined && orderSignal.kind === "not_found") {
@@ -174,6 +186,7 @@ export class EntryCycleRecoveryResolutionService {
           symbol,
           orderLinkId,
           desiredSide: absenceCandidate.desiredSide,
+          binding,
         });
         if (attemptEvidence === "clean_absent") {
           cleanAbsenceAttempts += 1;
@@ -191,9 +204,10 @@ export class EntryCycleRecoveryResolutionService {
           closeOrderLinkId,
           category,
           symbol,
+          binding,
         });
 
-        const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol });
+        const positionQuery = await this.deps.bybit.queryPositionForInstrument({ category, symbol, binding });
 
         const resolved = resolveRecoveryState({
           orderSignal,
@@ -242,6 +256,7 @@ export class EntryCycleRecoveryResolutionService {
     closeOrderLinkId: string | null;
     category: "linear" | "spot";
     symbol: string;
+    binding: PositionBindingGeometry;
   }): Promise<OwnCloseOrderOutcome | undefined> {
     if (input.orderSignal.kind !== "terminal_with_fill" || !input.closeOrderAttempted || input.closeOrderLinkId === null) {
       return undefined;
@@ -257,6 +272,7 @@ export class EntryCycleRecoveryResolutionService {
       getCloseOrderPayload: { category: input.category, symbol: input.symbol, orderLinkId: input.closeOrderLinkId, limit: "1" },
       getCloseOrderHistoryPayload: { category: input.category, symbol: input.symbol, orderLinkId: input.closeOrderLinkId, limit: "1" },
       expectedQty,
+      binding: input.binding,
     });
   }
 
@@ -510,7 +526,11 @@ export class EntryCycleRecoveryResolutionService {
 // order_link_id are both durably stable for the lifetime of one binding and
 // both change together whenever a binding is superseded.
 function sameBinding(fresh: EntryPackageExecutionRecord, resolvedAgainst: EntryPackageExecutionRecord): boolean {
-  return fresh.generation === resolvedAgainst.generation && fresh.order_link_id === resolvedAgainst.order_link_id;
+  return (
+    fresh.generation === resolvedAgainst.generation &&
+    fresh.order_link_id === resolvedAgainst.order_link_id &&
+    fresh.position_binding_mode === resolvedAgainst.position_binding_mode
+  );
 }
 
 // Own evidence determines the candidate state; the aggregate physical

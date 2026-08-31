@@ -470,6 +470,7 @@ function makeRecord(overrides: {
     trade_cycle_id: overrides.tradeCycleId ?? "cycle-1",
     exchange_symbol: overrides.exchangeSymbol ?? "BTCUSDT",
     exchange_category: overrides.exchangeCategory ?? "linear",
+    position_binding_mode: "one_way",
     desired_entry: {
       side,
       source_plan_bar_open_time_ms: 1785000000000,

@@ -1,5 +1,11 @@
 import type { DesiredEntryDto } from "../domain/entryPackageApi.js";
 import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
+import {
+  directionalPositionSlot,
+  instrumentPositionScope,
+  type PhysicalPositionBinding,
+  type PositionBindingGeometry,
+} from "../domain/positionScope.js";
 
 export type EntryPackageExecutionStatus =
   | "pending_create"
@@ -50,6 +56,12 @@ export type LegacyEntryPackagePendingAction = "amend" | "cancel_and_create";
 
 export type StoredEntryPackagePendingAction = EntryPackagePendingAction | LegacyEntryPackagePendingAction;
 
+// Actual exchange geometry for the current binding. null exists only for
+// discriminator-less legacy rows normalized during replay; every current
+// production write persists an explicit mode. A hedge record's
+// directional slot is derived from desired_entry.side, never stored again.
+export type PositionBindingMode = "one_way" | "hedge";
+
 export type EarlyExecutionObservation = {
   order_status: string;
   cumulative_filled_qty: string;
@@ -80,6 +92,7 @@ export type EntryPackageExecutionRecord = {
   // "" only for a record that has never had a real binding (persistAbsentNoHistory) —
   // every binding that has actually gone through createOrder stores "linear" or "spot".
   exchange_category: ExchangeInstrumentCategory | "";
+  position_binding_mode: PositionBindingMode | null;
   created_at: string;
   updated_at: string;
   desired_entry: DesiredEntryDto | null;
@@ -123,6 +136,36 @@ export type EntryPackageExecutionRecord = {
   current_binding_started_at: string | null;
 };
 
+// Resolves the immutable physical binding owned by one durable generation.
+// Numeric Bybit slots never leave the exchange boundary. Legacy active rows,
+// malformed hedge rows, and never-bound rows deliberately have no binding.
+export function resolveRecordPhysicalPositionBinding(
+  record: EntryPackageExecutionRecord,
+): PhysicalPositionBinding | undefined {
+  if (
+    (record.exchange_category !== "linear" && record.exchange_category !== "spot") ||
+    record.exchange_symbol === "" ||
+    record.position_binding_mode === null
+  ) {
+    return undefined;
+  }
+
+  const instrumentScope = instrumentPositionScope(record.exchange_category, record.exchange_symbol);
+  if (record.position_binding_mode === "one_way") {
+    return { mode: "one_way", instrumentScope };
+  }
+  if (record.exchange_category !== "linear" || record.desired_entry === null) {
+    return undefined;
+  }
+  return { mode: "hedge", slot: directionalPositionSlot(instrumentScope, record.desired_entry.side) };
+}
+
+export function positionBindingGeometry(binding: PhysicalPositionBinding): PositionBindingGeometry {
+  return binding.mode === "one_way"
+    ? { mode: "one_way" }
+    : { mode: "hedge", direction: binding.slot.direction };
+}
+
 // Opaque path identifiers may contain any decoded character, so the
 // composite key is built from a JSON array rather than a delimited string
 // to avoid collisions such as ("a/b", "c") vs ("a", "b/c").
@@ -163,6 +206,7 @@ const END_REASONS: ReadonlySet<Exclude<BindingHistoryEndReason, null>> = new Set
 // binding that was actually created, so "" is never valid there.
 const RECORD_CATEGORIES: ReadonlySet<ExchangeInstrumentCategory | ""> = new Set(["", "linear", "spot"]);
 const BINDING_CATEGORIES: ReadonlySet<ExchangeInstrumentCategory> = new Set(["linear", "spot"]);
+const POSITION_BINDING_MODES: ReadonlySet<PositionBindingMode> = new Set(["one_way", "hedge"]);
 
 // A syntactically-valid JSON line that does not actually conform to the
 // record shape (e.g. from a future schema migration bug, or partial
@@ -183,6 +227,9 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
     typeof record.exchange_symbol === "string" &&
     typeof record.exchange_category === "string" &&
     RECORD_CATEGORIES.has(record.exchange_category as ExchangeInstrumentCategory | "") &&
+    (record.position_binding_mode === null ||
+      (typeof record.position_binding_mode === "string" &&
+        POSITION_BINDING_MODES.has(record.position_binding_mode as PositionBindingMode))) &&
     isNonEmptyString(record.created_at) &&
     isNonEmptyString(record.updated_at) &&
     (record.desired_entry === null || isValidDesiredEntry(record.desired_entry)) &&
