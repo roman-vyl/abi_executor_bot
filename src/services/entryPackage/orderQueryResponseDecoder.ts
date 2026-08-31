@@ -173,6 +173,7 @@ export type BybitChildOrderCandidate = {
   triggerPrice: string;
   qty: string;
   leavesQty: string;
+  positionIdx?: 0 | 1 | 2;
 };
 
 export type ChildOrderListProtocolFailureReason =
@@ -299,18 +300,20 @@ export function decodeChildOrderListResponse(input: {
       return { kind: "protocol_failure", reason: "invalid_leaves_qty" };
     }
 
+    // This decoder is symbol-scoped, so a valid response may contain rows
+    // from other owners and other hedge slots. Validate the exchange field's
+    // structure here; exact binding compatibility is checked only after the
+    // caller filters candidates by exact parentOrderLinkId.
+    let positionIdx: 0 | 1 | 2 | undefined;
     if (expected.binding !== undefined) {
       const value = record.positionIdx;
-      if (
-        typeof value !== "number" ||
-        !Number.isInteger(value) ||
-        value !== encodeBybitPositionIdx(expected.binding)
-      ) {
+      if (typeof value !== "number" || !Number.isInteger(value) || (value !== 0 && value !== 1 && value !== 2)) {
         return { kind: "protocol_failure", reason: "invalid_position_idx" };
       }
+      positionIdx = value;
     }
 
-    items.push({
+    const item: BybitChildOrderCandidate = {
       orderLinkId: orderLinkIdField.value,
       orderId,
       parentOrderLinkId: parentOrderLinkIdField.value,
@@ -320,7 +323,11 @@ export function decodeChildOrderListResponse(input: {
       triggerPrice: triggerPriceField.value,
       qty: qtyField.value,
       leavesQty: leavesQtyField.value,
-    });
+    };
+    if (positionIdx !== undefined) {
+      item.positionIdx = positionIdx;
+    }
+    items.push(item);
   }
 
   return { kind: "ok", items };

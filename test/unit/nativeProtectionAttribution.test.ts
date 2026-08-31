@@ -41,6 +41,20 @@ async function resolve(bybit: FakeBybitAdapter) {
   });
 }
 
+async function resolveBound(
+  bybit: FakeBybitAdapter,
+  entryOrderLinkId: string,
+  direction: "long" | "short",
+) {
+  return resolveOwnAttachedProtection({
+    bybit,
+    category: CATEGORY,
+    symbol: SYMBOL,
+    entryOrderLinkId,
+    binding: { mode: "hedge", direction },
+  });
+}
+
 test("no matching candidates classifies as none", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.activeOrdersResponse = realtimeList([childRow({ parentOrderLinkId: "abi-ep-someone-else" })]);
@@ -172,6 +186,60 @@ test("a same-symbol sibling's own children are never attributed to this entry", 
     assert.equal(resolution.stop.orderId, "stop-1");
     assert.equal(resolution.take.orderId, "take-1");
   }
+});
+
+test("foreign-first simultaneous hedge protection resolves each exact parent in its own slot", async () => {
+  const bybit = new FakeBybitAdapter();
+  const parentA = "abi-ep-entry-a";
+  const parentB = "abi-ep-entry-b";
+  bybit.activeOrdersResponse = realtimeList([
+    childRow({ orderId: "b-take", parentOrderLinkId: parentB, stopOrderType: "PartialTakeProfit", createType: "CreateByPartialTakeProfit", positionIdx: 2 }),
+    childRow({ orderId: "b-stop", parentOrderLinkId: parentB, positionIdx: 2 }),
+    childRow({ orderId: "a-take", parentOrderLinkId: parentA, stopOrderType: "PartialTakeProfit", createType: "CreateByPartialTakeProfit", positionIdx: 1 }),
+    childRow({ orderId: "a-stop", parentOrderLinkId: parentA, positionIdx: 1 }),
+  ]);
+  bybit.orderHistoryForSymbolResponse = historyList([]);
+
+  const a = await resolveBound(bybit, parentA, "long");
+  assert.equal(a.kind, "attributed");
+  if (a.kind === "attributed") {
+    assert.deepEqual([a.stop.orderId, a.take.orderId], ["a-stop", "a-take"]);
+  }
+
+  const b = await resolveBound(bybit, parentB, "short");
+  assert.equal(b.kind, "attributed");
+  if (b.kind === "attributed") {
+    assert.deepEqual([b.stop.orderId, b.take.orderId], ["b-stop", "b-take"]);
+  }
+});
+
+test("an exact-parent hedge child in the wrong slot remains fail-closed", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.activeOrdersResponse = realtimeList([
+    childRow({ orderId: "a-stop", positionIdx: 2 }),
+    childRow({ orderId: "a-take", stopOrderType: "PartialTakeProfit", createType: "CreateByPartialTakeProfit", positionIdx: 1 }),
+  ]);
+  bybit.orderHistoryForSymbolResponse = historyList([]);
+
+  assert.deepEqual(await resolveBound(bybit, ENTRY_ORDER_LINK_ID, "long"), {
+    kind: "ambiguous",
+    reason: "query_failed",
+  });
+});
+
+test("a structurally malformed foreign hedge row is not hidden by exact-parent filtering", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.activeOrdersResponse = realtimeList([
+    childRow({ orderId: "foreign-stop", parentOrderLinkId: "abi-ep-foreign", positionIdx: "2" }),
+    childRow({ orderId: "a-stop", positionIdx: 1 }),
+    childRow({ orderId: "a-take", stopOrderType: "PartialTakeProfit", createType: "CreateByPartialTakeProfit", positionIdx: 1 }),
+  ]);
+  bybit.orderHistoryForSymbolResponse = historyList([]);
+
+  assert.deepEqual(await resolveBound(bybit, ENTRY_ORDER_LINK_ID, "long"), {
+    kind: "ambiguous",
+    reason: "query_failed",
+  });
 });
 
 test("the same orderId in both realtime and history with identical evidence is deduplicated, not double-counted", async () => {

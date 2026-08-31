@@ -9,7 +9,80 @@ See `proposal.md` for motivation. The foundation and lifecycle-readiness changes
 - repository replay reconstructs directional slots but still returns `unsupported_mixed_side_active_state` for any active opposite sides.
 - `assureBindingBeforeAdmission` and `assureReplayedActiveBindings` exist as controlled seams but are not composed into production.
 
-The predecessor `abi-hedge-lifecycle-readiness-v1` is currently 37/40. Its tasks 1.1, 1.2, and 3.2 require real flat Hedge Mode evidence and are a release prerequisite, not work to duplicate here.
+The predecessor `abi-hedge-lifecycle-readiness-v1` is complete at 40/40 in commit `899cbd2`.
+Its real flat Hedge Mode evidence tasks 1.1, 1.2, and 3.2 are accepted as the activation
+prerequisite described below. This does not satisfy the separate operational release gate 7.5.
+
+## Predecessor activation handoff
+
+Accepted prerequisite baseline: commit `899cbd2d0439fcf983ec2110362041f72ff792b7`
+(`Complete flat hedge mode evidence`).
+
+- Repository evidence: `docs/spikes/bybit-demo-flat-position-geometry.md` records an authenticated
+  Bybit Demo observation for isolated linear USDT perpetual `ZROUSDT`. The symbol had no position
+  and zero active orders before the operator-controlled symbol-scoped mode switch. No order was
+  created and no position was opened.
+- Raw contract fixture: `test/fixtures/bybit-demo-flat-hedge-position-list.json` contains the exact
+  successful `GET /v5/position/list` response. It has `result.category = "linear"` and exactly two
+  rows: `positionIdx = 1` and `positionIdx = 2`; both report `side = ""`, `size = "0"`,
+  `avgPrice = "0"`, `openTime = 0`, `stopLoss = ""`, and `takeProfit = ""`. No one-way row is
+  present.
+- Decoder contract: `evaluatePositionQueryResponse()` admits `no_position` for either expected
+  hedge direction only from that complete canonical two-slot flat geometry. Empty/single/missing,
+  duplicate, one-way-index, malformed-field, and flat-target-plus-live-opposite shapes remain
+  fail-closed. The strict one-way branch remains regression-preserving.
+- Predecessor state: tasks 1.1, 1.2, and 3.2 are checked complete and the predecessor reports
+  `40/40` tasks complete.
+- Validation rerun on 2026-08-30 after the fixture was finalized: `npm test` passed `747/747`;
+  `npm run typecheck`, `npm run build`, and `npm run validate:openapi` passed; strict validation of
+  both predecessor and activation changes passed; `git diff --check` passed.
+
+This handoff accepts only the evidence/code prerequisite. It does not select hedge deployment
+policy, switch Bybit mode, authorize a real hedge order, or complete the just-in-time operational
+checklist required by task 7.5.
+
+## Controlled Demo activation evidence
+
+Task 7.5 was completed on 2026-08-30/31 through the production Strategy Runtime → ABI → Bybit
+Demo boundary for `ZROUSDT`, with `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE=hedge`, live execution
+limited to Demo, and mainnet execution blocked. No Market Data Service, Strategy Engine, real
+strategy specification, or automatic position-mode switch participated.
+
+- Independent instances `e2e-zro-hedge-fill3-long-a2-20260830T1509Z` / cycle
+  `e2e-zro-hedge-fill3-long-a2-cycle-20260830T1509Z` and
+  `e2e-zro-hedge-fill3-short-b2-20260830T1516Z` / cycle
+  `e2e-zro-hedge-fill3-short-b2-cycle-20260830T1516Z` admitted and filled into durable
+  `hedge/long` slot 1 and `hedge/short` slot 2 bindings. The simultaneous physical acceptance
+  state was `Buy 4.7 @ 1.066` in `positionIdx=1` and `Sell 4.7 @ 1.0687` in `positionIdx=2`.
+- ABI restart/replay with both sides live retained the two bindings, pair-scoped open-position
+  evidence, and owner-specific protection. Runtime persistence restored both current cycles
+  without manual ownership reconstruction.
+- Closing A used close link `abi-ep-bc04db997c35dfc7348a`, Bybit order
+  `e50a43af-05f6-4f56-8397-244670b147c6`, and exact payload geometry `Sell`, `Market`, `qty=4.7`,
+  `reduceOnly=true`, `positionIdx=1`. Slot 1 became canonical flat while B's slot-2 position and
+  protection identities remained unchanged.
+- Closing B used close link `abi-ep-8feace27cbaa44f3fbe5`, Bybit order
+  `a06dc2fe-8236-44d6-bf79-29de28855d66`, and exact payload geometry `Buy`, `Market`, `qty=4.7`,
+  `reduceOnly=true`, `positionIdx=2`. Bybit returned HTTP 200, `retCode=0`, `retMsg=OK`; the order
+  was `Filled` for `cumExecQty=4.7` at `avgPrice=1.0186`.
+- Final authenticated reads returned exactly the canonical flat hedge rows for indexes 1 and 2
+  (`side=""`, `size="0"`, `avgPrice="0"`, `openTime=0`) and zero active orders. Both correlations
+  were `terminal_closed` with `pending_action=null`; both Runtime current cycles and recovery
+  markers were null.
+- A clean ABI restart replayed 40 correlation lines, reached readiness, made no startup POST, and
+  left the correlation SHA-256 unchanged at
+  `36f6748afe1492c5100dcd3adef18ebaff600d73a8bf744df82bf2b3fd134302`. Post-restart reads still
+  showed both slots flat, zero active orders, and both pair-scoped positions closed.
+- A fresh Runtime process loaded A and B using repository reads only, without `get_or_create` or
+  synthetic reinjection. It returned null cycles/recovery markers for both and left the 48-line
+  Runtime persistence SHA-256 unchanged at
+  `182faeba7afbf2da78dbb150fbc563038ddc5da480f179b1d523d2eeb108807b`.
+
+The run also exposed and verified the minimal protection-attribution decoder correction required
+for simultaneous owners: structurally valid foreign-parent hedge rows may carry the other slot and
+are ignored only after exact-parent filtering; an own-parent binding mismatch remains fail-closed;
+and a structurally malformed symbol-wide row remains fail-closed even when it belongs to a foreign
+parent. Regression coverage exercises both close directions and durable close retry identity.
 
 ## Goals / Non-Goals
 
@@ -25,7 +98,7 @@ The predecessor `abi-hedge-lifecycle-readiness-v1` is currently 37/40. Its tasks
 - Redesign any prepared lifecycle, ownership schema, recovery state machine, risk sizing, or public contract.
 - Switch Bybit position mode, infer a deployment policy from exchange state, or expose `positionIdx`.
 - Activate Hedge Mode for spot or weaken mainnet/live execution guards.
-- Execute or substitute for the predecessor's outstanding real-evidence tasks.
+- Repeat or substitute synthetic evidence for the predecessor's accepted real-evidence tasks.
 
 ## Decisions
 

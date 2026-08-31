@@ -1,7 +1,7 @@
 ## 1. Activation prerequisites
 
-- [ ] 1.1 Verify `abi-hedge-lifecycle-readiness-v1` tasks 1.1, 1.2, and 3.2 are completed with accepted real flat Bybit Hedge Mode evidence; do not enable or smoke production hedge writes if any remains incomplete.
-- [ ] 1.2 Re-run the predecessor change's required tests and strict validation after its evidence fixtures are finalized, and record the passing prerequisite in the activation handoff.
+- [x] 1.1 Verify `abi-hedge-lifecycle-readiness-v1` tasks 1.1, 1.2, and 3.2 are completed with accepted real flat Bybit Hedge Mode evidence; do not enable or smoke production hedge writes if any remains incomplete.
+- [x] 1.2 Re-run the predecessor change's required tests and strict validation after its evidence fixtures are finalized, and record the passing prerequisite in the activation handoff.
 - [x] 1.3 Confirm the implementation baseline contains the complete slot-aware entry, open-position, protection, close, recovery, restart, and read-only mode-assurance behavior specified by the predecessor.
 
 ## 2. Deployment policy and composition
@@ -48,4 +48,4 @@
 - [x] 7.2 Document rollback before and after the first durable hedge record, including the hedge-aware-build requirement and full drain before returning to one-way policy.
 - [x] 7.3 Run the complete test suite, typecheck, lint/build or repository-equivalent quality gates, and fix all failures without weakening safety assertions.
 - [x] 7.4 Run strict OpenSpec validation and `git diff --check`, and verify public contracts, Strategy Runtime/Engine, risk sizing, and unrelated production behavior were not changed.
-- [ ] 7.5 Before the first real hedge write, execute the documented readiness checklist and confirm the predecessor evidence prerequisite, flat account state, external Hedge Mode, successful ABI assurance, guard settings, and cleanup plan.
+- [x] 7.5 Before the first real hedge write, execute the documented readiness checklist and confirm the predecessor evidence prerequisite, flat account state, external Hedge Mode, successful ABI assurance, guard settings, and cleanup plan.
