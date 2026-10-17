@@ -184,6 +184,17 @@ function validateEntryPackageDocument(document) {
   assert.deepEqual(Object.keys(appliedProperties).sort(), [
     "applied_desired_entry",
     "calculated_quantity",
+    "quantity",
+    "status",
+    "stop_loss",
+    "strategy_instance_id",
+    "take_profit",
+    "trade_cycle_id",
+    "trigger_price",
+  ]);
+  assert.deepEqual(schemas.EntryPackageAppliedResponse.required.slice().sort(), [
+    "applied_desired_entry",
+    "calculated_quantity",
     "status",
     "strategy_instance_id",
     "trade_cycle_id",

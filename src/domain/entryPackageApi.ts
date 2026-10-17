@@ -1,3 +1,5 @@
+import { compareDecimal } from "./exactDecimal.js";
+
 export type DesiredEntryDto = {
   side: "long" | "short";
   source_plan_bar_open_time_ms: number;
@@ -27,6 +29,13 @@ export type EntryPackageAppliedResponse = {
   status: "entry_package_applied";
   applied_desired_entry: DesiredEntryDto;
   calculated_quantity: string;
+  // The cycle's own entry order as read back from Bybit during the apply.
+  // Each key is omitted when the read did not provide it; stop_loss and
+  // take_profit are null when Bybit reports none (empty or zero).
+  trigger_price?: string;
+  stop_loss?: string | null;
+  take_profit?: string | null;
+  quantity?: string;
 };
 
 export type EntryPackageAbsentResponse = {
@@ -80,6 +89,16 @@ export type AppliedAcknowledgementInput = {
   completePackageApplied: boolean;
   appliedDesiredEntry: DesiredEntryDto;
   calculatedQuantity: string;
+  entryOrder?: AppliedEntryOrderValues;
+};
+
+// Raw Bybit text of the cycle's own entry order, as decoded by the
+// confirmation read.
+export type AppliedEntryOrderValues = {
+  triggerPrice: string;
+  stopLoss: string;
+  takeProfit: string;
+  qty: string;
 };
 
 export function validateEntryPackageCommand(
@@ -191,8 +210,28 @@ export function serializeAppliedEntryPackage(
       status: "entry_package_applied",
       applied_desired_entry: desiredEntryResult.value,
       calculated_quantity: input.calculatedQuantity,
+      ...(input.entryOrder !== undefined ? serializeEntryOrderValues(input.entryOrder) : {}),
     },
   };
+}
+
+function serializeEntryOrderValues(
+  order: AppliedEntryOrderValues,
+): Pick<EntryPackageAppliedResponse, "trigger_price" | "stop_loss" | "take_profit" | "quantity"> {
+  return {
+    ...(isExactDecimalText(order.triggerPrice) ? { trigger_price: order.triggerPrice } : {}),
+    ...(order.stopLoss === "" || isExactDecimalText(order.stopLoss)
+      ? { stop_loss: protectionOrNull(order.stopLoss) }
+      : {}),
+    ...(order.takeProfit === "" || isExactDecimalText(order.takeProfit)
+      ? { take_profit: protectionOrNull(order.takeProfit) }
+      : {}),
+    ...(isExactDecimalText(order.qty) ? { quantity: order.qty } : {}),
+  };
+}
+
+function protectionOrNull(value: string): string | null {
+  return value === "" || compareDecimal(value, "0") === 0 ? null : value;
 }
 
 export function serializeAbsentEntryPackage(input: {

@@ -91,7 +91,11 @@
                         "initial_take_price": "103000",
                         "locked_exit_profile": "runner"
                       },
-                      "calculated_quantity": "0.001"
+                      "calculated_quantity": "0.001",
+                      "trigger_price": "100000",
+                      "stop_loss": "99000",
+                      "take_profit": "103000",
+                      "quantity": "0.001"
                     }
                   },
                   "absent": {
@@ -302,6 +306,32 @@
           "calculated_quantity": {
             "type": "string",
             "format": "exact-decimal"
+          },
+          "trigger_price": {
+            "type": "string",
+            "format": "exact-decimal",
+            "description": "triggerPrice of the cycle's own entry order as read back from Bybit during the apply."
+          },
+          "stop_loss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "exact-decimal",
+            "description": "stopLoss of the cycle's own entry order as read back from Bybit; null when Bybit reports none."
+          },
+          "take_profit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "exact-decimal",
+            "description": "takeProfit of the cycle's own entry order as read back from Bybit; null when Bybit reports none."
+          },
+          "quantity": {
+            "type": "string",
+            "format": "exact-decimal",
+            "description": "qty of the cycle's own entry order as read back from Bybit."
           }
         }
       },

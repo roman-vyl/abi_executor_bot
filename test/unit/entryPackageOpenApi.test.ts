@@ -33,6 +33,12 @@ test("OpenAPI examples conform to runtime request and response contracts", async
       completePackageApplied: true,
       appliedDesiredEntry: applied.applied_desired_entry,
       calculatedQuantity: applied.calculated_quantity,
+      entryOrder: {
+        triggerPrice: applied.trigger_price,
+        stopLoss: applied.stop_loss,
+        takeProfit: applied.take_profit,
+        qty: applied.quantity,
+      },
     }).body,
     applied,
   );
