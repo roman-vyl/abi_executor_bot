@@ -34,6 +34,8 @@ test("OpenAPI examples conform to runtime request and response contracts", async
       appliedDesiredEntry: applied.applied_desired_entry,
       calculatedQuantity: applied.calculated_quantity,
       entryOrder: {
+        orderLinkId: applied.order_link_id,
+        orderId: applied.order_id,
         triggerPrice: applied.trigger_price,
         stopLoss: applied.stop_loss,
         takeProfit: applied.take_profit,

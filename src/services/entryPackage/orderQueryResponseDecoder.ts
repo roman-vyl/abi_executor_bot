@@ -3,6 +3,11 @@ import type { PositionBindingGeometry } from "../../domain/positionScope.js";
 import { encodeBybitPositionIdx } from "../../exchange/bybitOrderMapper.js";
 
 export type BybitOrderView = {
+  // Equal to the queried orderLinkId: a row with any other value is rejected.
+  orderLinkId: string;
+  // Bybit's own order id, or "" when the row carries no usable one. Never
+  // part of the identity check, so its absence cannot fail a confirmation.
+  orderId: string;
   orderStatus: string;
   triggerPrice: string;
   qty: string;
@@ -140,9 +145,13 @@ export function decodeOrderQueryResponse(input: {
     return { kind: "protocol_failure", reason: "invalid_average_price" };
   }
 
+  const orderId = typeof record.orderId === "string" ? record.orderId : "";
+
   return {
     kind: "found",
     item: {
+      orderLinkId: expected.orderLinkId,
+      orderId,
       orderStatus,
       triggerPrice: triggerPriceField.value,
       qty: qtyField.value,

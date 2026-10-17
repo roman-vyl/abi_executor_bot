@@ -26,6 +26,8 @@ test("pending order is confirmed from matching identity, recognized state, and q
   assert.deepEqual(outcome, {
     kind: "pending_confirmed",
     order: {
+      orderLinkId: "link-1",
+      orderId: "",
       orderStatus: "New",
       triggerPrice: "100000",
       qty: "0.001",
@@ -35,6 +37,31 @@ test("pending order is confirmed from matching identity, recognized state, and q
       avgPrice: "",
     },
   });
+});
+
+test("the confirmed order view carries Bybit's orderId from the read-back row", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "New", orderId: "bybit-1", triggerPrice: "100000", qty: "0.001" },
+  ]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.equal(outcome.kind, "pending_confirmed");
+  assert.equal(outcome.kind === "pending_confirmed" && outcome.order.orderId, "bybit-1");
+  assert.equal(outcome.kind === "pending_confirmed" && outcome.order.orderLinkId, "link-1");
+});
+
+test("a non-string orderId is not reported and does not change the confirmation", async () => {
+  const bybit = new FakeBybitAdapter();
+  bybit.orderByLinkIdResponse = listResponse([
+    { orderStatus: "New", orderId: 123, triggerPrice: "100000", qty: "0.001" },
+  ]);
+
+  const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+  assert.equal(outcome.kind, "pending_confirmed");
+  assert.equal(outcome.kind === "pending_confirmed" && outcome.order.orderId, "");
 });
 
 test("real Demo regression: Bybit canonical price text confirms the accepted order", async () => {
@@ -421,6 +448,7 @@ function listResponse(
     orderStatus: string;
     symbol?: string;
     orderLinkId?: string;
+    orderId?: unknown;
     triggerPrice?: string;
     qty?: string;
     stopLoss?: string;

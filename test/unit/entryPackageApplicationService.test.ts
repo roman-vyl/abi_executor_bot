@@ -156,6 +156,72 @@ test("a repeat PUT returns the order values from its own fresh read", async () =
   });
 });
 
+test("applied response identifies the order from the read-back, not from the create response", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.createOrder = async (payload) => {
+      bybit.createOrderCalls.push(payload);
+      return { retCode: 0, result: { orderId: "create-id", orderLinkId: "fake-create" } };
+    };
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderId: "read-id" })]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.order_id, "read-id");
+    assert.equal(body.order_link_id, repo.get("instance-1", "cycle-1")?.order_link_id);
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 1);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+  });
+});
+
+test("a lost create response still yields the confirmed order id on a repeat PUT", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const original = bybit.createOrder.bind(bybit);
+    bybit.createOrder = async () => {
+      throw new Error("transport failure");
+    };
+    assertInternalError(await service.apply(makeCommand()));
+    assert.equal(repo.get("instance-1", "cycle-1")?.order_id, null);
+
+    bybit.createOrder = original;
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ orderId: "read-id" })]);
+    const second = await service.apply(makeCommand());
+
+    assertApplied(second, "0.001");
+    assert.equal((second.body as Record<string, unknown>).order_id, "read-id");
+    assert.equal(bybit.createOrderCalls.length, 0);
+  });
+});
+
+test("an already filled order reports its own order id and link id", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      { ...liveOrder({ orderStatus: "Filled", orderId: "read-id" }), cumExecQty: "0.001" },
+    ]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.order_id, "read-id");
+    assert.equal(typeof body.order_link_id, "string");
+  });
+});
+
+test("a read-back row without orderId omits order_id and keeps the applied outcome", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal("order_id" in body, false);
+    assert.equal(typeof body.order_link_id, "string");
+  });
+});
+
 test("identical repeated APPLY revalidates without a duplicate create", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -1728,6 +1794,7 @@ function liveOrder(
     stopLoss: string;
     takeProfit: string;
     positionIdx: number;
+    orderId: string;
   }> = {},
 ) {
   return {

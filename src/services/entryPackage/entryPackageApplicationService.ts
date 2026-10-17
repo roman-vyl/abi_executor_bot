@@ -876,6 +876,8 @@ export class EntryPackageApplicationService {
       appliedDesiredEntry: desiredEntry,
       calculatedQuantity,
       entryOrder: {
+        orderLinkId: order.orderLinkId,
+        orderId: order.orderId,
         triggerPrice: order.triggerPrice,
         stopLoss: order.stopLoss,
         takeProfit: order.takeProfit,

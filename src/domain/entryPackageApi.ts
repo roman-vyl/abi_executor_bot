@@ -36,6 +36,10 @@ export type EntryPackageAppliedResponse = {
   stop_loss?: string | null;
   take_profit?: string | null;
   quantity?: string;
+  // Identity of that same order: its orderLinkId and, when Bybit reported
+  // one in the read-back, its orderId.
+  order_link_id?: string;
+  order_id?: string;
 };
 
 export type EntryPackageAbsentResponse = {
@@ -95,6 +99,8 @@ export type AppliedAcknowledgementInput = {
 // Raw Bybit text of the cycle's own entry order, as decoded by the
 // confirmation read.
 export type AppliedEntryOrderValues = {
+  orderLinkId: string;
+  orderId: string;
   triggerPrice: string;
   stopLoss: string;
   takeProfit: string;
@@ -217,7 +223,10 @@ export function serializeAppliedEntryPackage(
 
 function serializeEntryOrderValues(
   order: AppliedEntryOrderValues,
-): Pick<EntryPackageAppliedResponse, "trigger_price" | "stop_loss" | "take_profit" | "quantity"> {
+): Pick<
+  EntryPackageAppliedResponse,
+  "trigger_price" | "stop_loss" | "take_profit" | "quantity" | "order_link_id" | "order_id"
+> {
   return {
     ...(isExactDecimalText(order.triggerPrice) ? { trigger_price: order.triggerPrice } : {}),
     ...(order.stopLoss === "" || isExactDecimalText(order.stopLoss)
@@ -227,6 +236,8 @@ function serializeEntryOrderValues(
       ? { take_profit: protectionOrNull(order.takeProfit) }
       : {}),
     ...(isExactDecimalText(order.qty) ? { quantity: order.qty } : {}),
+    ...(order.orderLinkId !== "" ? { order_link_id: order.orderLinkId } : {}),
+    ...(order.orderId !== "" ? { order_id: order.orderId } : {}),
   };
 }
 
