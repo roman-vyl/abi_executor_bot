@@ -184,6 +184,8 @@ function validateEntryPackageDocument(document) {
   assert.deepEqual(Object.keys(appliedProperties).sort(), [
     "applied_desired_entry",
     "calculated_quantity",
+    "order_id",
+    "order_link_id",
     "quantity",
     "status",
     "stop_loss",

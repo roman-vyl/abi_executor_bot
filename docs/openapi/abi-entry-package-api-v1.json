@@ -95,7 +95,9 @@
                       "trigger_price": "100000",
                       "stop_loss": "99000",
                       "take_profit": "103000",
-                      "quantity": "0.001"
+                      "quantity": "0.001",
+                      "order_link_id": "abi-runtime-owned-link-id",
+                      "order_id": "bybit-order-id"
                     }
                   },
                   "absent": {
@@ -332,6 +334,16 @@
             "type": "string",
             "format": "exact-decimal",
             "description": "qty of the cycle's own entry order as read back from Bybit."
+          },
+          "order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "orderLinkId of the cycle's own entry order, as confirmed by the read-back."
+          },
+          "order_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Bybit orderId of the cycle's own entry order from the read-back row; omitted when Bybit did not report one."
           }
         }
       },
