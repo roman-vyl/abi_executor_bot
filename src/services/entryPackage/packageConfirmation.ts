@@ -40,9 +40,9 @@ export type ExpectedPackageFields = {
 };
 
 export type PackageConfirmationOutcome =
-  | { kind: "pending_confirmed" }
-  | { kind: "full_fill"; observation: EarlyExecutionObservation }
-  | { kind: "partial_fill"; observation: EarlyExecutionObservation }
+  | { kind: "pending_confirmed"; order: BybitOrderView }
+  | { kind: "full_fill"; observation: EarlyExecutionObservation; order: BybitOrderView }
+  | { kind: "partial_fill"; observation: EarlyExecutionObservation; order: BybitOrderView }
   | { kind: "terminal_without_fill" }
   // Genuinely absent from both realtime and history, every query in the
   // bounded budget answering cleanly (no network/parse errors). Distinct
@@ -111,15 +111,15 @@ export async function confirmEntryPackage(input: {
 
       if (FILLED_STATUSES.has(item.orderStatus)) {
         if (fillQuantityPlausible(item, input.expected)) {
-          return { kind: "full_fill", observation: toObservation(item, input.expected.qty) };
+          return { kind: "full_fill", observation: toObservation(item, input.expected.qty), order: item };
         }
       } else if (PARTIAL_FILL_STATUSES.has(item.orderStatus)) {
         if (fillQuantityPlausible(item, input.expected)) {
-          return { kind: "partial_fill", observation: toObservation(item, input.expected.qty) };
+          return { kind: "partial_fill", observation: toObservation(item, input.expected.qty), order: item };
         }
       } else if (LIVE_UNFILLED_STATUSES.has(item.orderStatus)) {
         if (quantityMatches(item, input.expected)) {
-          return { kind: "pending_confirmed" };
+          return { kind: "pending_confirmed", order: item };
         }
         // Quantity not yet consistent — retry within the bounded window
         // rather than confirming a different-sized order.
@@ -149,8 +149,8 @@ export async function confirmEntryPackage(input: {
         if (fillQuantityPlausible(item, input.expected)) {
           const observation = toObservation(item, input.expected.qty);
           return compareDecimal(cumulativeFilledQty, input.expected.qty) >= 0
-            ? { kind: "full_fill", observation }
-            : { kind: "partial_fill", observation };
+            ? { kind: "full_fill", observation, order: item }
+            : { kind: "partial_fill", observation, order: item };
         }
         sawInconclusiveFinding = true;
       } else if (TERMINAL_WITHOUT_FILL_STATUSES.has(item.orderStatus)) {

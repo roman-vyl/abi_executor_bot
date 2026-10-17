@@ -75,6 +75,87 @@ test("real Demo regression: create succeeds when Bybit read-back uses canonical 
   });
 });
 
+test("applied response carries the own entry order values as read back, not the request values", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({
+        orderStatus: "Untriggered",
+        triggerPrice: "63619.7",
+        stopLoss: "64619.7",
+        takeProfit: "61619.7",
+      }),
+    ]);
+
+    const result = await service.apply(
+      makeCommand({
+        desiredEntry: makeDesiredEntry({
+          side: "short",
+          planned_entry_price: "63619.700087721256",
+          initial_stop_price: "64619.700087721256",
+          initial_take_price: "61619.700087721256",
+        }),
+      }),
+    );
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.trigger_price, "63619.7");
+    assert.equal(body.stop_loss, "64619.7");
+    assert.equal(body.take_profit, "61619.7");
+    assert.equal(body.quantity, "0.001");
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 1);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+    assert.equal(bybit.getExecutionListCalls.length, 0);
+  });
+});
+
+test("applied response reports empty or zero stop-loss and take-profit as null", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ stopLoss: "0", takeProfit: "" })]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.stop_loss, null);
+    assert.equal(body.take_profit, null);
+    assert.equal(body.trigger_price, "100000");
+    assert.equal(body.quantity, "0.001");
+  });
+});
+
+test("an already filled own entry order is applied with the order values", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      { ...liveOrder({ orderStatus: "Filled" }), cumExecQty: "0.001", avgPrice: "100001" },
+    ]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.trigger_price, "100000");
+    assert.equal(body.stop_loss, "99000");
+    assert.equal(body.take_profit, "103000");
+    assert.equal(body.quantity, "0.001");
+    assert.equal("avg_price" in body || "average_entry_price" in body || "order_id" in body, false);
+  });
+});
+
+test("a repeat PUT returns the order values from its own fresh read", async () => {
+  await withService(async ({ service, bybit }) => {
+    bybit.orderByLinkIdResponse = orderList([liveOrder()]);
+    await service.apply(makeCommand());
+
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ stopLoss: "98000" })]);
+    const second = await service.apply(makeCommand());
+
+    assertApplied(second, "0.001");
+    assert.equal((second.body as Record<string, unknown>).stop_loss, "98000");
+    assert.equal(bybit.createOrderCalls.length, 1);
+  });
+});
+
 test("identical repeated APPLY revalidates without a duplicate create", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);

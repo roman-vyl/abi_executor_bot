@@ -33,6 +33,7 @@ import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
+import type { BybitOrderView } from "./orderQueryResponseDecoder.js";
 import {
   classifyEntryOrderForRecovery,
   classifyEntryOrderTerminality,
@@ -760,7 +761,7 @@ export class EntryPackageApplicationService {
         pending_action: null,
         updated_at: now,
       });
-      return this.appliedResult(command, desiredEntry, record.calculated_quantity ?? "");
+      return this.appliedResult(command, desiredEntry, record.calculated_quantity ?? "", confirmation.order);
     }
 
     if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
@@ -772,7 +773,7 @@ export class EntryPackageApplicationService {
         early_execution_observation: confirmation.observation,
         updated_at: now,
       });
-      return this.appliedResult(command, desiredEntry, record.calculated_quantity ?? "");
+      return this.appliedResult(command, desiredEntry, record.calculated_quantity ?? "", confirmation.order);
     }
 
     if (confirmation.kind === "terminal_without_fill") {
@@ -866,6 +867,7 @@ export class EntryPackageApplicationService {
     command: EntryPackageCommand,
     desiredEntry: DesiredEntryDto,
     calculatedQuantity: string,
+    order: BybitOrderView,
   ): EntryPackageHttpResult {
     return serializeAppliedEntryPackage({
       strategyInstanceId: command.strategyInstanceId,
@@ -873,6 +875,12 @@ export class EntryPackageApplicationService {
       completePackageApplied: true,
       appliedDesiredEntry: desiredEntry,
       calculatedQuantity,
+      entryOrder: {
+        triggerPrice: order.triggerPrice,
+        stopLoss: order.stopLoss,
+        takeProfit: order.takeProfit,
+        qty: order.qty,
+      },
     });
   }
 }

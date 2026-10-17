@@ -23,7 +23,18 @@ test("pending order is confirmed from matching identity, recognized state, and q
 
   const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
-  assert.deepEqual(outcome, { kind: "pending_confirmed" });
+  assert.deepEqual(outcome, {
+    kind: "pending_confirmed",
+    order: {
+      orderStatus: "New",
+      triggerPrice: "100000",
+      qty: "0.001",
+      stopLoss: "99000",
+      takeProfit: "103000",
+      cumExecQty: "",
+      avgPrice: "",
+    },
+  });
 });
 
 test("real Demo regression: Bybit canonical price text confirms the accepted order", async () => {
@@ -40,7 +51,8 @@ test("real Demo regression: Bybit canonical price text confirms the accepted ord
 
   const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
 
-  assert.deepEqual(outcome, { kind: "pending_confirmed" });
+  assert.equal(outcome.kind, "pending_confirmed");
+  assert.equal(outcome.kind === "pending_confirmed" && outcome.order.triggerPrice, "63619.7");
 });
 
 test("a live order with a different quantity still fails closed", async () => {
