@@ -24,7 +24,7 @@ Facts from the code on `main` (3d46c76):
   "status": "entry_package_applied",
   "applied_desired_entry": { … },
   "calculated_quantity": "…",
-  "planned_entry_price": "…",
+  "trigger_price": "…",
   "stop_loss": "…",
   "take_profit": "…",
   "quantity": "…"
@@ -34,9 +34,9 @@ Facts from the code on `main` (3d46c76):
 Values are the order's own `triggerPrice`, `stopLoss`, `takeProfit` and `qty` as read
 back, as exact-decimal text. `stop_loss` and `take_profit` are `null` when Bybit
 reports no value (empty or zero). A field the read did not provide is omitted. Nothing
-is estimated or copied from the request. `planned_entry_price` is the entry price of
-the order as Bybit holds it, so it can differ in form from
-`applied_desired_entry.planned_entry_price` (the request echo).
+is estimated or copied from the request. `trigger_price` is named after its source, Bybit's `triggerPrice` of the order. It is
+deliberately not called `planned_entry_price`, which in this API already means the Engine
+intent in `applied_desired_entry`.
 
 ### D2. Source and attribution
 

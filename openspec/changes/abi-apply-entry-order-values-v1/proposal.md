@@ -12,7 +12,7 @@ what was actually placed. Nothing else changes.
 
 - The `entry_package_applied` response gains four optional fields describing the
   trade cycle's own entry order as read back from Bybit during the apply:
-  `planned_entry_price`, `stop_loss`, `take_profit`, `quantity`.
+  `trigger_price`, `stop_loss`, `take_profit`, `quantity`.
 - All four come only from the read of that cycle's own entry order (found by its own
   `orderLinkId`). None comes from Bybit's aggregated position.
 - No additional Bybit request is made. The read that confirms the apply already

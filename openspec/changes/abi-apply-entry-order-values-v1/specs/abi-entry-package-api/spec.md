@@ -2,14 +2,14 @@
 
 ### Requirement: Applied response reports four values of the cycle's own entry order
 
-The `entry_package_applied` response MUST include `planned_entry_price`, `stop_loss`,
+The `entry_package_applied` response MUST include `trigger_price`, `stop_loss`,
 `take_profit` and `quantity` of the requested trade cycle's own entry order as read back
 from Bybit during the apply, and MUST NOT take any of them from Bybit's aggregated
 position or add a Bybit request to obtain them.
 
 #### Scenario: Pending entry order
 - **WHEN** ABI confirms the cycle's own entry order live
-- **THEN** the response carries that order's entry price, stop-loss, take-profit and quantity as read back
+- **THEN** the response carries that order's trigger price, stop-loss, take-profit and quantity as read back
 
 #### Scenario: Aggregated position differs
 - **WHEN** Bybit's aggregated position for the symbol has a different size, stop-loss or take-profit than the cycle's own order
