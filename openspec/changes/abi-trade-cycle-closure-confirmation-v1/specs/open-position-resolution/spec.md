@@ -48,32 +48,53 @@ For a durably closed record, `closure` SHALL be the record's stored closure when
 
 ## ADDED Requirements
 
-### Requirement: Completion of a filled cycle is proven only from this cycle's own orders
-For a live-query-admissible record whose own entry order is terminal with cumulative filled quantity `Q > 0`, ABI SHALL prove completion only as follows, and SHALL NOT use the aggregate position as proof:
+### Requirement: Own protection is classified into exactly one state class
+For a cycle whose own entry is terminal with cumulative filled quantity `Q`, ABI SHALL classify the result of resolving own attached protection (attribution by `parentOrderLinkId` equal to the entry `orderLinkId`, role by `stopOrderType`) into exactly one class:
 
-- `runtime_signal`: this cycle's own close order is classified as fully executed for exactly `Q`;
-- `stop_loss` / `take_profit`: own protection resolves as an attributed pair by `parentOrderLinkId` equal to the entry `orderLinkId`; exactly one leg has `orderStatus` `Filled`, `leavesQty` `0` and `cumExecQty` equal to `Q`; the other leg is terminal without fill; and the `Trade` executions of the filled leg's `orderId` sum to exactly `Q`. The leg's role SHALL come from `stopOrderType`.
+- active: an attributed pair, both legs with zero executed quantity, at least one leg live;
+- neutralized: an attributed pair, both legs with zero executed quantity and terminal without fill; or no candidates when `Q` is zero;
+- completed: an attributed pair where one leg is `Filled` with `leavesQty` zero and `cumExecQty` equal to `Q`, the other leg is terminal without fill with zero executed quantity, and the filled leg's `Trade` executions sum to exactly `Q`;
+- partial or contradictory: an attributed pair with any other executed quantity on either leg;
+- unknown: no candidates while `Q` is positive, or any ambiguous result (`partial_pair`, `query_failed`, `inconsistent_duplicate`, `duplicate_role`, `extra_candidates`, `unclassified_role`).
 
-Both legs filled, any partial fill of a leg, a leg fill that differs from `Q`, an execution sum that differs from `Q`, or a protection fill together with an executed own close order SHALL be contradictory. Missing or lagging evidence SHALL be unproven. Contradictory or unproven evidence SHALL yield `internal_error` with no durable write.
+No candidates and `partial_pair` SHALL NOT be treated as proof that protection did not execute.
 
-#### Scenario: Stop child fully filled
-- **WHEN** the entry filled `0.001`, the own stop child is `Filled` with `cumExecQty` `0.001` and `leavesQty` `0`, the take child is `Deactivated`, and the stop's `Trade` executions sum to `0.001`
-- **THEN** completion is proven with reason `stop_loss`
+#### Scenario: Demo stop exit
+- **WHEN** the stop child is `Filled` with `cumExecQty` equal to `Q` and `leavesQty` zero, the take child is `Deactivated`, and the stop's `Trade` executions sum to `Q`
+- **THEN** the class is completed with role stop
+
+#### Scenario: Partially executed leg
+- **WHEN** a leg is `PartiallyFilled`, or filled for a quantity other than `Q`
+- **THEN** the class is partial or contradictory
+
+#### Scenario: Children not visible
+- **WHEN** `Q` is positive and no own child is found
+- **THEN** the class is unknown
+
+### Requirement: Completion is proven only by full execution of the pair's own order
+ABI SHALL prove completion only as `runtime_signal`, when the pair's own close order is fully executed for exactly `Q`, or as `stop_loss` / `take_profit`, when the protection class is completed. A protection execution of any size together with an executed own close order, or a protection class of partial or contradictory, SHALL be contradictory. The aggregate position, its size, a received Close command and an accepted cancel SHALL NOT be proof. Contradictory or unproven evidence SHALL yield `internal_error` with no durable write.
 
 #### Scenario: History not yet propagated
-- **WHEN** the scope is flat but neither protection leg nor an own close order shows a fill yet
+- **WHEN** the scope is flat but neither protection nor an own close order shows an execution yet
 - **THEN** ABI returns `internal_error` and writes nothing
 
-#### Scenario: Partial protection fill
-- **WHEN** a protection leg is `PartiallyFilled` or filled for less than `Q`
-- **THEN** ABI returns `internal_error` and writes nothing
+### Requirement: The lookup runs the proof whenever the pair's own orders may have ended the cycle
+For a live-query-admissible record with `Q` positive, ABI SHALL run the completion proof when the pair has a close order identity, independently of the aggregate position; when the aggregate query reports no position; or when the protection class is completed or partial or contradictory. Otherwise the existing open answer SHALL be kept.
 
-#### Scenario: Sibling position does not hide an own exit
-- **WHEN** a same-side sibling keeps a position in the scope and this cycle's own stop is proven fully filled
-- **THEN** ABI returns the `stop_loss` closure, not `position_open: true`
+#### Scenario: Own close executed while a sibling keeps the slot open
+- **WHEN** the pair's own close order executed for `Q` and a same-side sibling still holds a position in the slot
+- **THEN** ABI returns the `runtime_signal` closure, not `position_open: true`
 
-### Requirement: A proven completion is recorded durably before it is reported
-On a proven completion ABI SHALL, under the pair's mutex, write `status: "terminal_closed"` with the closure reason and identifiers on the correlation record, and release the physical scope as the existing terminal write does, before returning the closure. A failed write SHALL yield `internal_error`.
+#### Scenario: Sibling position does not hide an own stop exit
+- **WHEN** a same-side sibling keeps a position and this cycle's protection class is completed
+- **THEN** ABI returns the `stop_loss` closure
+
+#### Scenario: Active protection on an open position
+- **WHEN** protection is active, the pair has no close order and the aggregate shows a same-side position
+- **THEN** ABI returns `position_open: true` as today
+
+### Requirement: A proven completion is recorded durably before it is reported and is never re-derived
+On a proven completion ABI SHALL, under the pair's mutex, save `status: "terminal_closed"` together with the closure reason and identifiers in one record write before answering. The closure fields SHALL exist only on `terminal_closed` records and SHALL NOT change afterwards. Leaving the active statuses releases the physical scope, so the scope SHALL be released only after proof. A failed write SHALL yield `internal_error`. Later lookups SHALL answer from the record without exchange calls.
 
 #### Scenario: Repeated lookup after proof
 - **WHEN** completion was proven and recorded on an earlier lookup

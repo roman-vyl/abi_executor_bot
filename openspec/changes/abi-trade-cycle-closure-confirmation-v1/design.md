@@ -1,50 +1,91 @@
 ## Context
 
-Evidence: Bybit demo read-only check of cycle `2beec9fd` (raw responses on the Mac, `BBB_data/archive/integration-2026-10-17/bybit-history-cycle-2beec9fd.json`). Existing attribution primitive: `resolveOwnAttachedProtection` (`native-partial-protection-attribution`), which already links children by `parentOrderLinkId === entry orderLinkId` and reads role from `stopOrderType`.
+Two independent mechanisms can end a filled cycle: Bybit's native protection (stop or take-profit child of the entry, `tpslMode: "Partial"`) and Runtime's Close command. They race. Today ABI proves only its own close order, so a protection exit makes the lookup fail forever, and Close can misread a filled protection leg.
+
+Evidence: Bybit demo read-only check of cycle `2beec9fd` (raw responses on the Mac, `BBB_data/archive/integration-2026-10-17/bybit-history-cycle-2beec9fd.json`): entry `Filled` 0.001; stop child `Filled`, own `orderLinkId` empty, `parentOrderLinkId` = entry `orderLinkId`, stable `orderId`, `stopOrderType: "PartialStopLoss"`, `cumExecQty` 0.001, `leavesQty` 0, one `Trade` execution of 0.001; take child `Deactivated` in the same second.
+
+Existing code reused (main `97a0222`): `CloseApplicationService.neutralizeEntry`, `resolveOwnExposure` (`confirmEntryPackage`), `resolveOwnAttachedProtection`, `neutralizeOwnProtection`, `classifyOwnCloseOrderOutcome`, `aggregateIsCompatible`, `closePositiveExposure`, `verifyTerminalPostconditions`, `persistTerminal`; `OpenPositionResolutionService` status buckets and own fill facts; the pair mutex.
+
+## Principle
+
+Completion of a cycle is proven only by full execution of an order ABI attributes to that exact pair (`strategy_instance_id`, `trade_cycle_id`). The aggregate position, its size change, receipt of a Close command, and an accepted cancel are never proof. V1 has three reasons: `stop_loss`, `take_profit`, `runtime_signal`. Anything ABI cannot prove is an error with no durable write.
 
 ## Decisions
 
-### D1. One completion proof, three reasons
+### D1. Protection state classes
 
-A pure-query module `proveOwnCycleCompletion(record, ownExposure)` returns `proven(reason, ids)`, `not_proven`, or `contradictory`. Inputs are this cycle's own orders only; the aggregate position is never proof.
+`Q` is the cycle's own cumulative entry fill (`confirmEntryPackage`), with the entry order terminal. Each `resolveOwnAttachedProtection` result maps to exactly one class (child `cumExecQty` is added to the decoder and to `AttachedProtectionLeg`):
 
-Preconditions for any proof: the record's own entry order is terminal (cannot add exposure) and its own cumulative filled quantity `Q` is positive.
+| Result | Class |
+|---|---|
+| `attributed`, both legs `cumExecQty = 0`, at least one leg live (`New`, `Untriggered`, `Triggered`) | **active**: may be neutralized |
+| `attributed`, both legs `cumExecQty = 0`, both terminal without fill (`Deactivated`, `Cancelled`, `Rejected`) | **neutralized** |
+| `attributed`, one leg `Filled`, `leavesQty = 0`, `cumExecQty = Q`; other leg terminal without fill, `cumExecQty = 0`; `Trade` executions of the filled leg sum to `Q` | **completed** (`stop_loss` or `take_profit` by `stopOrderType`) |
+| `attributed` with any other fill (a leg `PartiallyFilled`, filled ≠ `Q`, both legs with fills, executions ≠ `Q`, filled leg while the other is still live) | **partial or contradictory** |
+| `none` with `Q = 0` | **neutralized** (nothing was attached) |
+| `none` with `Q > 0`; `ambiguous` (`partial_pair`, `query_failed`, `inconsistent_duplicate`, `duplicate_role`, `extra_candidates`, `unclassified_role`) | **unknown** |
 
-- `runtime_signal`: `close_order_link_id` is set and its own close order is classified `matched` for `Q` (existing `classifyOwnCloseOrderOutcome`). Ids: `order_link_id = close_order_link_id`, `order_id` from that order's row, `parent_order_link_id = null`.
-- `stop_loss` / `take_profit`: `resolveOwnAttachedProtection` returns `attributed`; exactly one leg has `orderStatus: "Filled"`, `leavesQty = 0`, `cumExecQty = Q`; the other leg is terminal without fill (`Deactivated`, `Cancelled`); the execution list for the filled leg's `orderId` sums `execQty` of `Trade` rows to exactly `Q`. Ids: `order_id` = leg `orderId`, `order_link_id = null` (a native child's own link id is empty), `parent_order_link_id` = entry `orderLinkId`.
-- `contradictory`: both legs filled; any leg `PartiallyFilled` or filled with `cumExecQty ≠ Q`; a protection fill together with a matched or partially filled own close order; execution sum ≠ `Q`.
-- `not_proven`: anything else, including history lag (`none`, `partial_pair`, missing executions).
+`none` and `partial_pair` are never proof of absence (history lag; symbol history read is limited to 50 rows). A cycle with no take-profit attaches one child and resolves `partial_pair`; Close already fails closed for it today and V1 does not change that.
 
-Child `cumExecQty` is added to `BybitChildOrderCandidate` and `AttachedProtectionLeg`; a malformed value is a protocol failure of that page, as for other fields.
+### D2. Completion proof
 
-### D2. Durable completion
+`proveOwnCycleCompletion(record, Q)` returns `completed(closure)`, `not_completed`, or `contradictory`:
+- `runtime_signal`: `close_order_link_id` is set and its own close order is classified `matched` for `Q`. `order_id` comes from that order's read-back row, `order_link_id = close_order_link_id`, `parent_order_link_id = null`.
+- `stop_loss` / `take_profit`: the protection class is **completed**. `order_id` = filled leg `orderId`, `order_link_id = null`, `parent_order_link_id` = entry `orderLinkId`.
+- `contradictory`: a protection fill of any size together with a matched or partially executed own close order; or the protection class is **partial or contradictory**.
+- otherwise `not_completed`.
 
-On `proven`, under the pair mutex, ABI writes `status: "terminal_closed"` and `closure_reason`, `closure_order_id`, `closure_order_link_id`, `closure_parent_order_link_id`, then releases the physical scope exactly as the existing terminal write does. A failed write yields `internal_error`. Records without these fields stay readable (same tolerance as `close_order_link_id`).
+### D3. Durable completion and idempotency
 
-### D3. Open-position lookup
+On `completed`, under the pair mutex, ABI writes in one record save `status: "terminal_closed"` with `closure_reason`, `closure_order_id`, `closure_order_link_id`, `closure_parent_order_link_id`. Leaving the active statuses is what releases the physical scope (existing behaviour of `persistTerminal`), so the scope is released only after proof. The closure fields are written only together with `terminal_closed` and never change afterwards. A failed save yields `internal_error`.
 
-- Durably closed bucket: `terminal_closed` with stored closure fields returns that closure. `terminal_closed` without them, but with both `close_order_link_id` and `close_order_id`, returns `runtime_signal` from those. Any other durably closed record returns `closure: null` (no fill was established under this binding).
-- Live bucket, own filled quantity `0`: `position_open: false`, `closure: null` (unchanged).
-- Live bucket, filled: ABI also resolves own protection (`resolveOwnAttachedProtection`, two symbol-scoped reads).
-  - An own protection leg shows any fill, or the aggregate query returns `no_position`: run D1. `proven` → D2, then `position_open: false` + closure. `not_proven` or `contradictory` → `internal_error`, no write. A same-side aggregate row (a sibling's) never hides a proven own exit, because the proof uses only this cycle's own orders.
-  - Otherwise: unchanged (`position_open: true`, `closure: null`, existing side check).
+The existing Runtime-close success path writes the same fields (`runtime_signal`) in its `persistTerminal`.
 
-### D4. Close
+Answers for a `terminal_closed` record, with no exchange call, both for lookup and Close:
+- stored closure fields → that closure;
+- legacy record without them but with `close_order_link_id` and `close_order_id` → `runtime_signal` from those;
+- otherwise → `closure: null` (closed with zero own exposure, or a legacy close whose order id was not read). Runtime has already removed such a cycle.
 
-After the entry is neutralized and `Q` resolved, and before `neutralizeOwnProtection`, ABI runs D1:
-- `proven` → D2, return `trade_cycle_closed` with the closure; no cancel, no close order.
-- `contradictory`, or any own protection leg with a fill but `not_proven` → `internal_error`; no close order is ever dispatched in this state.
-- otherwise → existing pipeline unchanged; its success returns `closure` with `runtime_signal`, or `null` when `Q = 0`.
+`absent` and `terminal_unfilled` answer `closure: null`.
 
-`neutralizeOwnProtection` additionally refuses to treat a leg with any fill as clean terminal absence.
+### D4. Open-position lookup
 
-### D5. Contract
+- Durably closed bucket: D3.
+- Live bucket, `Q = 0`: `position_open: false`, `closure: null` (unchanged).
+- Live bucket, `Q > 0` (entry may still be live): protection is resolved on every lookup of a filled cycle (two symbol-scoped reads). ABI runs the proof when any of these holds: `close_order_link_id` is set (independent of the aggregate, so an executed own close is found while a sibling keeps the slot open); the aggregate query returns `no_position`; the protection class is **completed** or **partial or contradictory**.
+  - `completed` → D3, then `position_open: false` with the closure.
+  - `not_completed` or `contradictory` → `internal_error`, no write. The proof requires a terminal entry order; a live entry with a fill is `not_completed`.
+- Otherwise (no own close order, a same-side aggregate row, protection **active**, **neutralized** or **unknown**): unchanged, `position_open: true`, `closure: null`. This keeps today's answer for an open position whose protection is missing or briefly invisible, so Runtime's protection management keeps working; Close stays safe because D5 refuses to dispatch on **unknown** protection.
 
-`closure` is a required key in both success objects, `null` or an object with exactly the six keys. `reason` ∈ {`stop_loss`, `take_profit`, `runtime_signal`}. `order_link_id` is non-null only for `runtime_signal`; `parent_order_link_id` is non-null only for the two protection reasons; `order_id` is always non-null. `closure` requires `position_open: false`.
+### D5. Close sequence
+
+Steps of `CloseApplicationService.process` in order; only steps 1–3 may run before the first proof, and none of them can change exposure:
+
+1. Existing classification: unknown binding, `terminal_closed` (answer from D3), `absent`/`terminal_unfilled` (existing terminal write, `closure: null`), scope and side checks.
+2. `neutralizeEntry`: cancel this cycle's own entry order if still live and confirm it terminal. This is the only cancel allowed before the proof; it removes a source of new exposure and never reduces any.
+3. `resolveOwnExposure` → `Q`.
+4. **First proof** (D2). `completed` → D3 and return `trade_cycle_closed` with the closure; no protection cancel, no close order. `contradictory` → `internal_error`.
+5. Protection class (D1): **unknown** or **partial or contradictory** → `internal_error`. **neutralized** → step 7. **active** → step 6.
+6. `neutralizeOwnProtection` cancels the live legs. An accepted cancel is not proof that the leg did not fill. After the cancels ABI re-resolves protection and requires class **neutralized**. Class **completed** here means the leg filled during neutralization: D3 and return that closure. Any other class, including `none` after a cancel, → `internal_error`. This replaces today's acceptance of `none` after an accepted cancel and today's treatment of a `Filled` leg as terminal absence.
+7. `close_order_link_id` already set (re-drive) → existing outcome check of that order; otherwise `aggregateIsCompatible` and the existing dispatch of one reduce-only market order for exactly `Q`.
+8. Existing execution check of the own close order (`matched` for `Q`, or `close_execution_incomplete`).
+9. `verifyTerminalPostconditions` with protection required in class **neutralized** (not merely terminal), then D3 with `runtime_signal`.
+
+A market close order is never dispatched when any of these holds: the first proof is `completed` or `contradictory`; protection is **unknown**, **partial or contradictory**, or **completed**; protection after neutralization is anything but **neutralized**; any own protection leg shows `cumExecQty > 0`; the own entry is not proven terminal; `Q` is not resolved; the record is durably closed; or a previously dispatched own close order's fate is unconfirmed (existing rule).
+
+### D6. Contract
+
+`closure` is a required key in both success objects after ABI ships: `null`, or an object with exactly `strategy_instance_id`, `trade_cycle_id` (equal to the path), `reason`, `order_id`, `order_link_id`, `parent_order_link_id`. `reason` ∈ {`stop_loss`, `take_profit`, `runtime_signal`}; `order_id` always non-null; `order_link_id` non-null only for `runtime_signal`; `parent_order_link_id` non-null only for protection reasons. A lookup with a closure has `position_open: false` and null fill facts. Execution price and time are not in V1. Rollout: Runtime first (accepts the key or its absence), then ABI.
+
+## Multiple strategies on one slot
+
+Every proof step reads only orders attributed to the pair: protection by `parentOrderLinkId`, close by the pair's own `close_order_link_id`, fills by the pair's own entry. A sibling's position neither keeps this cycle open (D4) nor justifies a close order: Close dispatches only for `Q` after this cycle's own protection is proven neutralized without fill, so a protection exit can never be followed by a market order against the sibling's exposure.
+
+## Out of V1
+
+Closing a remainder after a partial protection fill, manual closes, liquidation, websocket monitoring, entry-cycle recovery for a protection exit, execution price and time.
 
 ## Risks
 
-- Bybit history lag right after a fill: lookup returns `internal_error` and Runtime retries next bar. Accepted.
-- Multi-fill protection legs are not proven on demo; they resolve through the execution sum or fail closed.
-- The lookup gains two Bybit reads per open cycle per bar. Runtime's lookup timeout is 5 s and timed out 8 times overnight on 2026-10-17; a timeout only skips the bar.
-- Rollout: Runtime must accept `closure` first.
+- History lag or a symbol history deeper than 50 rows → `internal_error`; Runtime retries on the next bar or the next recovery attempt. Once proven, the stored closure removes further exchange reads.
+- The lookup gains two Bybit reads per filled cycle per bar against Runtime's 5 s timeout (8 timeouts overnight on 2026-10-17); a timeout only skips the bar.

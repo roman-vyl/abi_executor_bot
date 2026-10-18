@@ -9,8 +9,9 @@ The same demo check proved the facts are available: the stop child stays in orde
 - ABI proves a cycle's completion for exactly three reasons: `stop_loss` (own native stop fully filled), `take_profit` (own native take-profit fully filled), `runtime_signal` (own close order fully filled, as today).
 - The open-position success response gains `closure`: `null` when the position is open or the entry never filled; an object `{strategy_instance_id, trade_cycle_id, reason, order_id, order_link_id, parent_order_link_id}` when completion is proven.
 - A filled entry without a proven completion stays `internal_error`. Partial, ambiguous or contradictory evidence is always `internal_error` with no durable write.
-- A proven completion is durably recorded on the correlation record (`terminal_closed` plus the closure fields). Later lookups and closes answer from the record with no exchange call.
-- Close: before any close order, ABI checks own protection. A proven protection exit terminalizes the record and returns `trade_cycle_closed` with no new order. Any `Filled` or `PartiallyFilled` own protection leg without a full proof blocks every close order (`internal_error`).
+- A proven completion is durably recorded on the correlation record (`terminal_closed` plus the closure fields). Later lookups and closes answer from the record with no exchange call and no new order.
+- An own close order that executed is checked even while a sibling keeps the slot open.
+- Close: after neutralizing its own live entry order and resolving its own filled quantity, ABI checks completion before touching protection. A protection exit, found before or during protection neutralization, returns `trade_cycle_closed` with that reason and no close order. Partial or unknown protection state blocks every close order. An accepted cancel is never proof that a leg did not fill.
 - Close success gains the same `closure` field.
 - Execution price and time are not part of the contract.
 
