@@ -28,6 +28,7 @@ import {
   confirmEntryOrderNeutralized,
   confirmEntryPackage,
   LIVE_UNFILLED_STATUSES,
+  resolveFirstAttributableFillAtMs,
 } from "../entryPackage/packageConfirmation.js";
 import type { AttachedProtectionResolution } from "../protection/nativeProtectionAttribution.js";
 import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
@@ -395,13 +396,17 @@ export class CloseApplicationService {
     protectionProof: ProtectionNeutralizationProof,
   ): Promise<PositionManagementHttpResult> {
     let current = record;
+    // Set when this request itself dispatched and Bybit acknowledged the
+    // order: a not_found right after it is propagation lag, never absence.
+    let acknowledgedThisRequest = false;
 
     if (current.close_order_link_id === null) {
       const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
       if (dispatched === undefined) {
         return internalErrorResult();
       }
-      current = dispatched;
+      current = dispatched.record;
+      acknowledgedThisRequest = dispatched.acknowledged;
     }
 
     const closeOrderLinkId = current.close_order_link_id;
@@ -411,11 +416,17 @@ export class CloseApplicationService {
 
     let outcome = await this.resolveCloseOrderOutcome(current, closeOrderLinkId, ownExposure);
     if (outcome.kind === "not_found") {
+      // Resend under the same identity only with proof the identity never
+      // reached Bybit: no acknowledged dispatch in this request, a full
+      // bounded window of clean not_found, and no own execution at all.
+      if (acknowledgedThisRequest || !(await this.closeIdentityNeverExecuted(current, closeOrderLinkId))) {
+        return internalErrorResult();
+      }
       const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
       if (dispatched === undefined) {
         return internalErrorResult();
       }
-      current = dispatched;
+      current = dispatched.record;
       outcome = await this.resolveCloseOrderOutcome(current, closeOrderLinkId, ownExposure);
       if (outcome.kind === "not_found") {
         return internalErrorResult();
@@ -452,7 +463,7 @@ export class CloseApplicationService {
     command: CloseCommand,
     record: EntryPackageExecutionRecord,
     ownExposure: string,
-  ): Promise<EntryPackageExecutionRecord | undefined> {
+  ): Promise<{ record: EntryPackageExecutionRecord; acknowledged: boolean } | undefined> {
     const closeOrderLinkId =
       record.close_order_link_id ??
       buildEntryPackageOrderLinkId(command.strategyInstanceId, command.tradeCycleId, "close", record.generation);
@@ -485,7 +496,22 @@ export class CloseApplicationService {
       return undefined;
     }
 
-    return { ...current, close_order_id: readBybitOrderId(result.bybitResponse) };
+    return {
+      record: { ...current, close_order_id: readBybitOrderId(result.bybitResponse) },
+      acknowledged: isAcknowledged(result.bybitResponse),
+    };
+  }
+
+  // The own close identity has no execution at all: the complete paged
+  // execution list for that orderLinkId is empty.
+  private async closeIdentityNeverExecuted(record: EntryPackageExecutionRecord, closeOrderLinkId: string): Promise<boolean> {
+    const executions = await resolveFirstAttributableFillAtMs({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      orderLinkId: closeOrderLinkId,
+    });
+    return executions.kind === "no_executions_found";
   }
 
   private resolveCloseOrderOutcome(record: EntryPackageExecutionRecord, closeOrderLinkId: string, ownExposure: string) {

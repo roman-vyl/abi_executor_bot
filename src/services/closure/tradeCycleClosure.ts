@@ -9,6 +9,7 @@ import {
   classifyOwnCloseOrderOutcome,
   FILLED_STATUSES,
   LIVE_UNFILLED_STATUSES,
+  PARTIAL_FILL_STATUSES,
   TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
 import { decodeExecutionListResponsePage } from "../entryPackage/executionListResponseDecoder.js";
@@ -28,8 +29,9 @@ export type ProtectionClass =
   | { kind: "neutralized"; anyLegFilled: false }
   | { kind: "completed"; anyLegFilled: true; reason: "stop_loss" | "take_profit"; orderId: string }
   | { kind: "partial_or_contradictory"; anyLegFilled: boolean }
-  // Fills are not visible at all: never proof of anything.
-  | { kind: "unknown"; anyLegFilled: false };
+  // Never proof of anything. anyLegFilled keeps an execution that was seen
+  // on an own leg even when the class itself could not be established.
+  | { kind: "unknown"; anyLegFilled: boolean };
 
 export type CycleCompletionProof =
   | { kind: "completed"; closure: TradeCycleClosure }
@@ -64,19 +66,22 @@ export async function classifyOwnProtection(input: {
       : { kind: "unknown", anyLegFilled: false };
   }
   if (resolution.kind === "ambiguous") {
-    return { kind: "unknown", anyLegFilled: false };
+    return { kind: "unknown", anyLegFilled: resolution.ownFillObserved === true };
   }
 
   const legs = [resolution.stop, resolution.take];
+  // INVARIANT: once any own leg shows an execution, every class returned
+  // below carries anyLegFilled: true. An unreadable execution list, an API
+  // error or a decoder failure only makes the fill unprovable, never absent.
+  const anyLegFilled = legs.some(legShowsFill);
+
   // Bybit reports cumExecQty on every order row; a row without it cannot
-  // show whether the leg executed, so the whole result is not usable.
+  // show how much the leg executed, so the whole result is not usable.
   if (legs.some((leg) => !isExactDecimal(leg.cumExecQty))) {
-    return { kind: "unknown", anyLegFilled: false };
+    return { kind: "unknown", anyLegFilled };
   }
 
-  const filledLegs = legs.filter((leg) => compareDecimal(leg.cumExecQty, "0") > 0);
-
-  if (filledLegs.length === 0) {
+  if (!anyLegFilled) {
     if (legs.some((leg) => LIVE_UNFILLED_STATUSES.has(leg.orderStatus))) {
       return { kind: "active", anyLegFilled: false };
     }
@@ -86,6 +91,7 @@ export async function classifyOwnProtection(input: {
     return { kind: "unknown", anyLegFilled: false };
   }
 
+  const filledLegs = legs.filter(legShowsFill);
   if (filledLegs.length > 1) {
     return { kind: "partial_or_contradictory", anyLegFilled: true };
   }
@@ -104,7 +110,7 @@ export async function classifyOwnProtection(input: {
 
   const executed = await sumOwnLegExecutions(input.bybit, input.category, input.symbol, filled);
   if (executed === undefined) {
-    return { kind: "unknown", anyLegFilled: false };
+    return { kind: "unknown", anyLegFilled: true };
   }
   if (compareDecimal(executed, ownExposure) !== 0) {
     return { kind: "partial_or_contradictory", anyLegFilled: true };
@@ -116,6 +122,13 @@ export async function classifyOwnProtection(input: {
     reason: filled.role === "stop" ? "stop_loss" : "take_profit",
     orderId: filled.orderId,
   };
+}
+
+function legShowsFill(leg: AttachedProtectionLeg): boolean {
+  if (FILLED_STATUSES.has(leg.orderStatus) || PARTIAL_FILL_STATUSES.has(leg.orderStatus)) {
+    return true;
+  }
+  return isExactDecimal(leg.cumExecQty) && compareDecimal(leg.cumExecQty, "0") > 0;
 }
 
 // Sum of the filled leg's own Trade executions, keyed on the child's own
@@ -165,6 +178,11 @@ async function sumOwnLegExecutions(
 }
 
 // Bounded re-read of this cycle's own close order fate against Q.
+// `not_found` is returned only when every attempt of the bounded window
+// answered a clean not_found: one empty read can be propagation lag of an
+// order Bybit already accepted, and a resend under the same orderLinkId is
+// not deduplicated by Bybit once the first order has filled (linear
+// orderLinkId may be reused after Filled/Cancelled).
 export async function resolveOwnCloseOrderFate(input: {
   bybit: BybitAdapter;
   category: "linear";
@@ -174,6 +192,7 @@ export async function resolveOwnCloseOrderFate(input: {
   binding: PositionBindingGeometry;
 }): Promise<OwnCloseOrderFate> {
   const query = { category: input.category, symbol: input.symbol, orderLinkId: input.closeOrderLinkId, limit: "1" as const };
+  let sawAmbiguous = false;
 
   for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
     const outcome = await classifyOwnCloseOrderOutcome({
@@ -193,14 +212,14 @@ export async function resolveOwnCloseOrderFate(input: {
     if (outcome.kind === "qty_mismatch") {
       return { kind: "incomplete", executed: true };
     }
-    if (outcome.kind === "not_found") {
-      return { kind: "not_found" };
+    if (outcome.kind !== "not_found") {
+      sawAmbiguous = true;
     }
     if (attempt < BOUNDED_ATTEMPTS - 1) {
       await sleep(RETRY_DELAY_MS);
     }
   }
-  return { kind: "ambiguous" };
+  return sawAmbiguous ? { kind: "ambiguous" } : { kind: "not_found" };
 }
 
 // D2. The entry order must already be proven terminal by the caller.

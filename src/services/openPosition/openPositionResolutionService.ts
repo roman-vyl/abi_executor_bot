@@ -199,8 +199,8 @@ export class OpenPositionResolutionService {
 
   // D4. Under the pair mutex, for a live record. A filled cycle resolves
   // its own protection on every lookup; proof runs when the cycle's own
-  // close order exists, when the aggregate shows no position, or when the
-  // protection class shows a fill. Otherwise the answer is unchanged.
+  // close order exists, when the aggregate shows no position, or when any
+  // own protection leg shows a fill. Otherwise the answer is unchanged.
   private async lookupLive(record: EntryPackageExecutionRecord): Promise<OpenPositionHttpResult | PositionDetermination> {
     if (record.exchange_category !== "linear") {
       return { kind: "unsupported_scope" };
@@ -244,7 +244,10 @@ export class OpenPositionResolutionService {
       record.close_order_link_id !== null ||
       queryResult.kind === "no_position" ||
       protection.kind === "completed" ||
-      protection.kind === "partial_or_contradictory";
+      protection.kind === "partial_or_contradictory" ||
+      // An observed own protection fill that cannot be classified (e.g. its
+      // execution list is unreadable) never yields the unchanged open answer.
+      protection.anyLegFilled;
     if (!needsProof) {
       return evaluateOpen(record, ownFacts, queryResult);
     }

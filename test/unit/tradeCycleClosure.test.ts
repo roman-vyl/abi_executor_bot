@@ -354,6 +354,178 @@ test("replay keeps closure fields of a stored record and normalizes legacy rows 
   }
 });
 
+// --- post-apply audit regressions ---------------------------------------
+
+test("an observed stop fill with an unreadable execution list is never treated as no fill", async () => {
+  const unreadable: Array<{ name: string; arrange: (bybit: FakeBybitAdapter) => void; rows: Record<string, unknown>[] }> = [
+    {
+      name: "SL cumExecQty > 0, execution list unavailable",
+      rows: [filledStop(), deactivatedTake()],
+      arrange: (bybit) => {
+        bybit.executionListError = new Error("transport");
+      },
+    },
+    {
+      name: "TP cumExecQty > 0, execution list malformed",
+      rows: [deactivatedStop(), filledTake()],
+      arrange: (bybit) => {
+        bybit.executionListResponse = { retCode: 0, result: { category: "linear", list: "bad", nextPageCursor: "" } };
+      },
+    },
+  ];
+
+  for (const item of unreadable) {
+    // A sibling keeps a same-side row, there is no own close order: the
+    // lookup must not answer the unchanged "open".
+    await withServices(async ({ lookup, close, bybit, repo }) => {
+      await repo.save(makeRecord({ first_fill_at_ms: 111 }));
+      setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+      installProtection(bybit, ...item.rows);
+      item.arrange(bybit);
+      bybit.openPositionsResponse = position("Buy", "0.002");
+
+      assert.equal((await lookup.resolve(query())).statusCode, 500, `${item.name}: lookup`);
+      assert.equal((await close.apply(query())).statusCode, 500, `${item.name}: close`);
+      assert.equal(bybit.createOrderCalls.length, 0, item.name);
+      assert.equal(bybit.cancelOrderCalls.length, 0, item.name);
+      assertNotPersisted(repo, item.name);
+    });
+
+    // The own Runtime close also matched: a conflict, never runtime_signal.
+    await withServices(async ({ lookup, close, bybit, repo }) => {
+      await repo.save(makeRecord({ close_order_link_id: closeId() }));
+      setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+      setOrder(bybit, closeId(), "Filled", QTY, "close-order-1");
+      installProtection(bybit, ...item.rows);
+      item.arrange(bybit);
+      bybit.openPositionsResponse = flatPosition();
+
+      assert.equal((await lookup.resolve(query())).statusCode, 500, `${item.name} + close: lookup`);
+      assert.equal((await close.apply(query())).statusCode, 500, `${item.name} + close: close`);
+      assert.equal(bybit.createOrderCalls.length, 0, item.name);
+      assertNotPersisted(repo, `${item.name} + close`);
+    });
+  }
+});
+
+test("a proven protection fill together with an executed own Runtime close is contradictory", async () => {
+  const closeShapes: Array<{ name: string; cumExecQty: string; status: string }> = [
+    { name: "own close matched", cumExecQty: QTY, status: "Filled" },
+    { name: "own close partial", cumExecQty: "0.0004", status: "Cancelled" },
+  ];
+  for (const shape of closeShapes) {
+    await withServices(async ({ lookup, close, bybit, repo }) => {
+      await repo.save(makeRecord({ close_order_link_id: closeId() }));
+      setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+      setOrder(bybit, closeId(), shape.status, shape.cumExecQty, "close-order-1");
+      installProtection(bybit, filledStop(), deactivatedTake());
+      bybit.executionListResponse = executions([QTY]);
+      bybit.openPositionsResponse = flatPosition();
+
+      assert.equal((await lookup.resolve(query())).statusCode, 500, `${shape.name}: lookup`);
+      assert.equal((await close.apply(query())).statusCode, 500, `${shape.name}: close`);
+      assert.equal(bybit.createOrderCalls.length, 0, shape.name);
+      assert.equal(bybit.cancelOrderCalls.length, 0, shape.name);
+      assertNotPersisted(repo, shape.name);
+    });
+  }
+});
+
+test("unknown protection with an observed own fill fails closed in lookup and Close", async () => {
+  await withServices(async ({ lookup, close, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: 111 }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    // Only the filled stop is visible (partial_pair): attribution is
+    // ambiguous, but the own fill was seen.
+    installProtection(bybit, filledStop());
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = position("Buy", "0.002");
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assert.equal((await close.apply(query())).statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    assertNotPersisted(repo, "partial_pair with fill");
+  });
+});
+
+test("close resend: an accepted close order hidden by a temporary not_found is never sent twice", async () => {
+  await withServices(async ({ close, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, deactivatedStop(), deactivatedTake());
+    bybit.openPositionsResponse = position("Buy", QTY);
+    // Bybit accepts the order, but it is not yet visible to order queries.
+    const realCreate = bybit.createOrder.bind(bybit);
+    bybit.createOrder = async (payload) => {
+      await realCreate(payload);
+      return { retCode: 0, result: { orderId: "close-order-1", orderLinkId: payload.orderLinkId } };
+    };
+
+    const first = await close.apply(query());
+
+    assert.equal(first.statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 1, "no resend after an acknowledged dispatch");
+    assert.equal(repo.get("instance-1", "cycle-1")?.close_order_link_id, closeId(), "identity durable before dispatch");
+    assertNotPersisted(repo, "first request");
+
+    // The order becomes visible as filled; the next Close proves it.
+    setOrder(bybit, closeId(), "Filled", QTY, "close-order-1");
+    const second = await close.apply(query());
+
+    assert.equal(second.statusCode, 200);
+    assert.equal((second.body as { closure: { reason: string; order_id: string } }).closure.reason, "runtime_signal");
+    assert.equal((second.body as { closure: { order_id: string } }).closure.order_id, "close-order-1");
+    assert.equal(bybit.createOrderCalls.length, 1, "still exactly one market close");
+  });
+});
+
+test("close resend: a durable identity with any own execution is never resent", async () => {
+  await withServices(async ({ close, bybit, repo }) => {
+    await repo.save(makeRecord({ close_order_link_id: closeId() }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, deactivatedStop(), deactivatedTake());
+    bybit.openPositionsResponse = position("Buy", QTY);
+    // Order queries keep answering not_found, but the execution list shows
+    // the identity already traded.
+    bybit.executionListResponse = executions([QTY]);
+
+    const result = await close.apply(query());
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.deepEqual(bybit.getExecutionListCalls.at(-1), { category: "linear", symbol: "BTCUSDT", orderLinkId: closeId(), limit: "50" });
+    assertNotPersisted(repo, "executed identity");
+  });
+});
+
+test("close resend: a durable identity Bybit never saw is resent once under the same identity", async () => {
+  await withServices(async ({ close, bybit, repo }) => {
+    await repo.save(makeRecord({ close_order_link_id: closeId() }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, deactivatedStop(), deactivatedTake());
+    bybit.openPositionsResponse = position("Buy", QTY);
+    const realCreate = bybit.createOrder.bind(bybit);
+    bybit.createOrder = async (payload) => {
+      const response = await realCreate(payload);
+      setOrder(bybit, payload.orderLinkId, "Filled", QTY, "close-order-2");
+      return response;
+    };
+
+    const result = await close.apply(query());
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(bybit.createOrderCalls.length, 1);
+    assert.equal(bybit.createOrderCalls[0].orderLinkId, closeId());
+  });
+});
+
+function assertNotPersisted(repo: EntryPackageCorrelationRepository, name: string): void {
+  const saved = repo.get("instance-1", "cycle-1");
+  assert.equal(saved?.status, "applied", name);
+  assert.equal(saved?.closure_reason, null, name);
+}
+
 async function withServices(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "abi-closure-"));
   try {
