@@ -79,7 +79,12 @@ A market close order is never dispatched when any of these holds: the first proo
 
 ## Multiple strategies on one slot
 
-Every proof step reads only orders attributed to the pair: protection by `parentOrderLinkId`, close by the pair's own `close_order_link_id`, fills by the pair's own entry. A sibling's position neither keeps this cycle open (D4) nor justifies a close order: Close dispatches only for `Q` after this cycle's own protection is proven neutralized without fill, so a protection exit can never be followed by a market order against the sibling's exposure.
+What ABI guarantees:
+- Every proof step reads only orders attributed to the pair: protection by `parentOrderLinkId`, close by the pair's own `close_order_link_id`, fills by the pair's own entry. A sibling's position does not keep this cycle open (D4).
+- After a proven execution of the cycle's own protection, or of its own close order, ABI sends no further close order (D3, D5).
+- Before a market close ABI uses the existing physical position check `aggregateIsCompatible`.
+
+Limit: `aggregateIsCompatible` checks only that the position has the expected side and `position_size >= Q`. It does not reconcile the position against the total exposure of all owners in the slot. If the physical position changes in a way ABI cannot attribute to any cycle's own orders (manual action, liquidation, auto-deleveraging), a market close for `Q` can still reduce another cycle's exposure. Bybit V5 has no per-order position, so V1 accepts this risk. V1 adds no sum reconciliation, no remaining-exposure model and no slot mutex.
 
 ## Out of V1
 
@@ -87,5 +92,6 @@ Closing a remainder after a partial protection fill, manual closes, liquidation,
 
 ## Risks
 
-- History lag or a symbol history deeper than 50 rows → `internal_error`; Runtime retries on the next bar or the next recovery attempt. Once proven, the stored closure removes further exchange reads.
+- History lag → `internal_error`; Runtime retries on the next bar or the next recovery attempt. Once proven, the stored closure removes further exchange reads.
+- Accepted V1 limit: `resolveOwnAttachedProtection` reads one page of the symbol's order history, limit 50. If the cycle's own protection orders fall out of that page, completion cannot be proven and the cycle stays blocked (lookup and Close return `internal_error`). V1 does not add pagination or change the history adapter.
 - The lookup gains two Bybit reads per filled cycle per bar against Runtime's 5 s timeout (8 timeouts overnight on 2026-10-17); a timeout only skips the bar.
