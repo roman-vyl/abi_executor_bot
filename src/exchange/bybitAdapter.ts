@@ -248,15 +248,20 @@ export class RestBybitAdapter implements BybitAdapter {
   // "Get Trade History" — the only Bybit primitive that records each
   // individual fill with its own timestamp (execTime), used by
   // resolveFirstAttributableFillAtMs to source first_fill_at_ms
-  // (abi-pair-scoped-open-position-resolution-v1). Deliberately keyed on
-  // orderLinkId only, never orderId — see BybitGetExecutionListPayload.
+  // (abi-pair-scoped-open-position-resolution-v1), and by closure proof for
+  // a filled protection child. Keyed on exactly one of orderLinkId / orderId
+  // — see BybitGetExecutionListPayload.
   async getExecutionList(payload: BybitGetExecutionListPayload): Promise<unknown> {
     const params = new URLSearchParams({
       category: payload.category,
       symbol: payload.symbol,
-      orderLinkId: payload.orderLinkId,
       limit: payload.limit,
     });
+    if (payload.orderId !== undefined) {
+      params.set("orderId", payload.orderId);
+    } else {
+      params.set("orderLinkId", payload.orderLinkId);
+    }
     if (payload.cursor !== undefined) {
       params.set("cursor", payload.cursor);
     }

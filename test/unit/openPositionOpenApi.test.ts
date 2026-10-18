@@ -62,12 +62,40 @@ test("the success oneOf declaratively enforces the cross-field invariant: only t
   const schema = document.components.schemas.OpenPositionResponse;
 
   assert.equal(
-    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000" }),
+    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null }),
     true,
   );
   assert.equal(
-    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null }),
+    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null }),
     true,
+  );
+  const closure = {
+    strategy_instance_id: "instance",
+    trade_cycle_id: "cycle",
+    reason: "stop_loss",
+    order_id: "child-order",
+    order_link_id: null,
+    parent_order_link_id: "entry-link",
+  };
+  assert.equal(
+    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure }),
+    true,
+  );
+  for (const invalid of [
+    { ...closure, reason: "liquidation" },
+    { ...closure, order_link_id: "own-link" },
+    { ...closure, reason: "runtime_signal" },
+    { ...closure, execution_price: "1" },
+  ]) {
+    assert.equal(
+      matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: invalid }),
+      false,
+      JSON.stringify(invalid),
+    );
+  }
+  assert.equal(
+    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure }),
+    false,
   );
 });
 

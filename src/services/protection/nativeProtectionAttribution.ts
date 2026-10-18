@@ -19,6 +19,8 @@ export type AttachedProtectionLeg = {
   triggerPrice: string;
   qty: string;
   leavesQty: string;
+  // "" when Bybit omits it; read only by closure proof.
+  cumExecQty: string;
 };
 
 export type AttachedProtectionAmbiguousReason =
@@ -216,5 +218,6 @@ function toLeg(candidate: BybitChildOrderCandidate, role: "stop" | "take"): Atta
     triggerPrice: candidate.triggerPrice,
     qty: candidate.qty,
     leavesQty: candidate.leavesQty,
+    cumExecQty: candidate.cumExecQty,
   };
 }

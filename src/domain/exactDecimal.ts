@@ -118,6 +118,13 @@ export function maxDecimal(a: string, b: string): string {
   return compareDecimal(a, b) >= 0 ? a : b;
 }
 
+export function addDecimal(aText: string, bText: string): string {
+  const a = parseDecimal(aText);
+  const b = parseDecimal(bText);
+  const scale = Math.max(a.scale, b.scale);
+  return formatScaled(a.unscaled * pow10(scale - a.scale) + b.unscaled * pow10(scale - b.scale), scale);
+}
+
 export function subtractDecimal(aText: string, bText: string): string {
   const a = parseDecimal(aText);
   const b = parseDecimal(bText);

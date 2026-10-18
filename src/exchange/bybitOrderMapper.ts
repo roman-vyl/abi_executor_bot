@@ -102,18 +102,19 @@ export type BybitGetOrderHistoryForSymbolPayload = {
   limit: string;
 };
 
-// Deliberately no orderId field: Bybit's own documented parameter-priority
-// rule for this endpoint is orderId > orderLinkId > symbol > baseCoin —
-// sending both would let orderId silently override the intended filter.
-// order_id is this codebase's established "audit only, never used for
-// lookup" field everywhere else; this endpoint gets the same treatment.
+// Exactly one of orderLinkId / orderId, never both: Bybit's own documented
+// parameter-priority rule for this endpoint is orderId > orderLinkId >
+// symbol > baseCoin — sending both would let orderId silently override the
+// intended filter. Own entry and close orders are keyed on orderLinkId. A
+// native protection child has an empty orderLinkId, so closure proof
+// (abi-trade-cycle-closure-confirmation-v1 D1) keys it on the child's own
+// orderId, read from an attribution already made by parentOrderLinkId.
 export type BybitGetExecutionListPayload = {
   category: string;
   symbol: string;
-  orderLinkId: string;
   limit: string;
   cursor?: string;
-};
+} & ({ orderLinkId: string; orderId?: never } | { orderId: string; orderLinkId?: never });
 
 export type EntryPackageOrderInput = {
   // Already-resolved Bybit symbol — never a raw Runtime ticker.

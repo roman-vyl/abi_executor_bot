@@ -177,7 +177,15 @@
                     "value": {
                       "strategy_instance_id": "runtime-owned-instance-id",
                       "trade_cycle_id": "runtime-owned-cycle-id",
-                      "status": "trade_cycle_closed"
+                      "status": "trade_cycle_closed",
+                      "closure": {
+                        "strategy_instance_id": "runtime-owned-instance-id",
+                        "trade_cycle_id": "runtime-owned-cycle-id",
+                        "reason": "runtime_signal",
+                        "order_id": "exchange-close-order-id",
+                        "order_link_id": "abi-close-order-link-id",
+                        "parent_order_link_id": null
+                      }
                     }
                   }
                 }
@@ -301,11 +309,109 @@
       "TradeCycleClosedResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["strategy_instance_id", "trade_cycle_id", "status"],
+        "required": ["strategy_instance_id", "trade_cycle_id", "status", "closure"],
         "properties": {
           "strategy_instance_id": { "type": "string", "minLength": 1 },
           "trade_cycle_id": { "type": "string", "minLength": 1 },
-          "status": { "const": "trade_cycle_closed" }
+          "status": { "const": "trade_cycle_closed" },
+          "closure": {
+            "description": "The proven completion: ABI's own close order, or this cycle's own protection when it executed before or during the close. null when the cycle held no own exposure or its completion carries no own order.",
+            "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/TradeCycleClosure" }]
+          }
+        }
+      },
+      "TradeCycleClosure": {
+        "description": "Proven completion of this trade cycle by full execution of an order ABI attributes to this exact pair. Execution price and time are not part of V1.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TradeCycleClosureRuntimeSignal"
+          },
+          {
+            "$ref": "#/components/schemas/TradeCycleClosureProtection"
+          }
+        ]
+      },
+      "TradeCycleClosureRuntimeSignal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "reason",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "const": "runtime_signal"
+          },
+          "order_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exchange order id of ABI's own close order"
+          },
+          "order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of ABI's own close order"
+          },
+          "parent_order_link_id": {
+            "type": "null"
+          }
+        }
+      },
+      "TradeCycleClosureProtection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "reason",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "const": "stop_loss"
+              },
+              {
+                "const": "take_profit"
+              }
+            ]
+          },
+          "order_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exchange order id of the executed protection order"
+          },
+          "order_link_id": {
+            "type": "null"
+          },
+          "parent_order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of this cycle's own entry order"
+          }
         }
       },
       "ValidationDetail": {

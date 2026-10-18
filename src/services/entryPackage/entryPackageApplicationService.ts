@@ -372,6 +372,10 @@ export class EntryPackageApplicationService {
       // priorRecord) is what makes that guarantee hold by construction.
       close_order_link_id: null,
       close_order_id: null,
+      closure_reason: null,
+      closure_order_id: null,
+      closure_order_link_id: null,
+      closure_parent_order_link_id: null,
       // Same reasoning as close_order_link_id/close_order_id above: a new
       // generation's own first fill (if any) has not been observed yet —
       // abi-pair-scoped-open-position-resolution-v1's design.md Decision 6.
@@ -818,6 +822,10 @@ export class EntryPackageApplicationService {
       order_id: null,
       close_order_link_id: null,
       close_order_id: null,
+      closure_reason: null,
+      closure_order_id: null,
+      closure_order_link_id: null,
+      closure_parent_order_link_id: null,
       first_fill_at_ms: null,
       generation: 0,
       status: "absent",

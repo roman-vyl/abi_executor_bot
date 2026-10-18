@@ -280,7 +280,7 @@ function protectionCommand(instance: string, cycle: string) {
 }
 
 function setOrder(bybit: FakeBybitAdapter, link: string, status: string, cumExecQty: string, qty: string): void {
-  const response = orderList([entryOrder(status, cumExecQty, qty)]);
+  const response = orderList([{ orderId: `order-${link}`, ...entryOrder(status, cumExecQty, qty) }]);
   bybit.orderByLinkIdResponseByLinkId.set(link, response);
   bybit.orderHistoryResponseByLinkId.set(link, response);
 }
@@ -331,6 +331,7 @@ function stopRow(parent: string, qty: string, orderId: string): Record<string, u
     triggerPrice: "99000",
     qty,
     leavesQty: qty,
+    cumExecQty: "0",
   };
 }
 

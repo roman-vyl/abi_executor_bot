@@ -306,6 +306,7 @@ test("serializeTradeCycleClosed returns the closed success object when all postc
       strategy_instance_id: "instance",
       trade_cycle_id: "cycle",
       status: "trade_cycle_closed",
+      closure: null,
     },
   });
 });

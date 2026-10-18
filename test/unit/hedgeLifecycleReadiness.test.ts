@@ -347,7 +347,7 @@ test("hedge close confirmation rejects a slot mismatch and accepts the durable t
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = orderResponseWithStatus(1, "Filled", "1");
   const query = { category: "linear", symbol: "BTCUSDT", orderLinkId: "entry-instance-1", limit: "1" as const };
-  assert.deepEqual(await classifyOwnCloseOrderOutcome({ bybit, getCloseOrderPayload: query, getCloseOrderHistoryPayload: query, expectedQty: "1", binding: { mode: "hedge", direction: "long" } }), { kind: "matched" });
+  assert.deepEqual(await classifyOwnCloseOrderOutcome({ bybit, getCloseOrderPayload: query, getCloseOrderHistoryPayload: query, expectedQty: "1", binding: { mode: "hedge", direction: "long" } }), { kind: "matched", orderId: "" });
   assert.deepEqual(await classifyOwnCloseOrderOutcome({ bybit, getCloseOrderPayload: query, getCloseOrderHistoryPayload: query, expectedQty: "1", binding: { mode: "hedge", direction: "short" } }), { kind: "ambiguous" });
 });
 
@@ -537,6 +537,10 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    closure_reason: null,
+    closure_order_id: null,
+    closure_order_link_id: null,
+    closure_parent_order_link_id: null,
     first_fill_at_ms: 1785000012345,
     generation: 1,
     status: "applied",
