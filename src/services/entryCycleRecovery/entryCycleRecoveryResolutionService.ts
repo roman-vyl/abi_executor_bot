@@ -72,7 +72,7 @@ export type EntryCycleRecoveryResolutionServiceDeps = {
 // position (abi-entry-cycle-recovery-attribution-v1 design.md Decision 1).
 type ResolvedOutcome =
   | { state: "entry_order_live" }
-  | { state: "position_open"; averageEntryPrice: string }
+  | { state: "position_open"; averageEntryPrice: string; entryOrderId: string | null }
   | { state: "terminal_without_fill" }
   | { state: "terminal_after_fill" };
 
@@ -349,7 +349,7 @@ export class EntryCycleRecoveryResolutionService {
     }
 
     // position_open
-    return this.resolvePositionOpenResultLocked(fresh, outcome.averageEntryPrice);
+    return this.resolvePositionOpenResultLocked(fresh, outcome.averageEntryPrice, outcome.entryOrderId);
   }
 
   // Runs entirely against a record already fresh, under the lock, and
@@ -358,6 +358,7 @@ export class EntryCycleRecoveryResolutionService {
   private async resolvePositionOpenResultLocked(
     fresh: EntryPackageExecutionRecord,
     averageEntryPrice: string,
+    entryOrderId: string | null,
   ): Promise<RecoveryStateHttpResult> {
     if (fresh.pending_action === "amend" || fresh.pending_action === "cancel_and_create") {
       return internalErrorResult();
@@ -366,6 +367,10 @@ export class EntryCycleRecoveryResolutionService {
     const desiredEntry = fresh.desired_entry;
     const calculatedQuantity = fresh.calculated_quantity;
     if (desiredEntry === null || calculatedQuantity === null) {
+      return internalErrorResult();
+    }
+
+    if (fresh.order_link_id === null || (fresh.exchange_category !== "linear" && fresh.exchange_category !== "spot")) {
       return internalErrorResult();
     }
 
@@ -378,12 +383,10 @@ export class EntryCycleRecoveryResolutionService {
           calculatedQuantity,
           firstFillAtMs: fresh.first_fill_at_ms,
           averageEntryPrice,
+          entryOrderLinkId: fresh.order_link_id,
+          entryOrderId,
         }),
       );
-    }
-
-    if (fresh.order_link_id === null || (fresh.exchange_category !== "linear" && fresh.exchange_category !== "spot")) {
-      return internalErrorResult();
     }
 
     const captured = await resolveFirstAttributableFillAtMs({
@@ -427,6 +430,8 @@ export class EntryCycleRecoveryResolutionService {
         calculatedQuantity,
         firstFillAtMs: captured.firstFillAtMs,
         averageEntryPrice,
+        entryOrderLinkId: fresh.order_link_id,
+        entryOrderId,
       }),
     );
   }
@@ -582,7 +587,7 @@ function resolveRecoveryState(input: {
       if (aggregateSanity !== "same_side_exists") {
         return undefined;
       }
-      return positionOpenOutcome(orderSignal.averageEntryPrice);
+      return positionOpenOutcome(orderSignal.averageEntryPrice, orderSignal.orderId);
     }
 
     // A close cannot have been durably dispatched while the entry order
@@ -607,7 +612,7 @@ function resolveRecoveryState(input: {
       if (aggregateSanity !== "same_side_exists") {
         return undefined;
       }
-      return positionOpenOutcome(orderSignal.averageEntryPrice);
+      return positionOpenOutcome(orderSignal.averageEntryPrice, orderSignal.orderId);
     }
     // "qty_mismatch" (a genuine, unresolved partial close — neither state
     // correctly describes it), "not_found", or "ambiguous": fails safe.
@@ -623,11 +628,11 @@ function resolveRecoveryState(input: {
 // tolerance) — this can never construct a valid position_open response,
 // mirroring open-position-resolution's identical "a fill with no usable
 // average price fails closed" requirement.
-function positionOpenOutcome(averageEntryPrice: string): ResolvedOutcome | undefined {
+function positionOpenOutcome(averageEntryPrice: string, entryOrderId: string | null): ResolvedOutcome | undefined {
   if (averageEntryPrice === "") {
     return undefined;
   }
-  return { state: "position_open", averageEntryPrice };
+  return { state: "position_open", averageEntryPrice, entryOrderId };
 }
 
 function classifyAggregateSanity(positionQuery: PositionQueryResult, desiredEntry: DesiredEntryDto | null): AggregateSanity {

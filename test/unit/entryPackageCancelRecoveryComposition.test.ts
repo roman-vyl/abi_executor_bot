@@ -97,6 +97,8 @@ test("a lost EntryPackageAbsent response after a positively confirmed cancel is 
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
     assert.equal(recoveryBybit.getOrderByLinkIdCalls.length, 0);

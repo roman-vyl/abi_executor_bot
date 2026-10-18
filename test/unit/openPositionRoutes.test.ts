@@ -157,7 +157,7 @@ test("unknown HTTP-boundary failure maps to safe internal error", async () => {
 test("an open position result emits operation_started then operation_completed with outcome position_open, both info", async () => {
   const resolutionService: OpenPositionResolutionServicePort = {
     async resolve(): Promise<OpenPositionHttpResult> {
-      return openPositionOpenResult({ firstFillAtMs: 1, averageEntryPrice: "100" });
+      return openPositionOpenResult({ firstFillAtMs: 1, averageEntryPrice: "100", entryOrderLinkId: "link-1", entryOrderId: null });
     },
   };
 

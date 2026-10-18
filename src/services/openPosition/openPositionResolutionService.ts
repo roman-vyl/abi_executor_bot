@@ -25,6 +25,7 @@ import {
   confirmEntryPackage,
   FILLED_STATUSES,
   isFillFactFinal,
+  orderIdOrNull,
   resolveFirstAttributableFillAtMs,
   TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
@@ -66,6 +67,10 @@ export type PositionDetermination =
       // design.md Decision 5).
       firstFillAtMs: number | null;
       averageEntryPrice: string;
+      // Exchange order id of this cycle's own entry order, read from the
+      // same confirmed row that proved the fill; null when that row
+      // carried none (abi-open-position-entry-order-identity-v1 D3).
+      entryOrderId: string | null;
       // Sourced from the same live-position query used for the aggregate
       // sanity check — protection's already-satisfied comparison reuses
       // these rather than issuing a second query. Undefined means the
@@ -85,6 +90,9 @@ type OwnFillFacts = {
   avgExecutionPrice: string | undefined;
   // The own entry order is proven terminal: closure proof requires it.
   entryTerminal: boolean;
+  // From the confirmed row (fresh) or the stored final observation
+  // (reuse); never the create acknowledgement's order id.
+  entryOrderId: string | null;
 };
 
 // Resolves a truthful, live current open-position answer for one
@@ -289,6 +297,7 @@ export class OpenPositionResolutionService {
         cumulativeFilledQty: observation.cumulative_filled_qty,
         avgExecutionPrice: observation.avg_execution_price,
         entryTerminal: true,
+        entryOrderId: observation.order_id ?? null,
       };
     }
 
@@ -316,10 +325,11 @@ export class OpenPositionResolutionService {
         cumulativeFilledQty: confirmation.observation.cumulative_filled_qty,
         avgExecutionPrice: confirmation.observation.avg_execution_price,
         entryTerminal: FILLED_STATUSES.has(status) || TERMINAL_WITHOUT_FILL_STATUSES.has(status),
+        entryOrderId: orderIdOrNull(confirmation.order),
       };
     }
     if (confirmation.kind === "terminal_without_fill") {
-      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: true };
+      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: true, entryOrderId: null };
     }
     if (confirmation.kind === "pending_confirmed") {
       // Entry order live but zero own cumulative fill so far — a normal,
@@ -327,7 +337,7 @@ export class OpenPositionResolutionService {
       // not an error. Reported the same as terminal_without_fill here:
       // zero fill facts, which determine() correctly turns into "closed"
       // (position_open=false), never "open" and never fabricated.
-      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: false };
+      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: false, entryOrderId: null };
     }
     // "not_found" / "ambiguous": still treated as unresolved/error — no
     // fill evidence obtainable at all, as opposed to pending_confirmed's
@@ -361,15 +371,17 @@ export class OpenPositionResolutionService {
       return this.buildNonOpenHttpResult(determination);
     }
 
+    if (record.order_link_id === null || record.exchange_category !== "linear") {
+      return internalErrorResult();
+    }
+
     if (record.first_fill_at_ms !== null) {
       return openPositionOpenResult({
         firstFillAtMs: record.first_fill_at_ms,
         averageEntryPrice: determination.averageEntryPrice,
+        entryOrderLinkId: record.order_link_id,
+        entryOrderId: determination.entryOrderId,
       });
-    }
-
-    if (record.order_link_id === null || record.exchange_category !== "linear") {
-      return internalErrorResult();
     }
 
     const captured = await resolveFirstAttributableFillAtMs({
@@ -403,6 +415,8 @@ export class OpenPositionResolutionService {
     return openPositionOpenResult({
       firstFillAtMs: captured.firstFillAtMs,
       averageEntryPrice: determination.averageEntryPrice,
+      entryOrderLinkId: record.order_link_id,
+      entryOrderId: determination.entryOrderId,
     });
   }
 
@@ -489,6 +503,7 @@ function evaluateOpen(
     kind: "open",
     firstFillAtMs: record.first_fill_at_ms,
     averageEntryPrice: ownFacts.avgExecutionPrice,
+    entryOrderId: ownFacts.entryOrderId,
     confirmedStopLoss: queryResult.row.stopLoss,
     confirmedTakeProfit: queryResult.row.takeProfit,
   };

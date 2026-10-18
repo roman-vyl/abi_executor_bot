@@ -24,6 +24,8 @@ test("success DTO is a closed object satisfying the cross-field invariant (open)
     assert.deepEqual(Object.keys(response.body()).sort(), [
       "average_entry_price",
       "closure",
+      "entry_order_id",
+      "entry_order_link_id",
       "first_fill_at_ms",
       "position_open",
     ]);
@@ -45,6 +47,8 @@ test("success DTO is a closed object satisfying the cross-field invariant (close
       first_fill_at_ms: null,
       average_entry_price: null,
       closure: null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     });
   });
 });

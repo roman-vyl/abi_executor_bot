@@ -18,6 +18,11 @@ export type RecoveryStateSuccessResponse = {
   applied_entry_package: AppliedEntryPackage | null;
   first_fill_at_ms: number | null;
   average_entry_price: string | null;
+  // position_open only: the cycle's own entry order whose fill was proved
+  // (abi-open-position-entry-order-identity-v1 D5); null in every other
+  // state. entry_order_id is also null when the confirmed row carried none.
+  entry_order_link_id: string | null;
+  entry_order_id: string | null;
 };
 
 export type RecoveryStateErrorCode = "validation_failed" | "unknown_trade_cycle_binding" | "internal_error";
@@ -58,6 +63,8 @@ export function entryOrderLiveResult(input: {
       },
       first_fill_at_ms: null,
       average_entry_price: null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     },
   };
 }
@@ -70,6 +77,8 @@ export function entryOrderNotFoundResult(): RecoveryStateHttpResult {
       applied_entry_package: null,
       first_fill_at_ms: null,
       average_entry_price: null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     },
   };
 }
@@ -82,12 +91,17 @@ export function positionOpenResult(input: {
   calculatedQuantity: string;
   firstFillAtMs: number;
   averageEntryPrice: string;
+  entryOrderLinkId: string;
+  entryOrderId: string | null;
 }): RecoveryStateHttpResult {
   if (
     !isExactDecimalText(input.calculatedQuantity) ||
     !Number.isInteger(input.firstFillAtMs) ||
     input.firstFillAtMs <= 0 ||
-    !isPositiveExactDecimalText(input.averageEntryPrice)
+    !isPositiveExactDecimalText(input.averageEntryPrice) ||
+    typeof input.entryOrderLinkId !== "string" ||
+    input.entryOrderLinkId === "" ||
+    (input.entryOrderId !== null && (typeof input.entryOrderId !== "string" || input.entryOrderId === ""))
   ) {
     return internalErrorResult();
   }
@@ -102,6 +116,8 @@ export function positionOpenResult(input: {
       },
       first_fill_at_ms: input.firstFillAtMs,
       average_entry_price: input.averageEntryPrice,
+      entry_order_link_id: input.entryOrderLinkId,
+      entry_order_id: input.entryOrderId,
     },
   };
 }
@@ -125,6 +141,8 @@ function terminalResult(recoveryState: "terminal_without_fill" | "terminal_after
       applied_entry_package: null,
       first_fill_at_ms: null,
       average_entry_price: null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     },
   };
 }

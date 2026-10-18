@@ -46,6 +46,8 @@ test("status: absent resolves terminal_without_fill directly from the durable re
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
@@ -67,6 +69,8 @@ test("status: terminal_unfilled resolves terminal_without_fill directly from the
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
@@ -88,6 +92,8 @@ test("status: terminal_closed resolves terminal_after_fill directly from the dur
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
@@ -197,6 +203,8 @@ test("a zero-fill terminal order confirmed flat resolves terminal_without_fill",
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -218,6 +226,8 @@ test("a zero-fill terminal order resolves terminal_without_fill even when the ag
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -252,6 +262,8 @@ test("a zero-fill terminal order resolves terminal_without_fill even when the ag
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -284,6 +296,62 @@ test("a PartiallyFilled order with no close attempted and an already-durable fir
     assert.equal(body.first_fill_at_ms, 555);
     assert.equal(body.average_entry_price, "100000");
     assert.equal(bybit.getExecutionListCalls.length, 0);
+  });
+});
+
+test("position_open identifies the entry order: link id from the record, order id from the confirmed row", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    // makeRecord stores order_id "order-1" from the create acknowledgement.
+    await repo.save(makeRecord({ firstFillAtMs: 555 }));
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({ orderStatus: "PartiallyFilled", cumExecQty: "0.0005", avgPrice: "100000", orderId: "bybit-entry-7" }),
+    ]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as { recovery_state: string; entry_order_link_id: unknown; entry_order_id: unknown };
+    assert.equal(body.recovery_state, "position_open");
+    assert.equal(body.entry_order_link_id, "link-1");
+    assert.equal(body.entry_order_id, "bybit-entry-7");
+  });
+});
+
+test("position_open from the order-history row carries that row's orderId", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ firstFillAtMs: 555 }));
+    bybit.orderByLinkIdResponse = orderList([]);
+    bybit.orderHistoryResponse = orderList([
+      liveOrder({ orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000", orderId: "bybit-entry-8" }),
+    ]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as { recovery_state: string; entry_order_link_id: unknown; entry_order_id: unknown };
+    assert.equal(body.recovery_state, "position_open");
+    assert.equal(body.entry_order_link_id, "link-1");
+    assert.equal(body.entry_order_id, "bybit-entry-8");
+  });
+});
+
+test("position_open whose confirmed row carries no orderId reports entry_order_id as null, never the create acknowledgement's", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord({ firstFillAtMs: 555 }));
+    bybit.orderByLinkIdResponse = orderList([
+      liveOrder({ orderStatus: "PartiallyFilled", cumExecQty: "0.0005", avgPrice: "100000" }),
+    ]);
+    bybit.openPositionsResponse = openPosition({ side: "Buy", avgPrice: "100000", openTime: 111 });
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as { recovery_state: string; entry_order_link_id: unknown; entry_order_id: unknown };
+    assert.equal(body.recovery_state, "position_open");
+    assert.equal(body.entry_order_link_id, "link-1");
+    assert.equal(body.entry_order_id, null);
   });
 });
 
@@ -428,6 +496,8 @@ test("a fill with the cycle's own close order confirming an exact quantity match
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -551,6 +621,8 @@ test("a fill found only via order-history (already left the realtime set), confi
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -679,6 +751,8 @@ test("a legacy amend-pending binding still resolves terminal_without_fill when p
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -705,6 +779,8 @@ test("a legacy amend-pending binding still resolves terminal_after_fill when pos
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
   });
@@ -736,6 +812,8 @@ test("fresh ambiguous CREATE absence across the full budget resolves entry_order
         applied_entry_package: null,
         first_fill_at_ms: null,
         average_entry_price: null,
+        entry_order_link_id: null,
+        entry_order_id: null,
       },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 3);
@@ -1186,7 +1264,7 @@ function malformedResponse(): unknown {
 }
 
 function liveOrder(
-  overrides: Partial<{ orderStatus: string; qty: string; cumExecQty: string; avgPrice: string }> = {},
+  overrides: Partial<{ orderStatus: string; qty: string; cumExecQty: string; avgPrice: string; orderId: string }> = {},
 ): Record<string, unknown> {
   return {
     orderStatus: "New",

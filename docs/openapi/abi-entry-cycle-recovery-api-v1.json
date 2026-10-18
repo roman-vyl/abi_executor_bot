@@ -54,7 +54,9 @@
                         "calculated_quantity": "0.001"
                       },
                       "first_fill_at_ms": null,
-                      "average_entry_price": null
+                      "average_entry_price": null,
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   },
                   "entry_order_not_found": {
@@ -62,7 +64,9 @@
                       "recovery_state": "entry_order_not_found",
                       "applied_entry_package": null,
                       "first_fill_at_ms": null,
-                      "average_entry_price": null
+                      "average_entry_price": null,
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   },
                   "position_open": {
@@ -80,7 +84,9 @@
                         "calculated_quantity": "0.001"
                       },
                       "first_fill_at_ms": 1785000012345,
-                      "average_entry_price": "100000"
+                      "average_entry_price": "100000",
+                      "entry_order_link_id": "abi-entry-order-link-id",
+                      "entry_order_id": "exchange-entry-order-id"
                     }
                   },
                   "terminal_without_fill": {
@@ -88,7 +94,9 @@
                       "recovery_state": "terminal_without_fill",
                       "applied_entry_package": null,
                       "first_fill_at_ms": null,
-                      "average_entry_price": null
+                      "average_entry_price": null,
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   },
                   "terminal_after_fill": {
@@ -96,7 +104,9 @@
                       "recovery_state": "terminal_after_fill",
                       "applied_entry_package": null,
                       "first_fill_at_ms": null,
-                      "average_entry_price": null
+                      "average_entry_price": null,
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   }
                 }
@@ -238,7 +248,9 @@
           "recovery_state",
           "applied_entry_package",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "recovery_state": {
@@ -252,6 +264,12 @@
           },
           "average_entry_price": {
             "type": "null"
+          },
+          "entry_order_link_id": {
+            "type": "null"
+          },
+          "entry_order_id": {
+            "type": "null"
           }
         }
       },
@@ -262,7 +280,9 @@
           "recovery_state",
           "applied_entry_package",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "recovery_state": {
@@ -276,6 +296,12 @@
           },
           "average_entry_price": {
             "type": "null"
+          },
+          "entry_order_link_id": {
+            "type": "null"
+          },
+          "entry_order_id": {
+            "type": "null"
           }
         }
       },
@@ -286,7 +312,9 @@
           "recovery_state",
           "applied_entry_package",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "recovery_state": {
@@ -302,6 +330,23 @@
           "average_entry_price": {
             "type": "string",
             "format": "positive-exact-decimal"
+          },
+          "entry_order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of this cycle's own entry order whose fill ABI proved"
+          },
+          "entry_order_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "minLength": 1
+              }
+            ],
+            "description": "Exchange order id read from the same confirmed order record that proved the fill; null when that record carried none. Never replaced by another identifier."
           }
         }
       },
@@ -312,7 +357,9 @@
           "recovery_state",
           "applied_entry_package",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "recovery_state": {
@@ -326,6 +373,12 @@
           },
           "average_entry_price": {
             "type": "null"
+          },
+          "entry_order_link_id": {
+            "type": "null"
+          },
+          "entry_order_id": {
+            "type": "null"
           }
         }
       },
@@ -336,7 +389,9 @@
           "recovery_state",
           "applied_entry_package",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "recovery_state": {
@@ -349,6 +404,12 @@
             "type": "null"
           },
           "average_entry_price": {
+            "type": "null"
+          },
+          "entry_order_link_id": {
+            "type": "null"
+          },
+          "entry_order_id": {
             "type": "null"
           }
         }
