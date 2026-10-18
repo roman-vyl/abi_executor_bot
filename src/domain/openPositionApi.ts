@@ -9,6 +9,12 @@ export type OpenPositionSuccessResponse =
       first_fill_at_ms: number;
       average_entry_price: string;
       closure: null;
+      // The cycle's own entry order whose fill was proved
+      // (abi-open-position-entry-order-identity-v1 D1-D3): the link id is
+      // always known; the exchange order id is null when the confirmed row
+      // carried none.
+      entry_order_link_id: string;
+      entry_order_id: string | null;
     }
   | {
       position_open: false;
@@ -17,6 +23,8 @@ export type OpenPositionSuccessResponse =
       // The proven completion when this cycle's own order closed it
       // (abi-trade-cycle-closure-confirmation-v1 D6); null otherwise.
       closure: TradeCycleClosure | null;
+      entry_order_link_id: null;
+      entry_order_id: null;
     };
 
 export type OpenPositionErrorCode =
@@ -46,11 +54,16 @@ export type OpenPositionHttpResult = {
 export function openPositionOpenResult(input: {
   firstFillAtMs: number;
   averageEntryPrice: string;
+  entryOrderLinkId: string;
+  entryOrderId: string | null;
 }): OpenPositionHttpResult {
   if (
     !Number.isInteger(input.firstFillAtMs) ||
     input.firstFillAtMs <= 0 ||
-    !isPositiveExactDecimalText(input.averageEntryPrice)
+    !isPositiveExactDecimalText(input.averageEntryPrice) ||
+    typeof input.entryOrderLinkId !== "string" ||
+    input.entryOrderLinkId === "" ||
+    (input.entryOrderId !== null && (typeof input.entryOrderId !== "string" || input.entryOrderId === ""))
   ) {
     return internalErrorResult();
   }
@@ -62,6 +75,8 @@ export function openPositionOpenResult(input: {
       first_fill_at_ms: input.firstFillAtMs,
       average_entry_price: input.averageEntryPrice,
       closure: null,
+      entry_order_link_id: input.entryOrderLinkId,
+      entry_order_id: input.entryOrderId,
     },
   };
 }
@@ -82,6 +97,8 @@ export function openPositionClosedResult(
       first_fill_at_ms: null,
       average_entry_price: null,
       closure: closure?.closure ?? null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     },
   };
 }

@@ -44,7 +44,19 @@
                       "position_open": true,
                       "first_fill_at_ms": 1785000012345,
                       "average_entry_price": "100000",
-                      "closure": null
+                      "closure": null,
+                      "entry_order_link_id": "abi-entry-order-link-id",
+                      "entry_order_id": "exchange-entry-order-id"
+                    }
+                  },
+                  "open_without_exchange_order_id": {
+                    "value": {
+                      "position_open": true,
+                      "first_fill_at_ms": 1785000012345,
+                      "average_entry_price": "100000",
+                      "closure": null,
+                      "entry_order_link_id": "abi-entry-order-link-id",
+                      "entry_order_id": null
                     }
                   },
                   "closed": {
@@ -52,7 +64,9 @@
                       "position_open": false,
                       "first_fill_at_ms": null,
                       "average_entry_price": null,
-                      "closure": null
+                      "closure": null,
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   },
                   "closed_by_stop_loss": {
@@ -67,7 +81,9 @@
                         "order_id": "exchange-protection-order-id",
                         "order_link_id": null,
                         "parent_order_link_id": "abi-entry-order-link-id"
-                      }
+                      },
+                      "entry_order_link_id": null,
+                      "entry_order_id": null
                     }
                   }
                 }
@@ -155,7 +171,9 @@
           "position_open",
           "first_fill_at_ms",
           "average_entry_price",
-          "closure"
+          "closure",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "position_open": {
@@ -171,6 +189,23 @@
           },
           "closure": {
             "type": "null"
+          },
+          "entry_order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of this cycle's own entry order whose fill ABI proved"
+          },
+          "entry_order_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "minLength": 1
+              }
+            ],
+            "description": "Exchange order id read from the same confirmed order record that proved the fill; null when that record carried none. Never replaced by another identifier."
           }
         }
       },
@@ -181,7 +216,9 @@
           "position_open",
           "first_fill_at_ms",
           "average_entry_price",
-          "closure"
+          "closure",
+          "entry_order_link_id",
+          "entry_order_id"
         ],
         "properties": {
           "position_open": {
@@ -203,6 +240,12 @@
               }
             ],
             "description": "The proven completion when one of this cycle's own orders closed it; null when the cycle holds no own exposure or its completion carries no own order."
+          },
+          "entry_order_link_id": {
+            "type": "null"
+          },
+          "entry_order_id": {
+            "type": "null"
           }
         }
       },

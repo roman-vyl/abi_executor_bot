@@ -23,7 +23,7 @@ test("9.1 full happy path: applied + own fill + matching live aggregate resolves
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 1785000012345, average_entry_price: "100000", closure: null },
+      body: { position_open: true, first_fill_at_ms: 1785000012345, average_entry_price: "100000", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
   });
 });
@@ -36,7 +36,7 @@ test("9.2 partial fill (less than intended order quantity) still reports open", 
     const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
 
     assert.equal(result.statusCode, 200);
-    assert.deepEqual(result.body, { position_open: true, first_fill_at_ms: 1, average_entry_price: "100000", closure: null });
+    assert.deepEqual(result.body, { position_open: true, first_fill_at_ms: 1, average_entry_price: "100000", closure: null, entry_order_link_id: "link-1", entry_order_id: null });
   });
 });
 
@@ -47,7 +47,7 @@ for (const status of ["absent", "terminal_unfilled"] as const) {
 
       const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
 
-      assert.deepEqual(result.body, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null });
+      assert.deepEqual(result.body, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
     });
   });
@@ -63,7 +63,7 @@ for (const status of ["applied", "pending_replace", "pending_cancel"] as const) 
 
       const result = await service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
 
-      assert.deepEqual(result.body, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null });
+      assert.deepEqual(result.body, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
     });
   });
@@ -203,7 +203,7 @@ test("9.6 a valid zero-size, positionIdx==0 row with empty/default fields resolv
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
+      body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null },
     });
   });
 });

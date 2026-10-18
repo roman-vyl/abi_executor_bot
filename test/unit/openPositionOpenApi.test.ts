@@ -9,13 +9,18 @@ test("OpenAPI examples conform to runtime response contracts", async () => {
   const operation = openPositionOperation(document);
   const examples = operation.responses["200"].content["application/json"].examples;
 
-  assert.deepEqual(
-    openPositionOpenResult({
-      firstFillAtMs: examples.open.value.first_fill_at_ms,
-      averageEntryPrice: examples.open.value.average_entry_price,
-    }).body,
-    examples.open.value,
-  );
+  for (const example of [examples.open.value, examples.open_without_exchange_order_id.value]) {
+    assert.deepEqual(
+      openPositionOpenResult({
+        firstFillAtMs: example.first_fill_at_ms,
+        averageEntryPrice: example.average_entry_price,
+        entryOrderLinkId: example.entry_order_link_id,
+        entryOrderId: example.entry_order_id,
+      }).body,
+      example,
+    );
+  }
+  assert.equal(examples.open_without_exchange_order_id.value.entry_order_id, null);
   assert.deepEqual(openPositionClosedResult().body, examples.closed.value);
 });
 
@@ -62,11 +67,22 @@ test("the success oneOf declaratively enforces the cross-field invariant: only t
   const schema = document.components.schemas.OpenPositionResponse;
 
   assert.equal(
-    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null }),
+    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, ...OPEN_IDS }),
     true,
   );
   assert.equal(
-    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null }),
+    matchesSchema(document, schema, {
+      position_open: true,
+      first_fill_at_ms: 111,
+      average_entry_price: "100000",
+      closure: null,
+      entry_order_link_id: "entry-link",
+      entry_order_id: null,
+    }),
+    true,
+  );
+  assert.equal(
+    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null }),
     true,
   );
   const closure = {
@@ -78,7 +94,7 @@ test("the success oneOf declaratively enforces the cross-field invariant: only t
     parent_order_link_id: "entry-link",
   };
   assert.equal(
-    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure }),
+    matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure, ...NULL_IDS }),
     true,
   );
   for (const invalid of [
@@ -88,13 +104,13 @@ test("the success oneOf declaratively enforces the cross-field invariant: only t
     { ...closure, execution_price: "1" },
   ]) {
     assert.equal(
-      matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: invalid }),
+      matchesSchema(document, schema, { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: invalid, entry_order_link_id: null, entry_order_id: null }),
       false,
       JSON.stringify(invalid),
     );
   }
   assert.equal(
-    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure }),
+    matchesSchema(document, schema, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure, ...OPEN_IDS }),
     false,
   );
 });
@@ -105,19 +121,26 @@ test("the success oneOf rejects every mixed or malformed shape (negative)", asyn
 
   const invalidShapes = [
     // open flag with closed (null) facts
-    { position_open: true, first_fill_at_ms: null, average_entry_price: null },
+    { position_open: true, first_fill_at_ms: null, average_entry_price: null, closure: null, ...OPEN_IDS },
     // closed flag with open (non-null) facts
-    { position_open: false, first_fill_at_ms: 111, average_entry_price: "100000" },
+    { position_open: false, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, ...NULL_IDS },
     // open flag with only one fact null
-    { position_open: true, first_fill_at_ms: 111, average_entry_price: null },
-    { position_open: true, first_fill_at_ms: null, average_entry_price: "100000" },
+    { position_open: true, first_fill_at_ms: 111, average_entry_price: null, closure: null, ...OPEN_IDS },
+    { position_open: true, first_fill_at_ms: null, average_entry_price: "100000", closure: null, ...OPEN_IDS },
     // extra field beyond the closed object
-    { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", extra: "x" },
+    { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, ...OPEN_IDS, extra: "x" },
     // missing a required field
     { position_open: false, first_fill_at_ms: null },
+    { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null },
+    { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
     // non-positive first_fill_at_ms on the open branch
-    { position_open: true, first_fill_at_ms: 0, average_entry_price: "100000" },
-    { position_open: true, first_fill_at_ms: -1, average_entry_price: "100000" },
+    { position_open: true, first_fill_at_ms: 0, average_entry_price: "100000", closure: null, ...OPEN_IDS },
+    { position_open: true, first_fill_at_ms: -1, average_entry_price: "100000", closure: null, ...OPEN_IDS },
+    // open branch without the entry order's own link id
+    { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, ...OPEN_IDS, entry_order_link_id: null },
+    { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, ...OPEN_IDS, entry_order_id: "" },
+    // closed branch carrying entry order identifiers
+    { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, ...OPEN_IDS },
   ];
 
   for (const shape of invalidShapes) {
@@ -160,6 +183,9 @@ test("the 422 error oneOf rejects details on non-validation_failed codes and val
     assert.equal(matchesSchema(document, schema, shape), false, JSON.stringify(shape));
   }
 });
+
+const OPEN_IDS = { entry_order_link_id: "entry-link", entry_order_id: "entry-order" };
+const NULL_IDS = { entry_order_link_id: null, entry_order_id: null };
 
 async function readDocument(): Promise<Record<string, any>> {
   const documentUrl = new URL("../../docs/openapi/abi-open-position-lookup-api-v1.json", import.meta.url);

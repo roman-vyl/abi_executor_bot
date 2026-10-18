@@ -241,8 +241,8 @@ export type EntryOrderTerminality = { kind: "terminal" } | { kind: "live" } | { 
 
 export type RecoveryEntryOrderSignal =
   | { kind: "live_unfilled" }
-  | { kind: "live_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
-  | { kind: "terminal_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string }
+  | { kind: "live_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string; orderId: string | null }
+  | { kind: "terminal_with_fill"; averageEntryPrice: string; cumulativeFilledQty: string; orderId: string | null }
   | { kind: "terminal_without_fill" }
   | { kind: "not_found" }
   | { kind: "inconclusive" };
@@ -376,6 +376,7 @@ export async function classifyEntryOrderForRecovery(input: {
         kind: "terminal_with_fill",
         averageEntryPrice: history.item.avgPrice,
         cumulativeFilledQty,
+        orderId: orderIdOrNull(history.item),
       };
     }
     if (TERMINAL_WITHOUT_FILL_STATUSES.has(history.item.orderStatus)) {
@@ -395,7 +396,14 @@ function fillRecoverySignal(
     kind,
     averageEntryPrice: item.avgPrice,
     cumulativeFilledQty: normalizedCumulativeFilledQty(item),
+    orderId: orderIdOrNull(item),
   };
+}
+
+// The exchange order id of a confirmed row; an empty value is reported as
+// absent, never replaced by another identifier.
+export function orderIdOrNull(item: BybitOrderView): string | null {
+  return item.orderId !== "" ? item.orderId : null;
 }
 
 function normalizedCumulativeFilledQty(item: BybitOrderView): string {
@@ -613,6 +621,7 @@ function toObservation(item: BybitOrderView, desiredQty: string): EarlyExecution
     cumulative_filled_qty: cumulativeFilledQty,
     remaining_qty: remainingQty,
     observed_at: new Date().toISOString(),
+    order_id: orderIdOrNull(item),
   };
 
   if (item.avgPrice !== "" && compareDecimal(item.avgPrice, "0") > 0) {

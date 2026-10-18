@@ -230,6 +230,60 @@ test("replay tolerates a wrong-shaped final line the same way it tolerates trunc
   });
 });
 
+test("replay keeps an observation's entry order id and reads an observation without it as having none", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const base = {
+      order_status: "Filled",
+      cumulative_filled_qty: "0.001",
+      remaining_qty: "0",
+      avg_execution_price: "100000",
+      observed_at: "2026-01-01T00:00:00.000Z",
+    };
+    const withId = makeRecord({
+      tradeCycleId: "cycle-1",
+      orderLinkId: "link-1",
+      orderId: "order-1",
+      earlyExecutionObservation: { ...base, order_id: "bybit-entry-1" },
+    });
+    const withoutId = makeRecord({
+      tradeCycleId: "cycle-2",
+      orderLinkId: "link-2",
+      orderId: "order-2",
+      earlyExecutionObservation: base,
+    });
+    await writeFile(path, `${JSON.stringify(withId)}\n${JSON.stringify(withoutId)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    assert.deepEqual(await repo.replay(), { ok: true });
+    assert.equal(repo.get("instance-1", "cycle-1")?.early_execution_observation?.order_id, "bybit-entry-1");
+    assert.equal(repo.get("instance-1", "cycle-2")?.early_execution_observation?.order_id ?? null, null);
+  });
+});
+
+test("replay fails readiness on an observation whose entry order id is not a string", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "correlation.jsonl");
+    const validRecord = makeRecord({ orderLinkId: "link-1", orderId: "order-1" });
+    const wrongShape = {
+      ...validRecord,
+      early_execution_observation: {
+        order_status: "Filled",
+        cumulative_filled_qty: "0.001",
+        remaining_qty: "0",
+        observed_at: "2026-01-01T00:00:00.000Z",
+        order_id: 123,
+      },
+    };
+    await writeFile(path, `${JSON.stringify(wrongShape)}\n${JSON.stringify(validRecord)}\n`, "utf8");
+
+    const repo = new EntryPackageCorrelationRepository(path);
+
+    assert.equal((await repo.replay()).ok, false);
+  });
+});
+
 test("replay fails readiness on an invalid exchange_category value", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "correlation.jsonl");

@@ -69,6 +69,9 @@ export type EarlyExecutionObservation = {
   remaining_qty: string;
   avg_execution_price?: string;
   observed_at: string;
+  // Exchange order id of the confirmed row this observation was read from.
+  // Absent on observations written before the key existed; read as null.
+  order_id?: string | null;
 };
 
 export type BindingHistoryEndReason = "replaced" | "cancelled" | "superseded" | "exchange_terminal" | null;
@@ -322,7 +325,8 @@ function isValidEarlyExecutionObservation(value: unknown): value is EarlyExecuti
     typeof observation.cumulative_filled_qty === "string" &&
     typeof observation.remaining_qty === "string" &&
     (observation.avg_execution_price === undefined || typeof observation.avg_execution_price === "string") &&
-    typeof observation.observed_at === "string"
+    typeof observation.observed_at === "string" &&
+    (observation.order_id === undefined || observation.order_id === null || typeof observation.order_id === "string")
   );
 }
 

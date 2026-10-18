@@ -230,6 +230,7 @@ function validateOpenPositionDocument(document) {
   assert.equal(schemas.OpenPositionResponse.oneOf.length, 2);
   assert.equal(schemas.OpenPositionBusinessError.oneOf.length, 3);
   assert.equal(schemas.InternalError.properties.error.properties.code.const, "internal_error");
+  assertEntryOrderIdentity(schemas.OpenPositionOpenResponse, schemas.OpenPositionClosedResponse);
 
   assertForbiddenText(document, [
     "pending_create",
@@ -280,6 +281,13 @@ function validateEntryCycleRecoveryDocument(document) {
   assert.equal(schemas.EntryOrderLiveResponse.properties.first_fill_at_ms.type, "null");
   assert.equal(schemas.EntryOrderNotFoundResponse.properties.first_fill_at_ms.type, "null");
   assert.equal(schemas.EntryOrderNotFoundResponse.properties.average_entry_price.type, "null");
+  assertEntryOrderIdentity(
+    schemas.PositionOpenResponse,
+    schemas.EntryOrderLiveResponse,
+    schemas.EntryOrderNotFoundResponse,
+    schemas.TerminalWithoutFillResponse,
+    schemas.TerminalAfterFillResponse,
+  );
 
   assertForbiddenText(document, [
     "pending_create",
@@ -333,6 +341,21 @@ function validatePositionManagementDocument(document) {
   assert.ok(closeOperation.responses["200"].content["application/json"].examples.closed);
 
   assertForbiddenText(document, ["bybit", "Bybit", "adapter", "positionIdx", "orderLinkId"]);
+}
+
+// abi-open-position-entry-order-identity-v1: both keys are required on
+// every success shape; only the open shape carries values.
+function assertEntryOrderIdentity(openSchema, ...otherSchemas) {
+  for (const schema of [openSchema, ...otherSchemas]) {
+    assert.ok(schema.required.includes("entry_order_link_id"));
+    assert.ok(schema.required.includes("entry_order_id"));
+  }
+  assert.equal(openSchema.properties.entry_order_link_id.type, "string");
+  assert.deepEqual(openSchema.properties.entry_order_id.oneOf, [{ type: "null" }, { type: "string", minLength: 1 }]);
+  for (const schema of otherSchemas) {
+    assert.equal(schema.properties.entry_order_link_id.type, "null");
+    assert.equal(schema.properties.entry_order_id.type, "null");
+  }
 }
 
 function assertForbiddenText(document, forbiddenValues) {

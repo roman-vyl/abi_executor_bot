@@ -13,7 +13,12 @@ import {
 } from "../../src/domain/openPositionApi.js";
 
 test("open result enforces the cross-field invariant at construction time", () => {
-  const result = openPositionOpenResult({ firstFillAtMs: 1785000012345, averageEntryPrice: "100000" });
+  const result = openPositionOpenResult({
+    firstFillAtMs: 1785000012345,
+    averageEntryPrice: "100000",
+    entryOrderLinkId: "abi-ep-link",
+    entryOrderId: "bybit-order-1",
+  });
 
   assert.equal(result.statusCode, 200);
   assert.deepEqual(result.body, {
@@ -21,23 +26,43 @@ test("open result enforces the cross-field invariant at construction time", () =
     first_fill_at_ms: 1785000012345,
     average_entry_price: "100000",
     closure: null,
+    entry_order_link_id: "abi-ep-link",
+    entry_order_id: "bybit-order-1",
   });
   assert.deepEqual(Object.keys(result.body).sort(), [
     "average_entry_price",
     "closure",
+    "entry_order_id",
+    "entry_order_link_id",
     "first_fill_at_ms",
     "position_open",
   ]);
 });
 
+test("open result reports a missing exchange order id as null, never a substitute", () => {
+  const result = openPositionOpenResult({
+    firstFillAtMs: 1785000012345,
+    averageEntryPrice: "100000",
+    entryOrderLinkId: "abi-ep-link",
+    entryOrderId: null,
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal((result.body as { entry_order_link_id: unknown }).entry_order_link_id, "abi-ep-link");
+  assert.equal((result.body as { entry_order_id: unknown }).entry_order_id, null);
+});
+
 test("open result fails closed rather than serializing an invalid open shape", () => {
+  const ids = { entryOrderLinkId: "abi-ep-link", entryOrderId: "bybit-order-1" };
   for (const input of [
-    { firstFillAtMs: 0, averageEntryPrice: "100000" },
-    { firstFillAtMs: -1, averageEntryPrice: "100000" },
-    { firstFillAtMs: 1.5, averageEntryPrice: "100000" },
-    { firstFillAtMs: 1785000012345, averageEntryPrice: "0" },
-    { firstFillAtMs: 1785000012345, averageEntryPrice: "-1" },
-    { firstFillAtMs: 1785000012345, averageEntryPrice: "not-a-number" },
+    { firstFillAtMs: 0, averageEntryPrice: "100000", ...ids },
+    { firstFillAtMs: -1, averageEntryPrice: "100000", ...ids },
+    { firstFillAtMs: 1.5, averageEntryPrice: "100000", ...ids },
+    { firstFillAtMs: 1785000012345, averageEntryPrice: "0", ...ids },
+    { firstFillAtMs: 1785000012345, averageEntryPrice: "-1", ...ids },
+    { firstFillAtMs: 1785000012345, averageEntryPrice: "not-a-number", ...ids },
+    { firstFillAtMs: 1785000012345, averageEntryPrice: "100000", entryOrderLinkId: "", entryOrderId: null },
+    { firstFillAtMs: 1785000012345, averageEntryPrice: "100000", entryOrderLinkId: "abi-ep-link", entryOrderId: "" },
   ]) {
     assert.deepEqual(openPositionOpenResult(input), internalErrorResult(), JSON.stringify(input));
   }
@@ -51,6 +76,8 @@ test("closed result nulls both facts", () => {
       first_fill_at_ms: null,
       average_entry_price: null,
       closure: null,
+      entry_order_link_id: null,
+      entry_order_id: null,
     },
   });
 });

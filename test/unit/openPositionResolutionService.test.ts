@@ -39,7 +39,7 @@ for (const status of DURABLY_CLOSED) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null },
       });
       assertNoExchangeCalls(bybit);
     });
@@ -83,7 +83,7 @@ for (const status of LIVE_QUERY_ADMISSIBLE) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null },
       });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
       assert.equal(bybit.getExecutionListCalls.length, 0);
@@ -101,7 +101,7 @@ for (const status of LIVE_QUERY_ADMISSIBLE) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null, entry_order_link_id: null, entry_order_id: null },
       });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
       assert.equal(bybit.getExecutionListCalls.length, 0);
@@ -121,7 +121,7 @@ test("a live, still-partial own fill is reported open, sourced from own evidence
       statusCode: 200,
       // average_entry_price is this cycle's own avg execution price
       // ("99900"), never the aggregate's ("100500") — proves sourcing.
-      body: { position_open: true, first_fill_at_ms: 12345, average_entry_price: "99900", closure: null },
+      body: { position_open: true, first_fill_at_ms: 12345, average_entry_price: "99900", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 0);
   });
@@ -141,7 +141,7 @@ test("a fresh full fill with no captured first_fill_at_ms triggers exactly one e
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 721_000, average_entry_price: "100000", closure: null },
+      body: { position_open: true, first_fill_at_ms: 721_000, average_entry_price: "100000", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 1);
     assert.deepEqual(bybit.getExecutionListCalls[0], {
@@ -248,12 +248,88 @@ test("already-final observation with first_fill_at_ms already captured needs no 
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 555, average_entry_price: "99950", closure: null },
+      body: { position_open: true, first_fill_at_ms: 555, average_entry_price: "99950", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
     assert.equal(bybit.getOrderHistoryCalls.length, 0);
     assert.equal(bybit.getExecutionListCalls.length, 0);
     // The aggregate is still consulted (weak sanity + protection's stop/take needs).
+    assert.equal(bybit.getOpenPositionsCalls.length, 1);
+  });
+});
+
+test("a fresh fill returns the confirmed row's orderId, never the create acknowledgement's order id", async () => {
+  await withResolutionService(async ({ service, bybit, repo }) => {
+    setOwnOrderStatus(bybit, "link-1", { orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000", orderId: "bybit-row-7" });
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.001", avgPrice: "100000", openTime: 999 });
+    // makeRecord stores order_id "order-1" from the create acknowledgement.
+    await repo.save(makeRecord({ status: "applied", side: "long", firstFillAtMs: 555 }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        position_open: true,
+        first_fill_at_ms: 555,
+        average_entry_price: "100000",
+        closure: null,
+        entry_order_link_id: "link-1",
+        entry_order_id: "bybit-row-7",
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 1);
+    assert.equal(bybit.getExecutionListCalls.length, 0);
+    assert.equal(bybit.getOpenPositionsCalls.length, 1);
+  });
+});
+
+test("a fresh fill whose confirmed row carries an empty orderId reports entry_order_id as null", async () => {
+  await withResolutionService(async ({ service, bybit, repo }) => {
+    setOwnOrderStatus(bybit, "link-1", { orderStatus: "Filled", cumExecQty: "0.001", avgPrice: "100000", orderId: "" });
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.001", avgPrice: "100000", openTime: 999 });
+    await repo.save(makeRecord({ status: "applied", side: "long", firstFillAtMs: 555 }));
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.equal(result.statusCode, 200);
+    assert.equal((result.body as { entry_order_link_id: unknown }).entry_order_link_id, "link-1");
+    assert.equal((result.body as { entry_order_id: unknown }).entry_order_id, null);
+  });
+});
+
+test("a reused final observation returns its stored entry order id with no own-order call", async () => {
+  await withResolutionService(async ({ service, bybit, repo }) => {
+    bybit.openPositionsResponse = positionResponse({ side: "Buy", size: "0.001", avgPrice: "100000", openTime: 999 });
+    await repo.save(
+      makeRecord({
+        status: "applied",
+        side: "long",
+        firstFillAtMs: 555,
+        earlyExecutionObservation: observation({
+          order_status: "Filled",
+          cumulative_filled_qty: "0.001",
+          order_id: "bybit-row-7",
+        }),
+      }),
+    );
+
+    const result = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
+
+    assert.deepEqual(result, {
+      statusCode: 200,
+      body: {
+        position_open: true,
+        first_fill_at_ms: 555,
+        average_entry_price: "99950",
+        closure: null,
+        entry_order_link_id: "link-1",
+        entry_order_id: "bybit-row-7",
+      },
+    });
+    assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
+    assert.equal(bybit.getOrderHistoryCalls.length, 0);
+    assert.equal(bybit.getExecutionListCalls.length, 0);
     assert.equal(bybit.getOpenPositionsCalls.length, 1);
   });
 });
@@ -275,7 +351,7 @@ test("backward-compat backfill: an already-final observation without a captured 
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 654_321, average_entry_price: "99950", closure: null },
+      body: { position_open: true, first_fill_at_ms: 654_321, average_entry_price: "99950", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
     assert.equal(bybit.getExecutionListCalls.length, 1);
@@ -301,7 +377,7 @@ test("first capture is durable and stable across repeated GETs — a second GET 
     const second = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
     assert.deepEqual(second, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 111_000, average_entry_price: "100000", closure: null },
+      body: { position_open: true, first_fill_at_ms: 111_000, average_entry_price: "100000", closure: null, entry_order_link_id: "link-1", entry_order_id: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 1);
   });
@@ -404,13 +480,14 @@ function assertNoExchangeCalls(bybit: FakeBybitAdapter): void {
 function setOwnOrderStatus(
   bybit: FakeBybitAdapter,
   orderLinkId: string,
-  input: { orderStatus: string; cumExecQty: string; qty?: string; avgPrice?: string },
+  input: { orderStatus: string; cumExecQty: string; qty?: string; avgPrice?: string; orderId?: string },
 ): void {
   const response = {
     retCode: 0,
     result: {
       list: [
         {
+          ...(input.orderId !== undefined ? { orderId: input.orderId } : {}),
           orderStatus: input.orderStatus,
           triggerPrice: "100000",
           qty: input.qty ?? "0.001",

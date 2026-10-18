@@ -64,6 +64,30 @@ test("a non-string orderId is not reported and does not change the confirmation"
   assert.equal(outcome.kind === "pending_confirmed" && outcome.order.orderId, "");
 });
 
+test("a fill observation carries the confirmed row's orderId, and an empty one as null", async () => {
+  for (const [orderId, expectedOrderId] of [
+    ["bybit-entry-1", "bybit-entry-1"],
+    [undefined, null],
+  ] as const) {
+    const bybit = new FakeBybitAdapter();
+    bybit.orderByLinkIdResponse = listResponse([
+      {
+        ...(orderId !== undefined ? { orderId } : {}),
+        orderStatus: "Filled",
+        triggerPrice: "100000",
+        qty: "0.001",
+        cumExecQty: "0.001",
+        avgPrice: "100000",
+      },
+    ]);
+
+    const outcome = await confirmEntryPackage({ bybit, ...payloads, expected });
+
+    assert.equal(outcome.kind, "full_fill");
+    assert.equal(outcome.kind === "full_fill" && outcome.observation.order_id, expectedOrderId);
+  }
+});
+
 test("real Demo regression: Bybit canonical price text confirms the accepted order", async () => {
   const bybit = new FakeBybitAdapter();
   bybit.orderByLinkIdResponse = listResponse([

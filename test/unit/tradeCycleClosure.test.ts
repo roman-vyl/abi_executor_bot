@@ -47,7 +47,7 @@ test("lookup: the demo stop shape of cycle 2beec9fd returns a stop_loss closure 
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: STOP_CLOSURE },
+      body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: STOP_CLOSURE, entry_order_link_id: null, entry_order_id: null },
     });
     assert.deepEqual(bybit.getExecutionListCalls[0], { category: "linear", symbol: "BTCUSDT", orderId: "stop-child-1", limit: "50" });
     const saved = repo.get("instance-1", "cycle-1");
@@ -111,7 +111,7 @@ test("lookup: an open position with active protection is unchanged", async () =>
 
     const result = await lookup.resolve(query());
 
-    assert.deepEqual(result.body, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null });
+    assert.deepEqual(result.body, { position_open: true, first_fill_at_ms: 111, average_entry_price: "100000", closure: null, entry_order_link_id: ENTRY_LINK, entry_order_id: "order-link-1" });
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
   });
 });
