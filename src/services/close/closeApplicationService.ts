@@ -25,23 +25,36 @@ import { mapBindingAwareMarketCloseOrder, readBybitOrderId } from "../../exchang
 import { cancelEntryOrder, executeMarketCloseOrder } from "../../execution/execution.js";
 import {
   classifyEntryOrderTerminality,
-  classifyOwnCloseOrderOutcome,
   confirmEntryOrderNeutralized,
   confirmEntryPackage,
-  FILLED_STATUSES,
-  TERMINAL_WITHOUT_FILL_STATUSES,
+  LIVE_UNFILLED_STATUSES,
+  resolveFirstAttributableFillAtMs,
 } from "../entryPackage/packageConfirmation.js";
 import type { AttachedProtectionResolution } from "../protection/nativeProtectionAttribution.js";
 import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
+import type { ProtectionClass, TradeCycleClosure } from "../closure/tradeCycleClosure.js";
+import {
+  classifyOwnProtection,
+  proveOwnCycleCompletion,
+  resolveOwnCloseOrderFate,
+  storedClosure,
+  terminalClosedRecord,
+} from "../closure/tradeCycleClosure.js";
 
 const BOUNDED_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 300;
 
+// The exact own protection pair seen when the cycle's protection was proven
+// neutralized; null ids when nothing was ever attached (zero own exposure).
 type ProtectionNeutralizationProof = {
   expectedStopOrderId: string | null;
   expectedTakeOrderId: string | null;
-  cleanAbsenceAllowed: boolean;
 };
+
+type ProtectionNeutralization =
+  | { kind: "neutralized"; proof: ProtectionNeutralizationProof }
+  | { kind: "completed"; closure: TradeCycleClosure }
+  | { kind: "failed" };
 
 export type CloseApplicationServiceDeps = {
   config: AbiConfig;
@@ -50,11 +63,14 @@ export type CloseApplicationServiceDeps = {
   mutex: KeyedMutex;
 };
 
-// One close algorithm for every owner count. The safety ordering is strict:
-// entry neutralization -> final own exposure -> exact own protection
-// neutralization -> aggregate veto -> stable own close -> fresh terminal
-// verification. No market-close write is reachable while own protection is
-// active, ambiguous, or not freshly confirmed neutralized.
+// One close algorithm for every owner count. The safety ordering is strict
+// (abi-trade-cycle-closure-confirmation-v1 D5): entry neutralization ->
+// final own exposure -> first completion proof -> protection class gate ->
+// exact own protection neutralization, re-resolved -> aggregate veto ->
+// stable own close -> fresh terminal verification. No market-close write is
+// reachable while own protection is active, unknown, shows any fill, or is
+// not freshly confirmed neutralized, nor after any own order of this cycle
+// has been proven to complete it.
 export class CloseApplicationService {
   private readonly deps: CloseApplicationServiceDeps;
 
@@ -82,11 +98,11 @@ export class CloseApplicationService {
     }
 
     if (record.status === "terminal_closed") {
-      return closedResult(command);
+      return closedResult(command, storedClosure(record));
     }
 
     if (record.status === "absent" || record.status === "terminal_unfilled") {
-      return this.persistTerminal(command, record);
+      return this.persistTerminal(command, record, null);
     }
 
     const category = record.exchange_category;
@@ -136,12 +152,34 @@ export class CloseApplicationService {
       return internalErrorResult();
     }
 
-    // MASTER-PLAN SAFETY GATE: protection is neutralized before aggregate
-    // inspection, close identity recovery, dispatch, or resend.
-    const protectionProof = await this.neutralizeOwnProtection(category, symbol, orderLinkId, ownExposure, binding);
-    if (protectionProof === undefined) {
+    // D5 step 4: first proof. Nothing that can change exposure has run yet.
+    const initialProtection = await this.classifyProtection(record, orderLinkId, ownExposure, binding);
+    const firstProof = await proveOwnCycleCompletion({
+      bybit: this.deps.bybit,
+      record,
+      ownExposure,
+      entryTerminal: true,
+      protection: initialProtection.protectionClass,
+      binding,
+    });
+    if (firstProof.kind === "completed") {
+      return this.persistTerminal(command, record, firstProof.closure);
+    }
+    if (firstProof.kind === "contradictory") {
       return internalErrorResult();
     }
+
+    // D5 steps 5-6, MASTER-PLAN SAFETY GATE: protection is proven
+    // neutralized before aggregate inspection, close identity recovery,
+    // dispatch, or resend.
+    const neutralization = await this.neutralizeOwnProtection(record, orderLinkId, ownExposure, binding, initialProtection);
+    if (neutralization.kind === "failed") {
+      return internalErrorResult();
+    }
+    if (neutralization.kind === "completed") {
+      return this.persistTerminal(command, record, neutralization.closure);
+    }
+    const protectionProof = neutralization.proof;
 
     if (!(await this.aggregateIsCompatible(record, ownExposure))) {
       return internalErrorResult();
@@ -151,7 +189,7 @@ export class CloseApplicationService {
       if (!(await this.verifyTerminalPostconditions(record, ownExposure, protectionProof))) {
         return internalErrorResult();
       }
-      return this.persistTerminal(command, record);
+      return this.persistTerminal(command, record, null);
     }
 
     return this.closePositiveExposure(command, record, ownExposure, protectionProof);
@@ -223,68 +261,107 @@ export class CloseApplicationService {
     return undefined;
   }
 
-  private async neutralizeOwnProtection(
-    category: "linear",
-    symbol: string,
+  private async classifyProtection(
+    record: EntryPackageExecutionRecord,
     entryOrderLinkId: string,
     ownExposure: string,
     binding: PositionBindingGeometry,
-  ): Promise<ProtectionNeutralizationProof | undefined> {
-    let resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId, binding });
-    let expectedStopOrderId: string | null = null;
-    let expectedTakeOrderId: string | null = null;
-    let cleanAbsenceAllowed = compareDecimal(ownExposure, "0") === 0;
+  ): Promise<{ resolution: AttachedProtectionResolution; protectionClass: ProtectionClass }> {
+    const resolution = await resolveOwnAttachedProtection({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      entryOrderLinkId,
+      binding,
+    });
+    const protectionClass = await classifyOwnProtection({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      resolution,
+      ownExposure,
+    });
+    return { resolution, protectionClass };
+  }
 
-    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
-      if (resolution.kind === "none") {
-        return cleanAbsenceAllowed
-          ? { expectedStopOrderId, expectedTakeOrderId, cleanAbsenceAllowed: true }
-          : undefined;
-      }
-      if (resolution.kind === "ambiguous") {
-        return undefined;
-      }
-
-      if (expectedStopOrderId === null && expectedTakeOrderId === null) {
-        expectedStopOrderId = resolution.stop.orderId;
-        expectedTakeOrderId = resolution.take.orderId;
-      } else if (
-        resolution.stop.orderId !== expectedStopOrderId ||
-        resolution.take.orderId !== expectedTakeOrderId
-      ) {
-        return undefined;
-      }
-
-      const active = [resolution.stop, resolution.take].find((leg) => !isTerminalOrderStatus(leg.orderStatus));
-      if (active === undefined) {
-        return {
-          expectedStopOrderId,
-          expectedTakeOrderId,
-          cleanAbsenceAllowed: true,
-        };
-      }
-
-      const cancelResult = await cancelEntryOrder({
-        config: this.deps.config,
-        bybit: this.deps.bybit,
-        payload: { category, symbol, orderId: active.orderId },
-      });
-      if (cancelResult.status === "skipped_live_execution" || !isAcknowledged(cancelResult.bybitResponse)) {
-        return undefined;
-      }
-      // The pair was freshly and exactly attributed before this accepted
-      // cancel. A subsequent clean `none` is therefore caller-justified
-      // safe absence: realtime proves neither child is active, while the
-      // terminal history rows may still be in Bybit's propagation gap.
-      cleanAbsenceAllowed = true;
-
-      if (attempt < BOUNDED_ATTEMPTS - 1) {
-        await sleep(RETRY_DELAY_MS);
-        resolution = await resolveOwnAttachedProtection({ bybit: this.deps.bybit, category, symbol, entryOrderLinkId, binding });
-      }
+  // D5 steps 5-6. An accepted cancel is never proof that a leg did not
+  // fill: after cancels the pair is re-resolved and must be the same pair in
+  // class neutralized. A leg found filled here closed the cycle during
+  // neutralization. `none` after a cancel is never accepted.
+  private async neutralizeOwnProtection(
+    record: EntryPackageExecutionRecord,
+    entryOrderLinkId: string,
+    ownExposure: string,
+    binding: PositionBindingGeometry,
+    initial: { resolution: AttachedProtectionResolution; protectionClass: ProtectionClass },
+  ): Promise<ProtectionNeutralization> {
+    const { resolution, protectionClass } = initial;
+    if (protectionClass.kind === "neutralized") {
+      return {
+        kind: "neutralized",
+        proof: resolution.kind === "attributed"
+          ? { expectedStopOrderId: resolution.stop.orderId, expectedTakeOrderId: resolution.take.orderId }
+          : { expectedStopOrderId: null, expectedTakeOrderId: null },
+      };
+    }
+    if (protectionClass.kind !== "active" || resolution.kind !== "attributed") {
+      return { kind: "failed" };
     }
 
-    return undefined;
+    const expectedStopOrderId = resolution.stop.orderId;
+    const expectedTakeOrderId = resolution.take.orderId;
+    let current: AttachedProtectionResolution = resolution;
+
+    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
+      if (current.kind !== "attributed") {
+        return { kind: "failed" };
+      }
+      // One exact child cancel per round: Bybit deactivates the coupled
+      // sibling itself, and the fresh re-read decides what is still live.
+      const live = [current.stop, current.take].find((leg) => LIVE_UNFILLED_STATUSES.has(leg.orderStatus));
+      if (live !== undefined) {
+        const cancelResult = await cancelEntryOrder({
+          config: this.deps.config,
+          bybit: this.deps.bybit,
+          payload: { category: "linear", symbol: record.exchange_symbol, orderId: live.orderId },
+        });
+        if (cancelResult.status === "skipped_live_execution") {
+          return { kind: "failed" };
+        }
+        // A rejected cancel may mean the leg just executed: the
+        // re-resolution below decides, never the cancel answer.
+      }
+
+      await sleep(RETRY_DELAY_MS);
+      const next = await this.classifyProtection(record, entryOrderLinkId, ownExposure, binding);
+      if (next.resolution.kind !== "attributed") {
+        return { kind: "failed" };
+      }
+      if (next.resolution.stop.orderId !== expectedStopOrderId || next.resolution.take.orderId !== expectedTakeOrderId) {
+        return { kind: "failed" };
+      }
+
+      if (next.protectionClass.kind === "neutralized") {
+        return { kind: "neutralized", proof: { expectedStopOrderId, expectedTakeOrderId } };
+      }
+      if (next.protectionClass.kind === "completed") {
+        const proof = await proveOwnCycleCompletion({
+          bybit: this.deps.bybit,
+          record,
+          ownExposure,
+          entryTerminal: true,
+          protection: next.protectionClass,
+          binding,
+        });
+        return proof.kind === "completed" ? { kind: "completed", closure: proof.closure } : { kind: "failed" };
+      }
+      if (next.protectionClass.kind !== "active") {
+        return { kind: "failed" };
+      }
+      current = next.resolution;
+    }
+
+    return { kind: "failed" };
   }
 
   private async aggregateIsCompatible(record: EntryPackageExecutionRecord, ownExposure: string): Promise<boolean> {
@@ -319,13 +396,17 @@ export class CloseApplicationService {
     protectionProof: ProtectionNeutralizationProof,
   ): Promise<PositionManagementHttpResult> {
     let current = record;
+    // Set when this request itself dispatched and Bybit acknowledged the
+    // order: a not_found right after it is propagation lag, never absence.
+    let acknowledgedThisRequest = false;
 
     if (current.close_order_link_id === null) {
       const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
       if (dispatched === undefined) {
         return internalErrorResult();
       }
-      current = dispatched;
+      current = dispatched.record;
+      acknowledgedThisRequest = dispatched.acknowledged;
     }
 
     const closeOrderLinkId = current.close_order_link_id;
@@ -333,51 +414,56 @@ export class CloseApplicationService {
       return internalErrorResult();
     }
 
-    const outcome = await this.resolveCloseOrderOutcome(
-      "linear",
-      current.exchange_symbol,
-      closeOrderLinkId,
-      ownExposure,
-      positionBindingGeometry(requirePhysicalBinding(current)),
-    );
-    if (outcome === "incomplete") {
-      return closeExecutionIncompleteResult();
-    }
-    if (outcome === "ambiguous") {
-      return internalErrorResult();
-    }
-    if (outcome === "not_found") {
+    let outcome = await this.resolveCloseOrderOutcome(current, closeOrderLinkId, ownExposure);
+    if (outcome.kind === "not_found") {
+      // Resend under the same identity only with proof the identity never
+      // reached Bybit: no acknowledged dispatch in this request, a full
+      // bounded window of clean not_found, and no own execution at all.
+      if (acknowledgedThisRequest || !(await this.closeIdentityNeverExecuted(current, closeOrderLinkId))) {
+        return internalErrorResult();
+      }
       const dispatched = await this.dispatchCloseOrder(command, current, ownExposure);
       if (dispatched === undefined) {
         return internalErrorResult();
       }
-      const resentOutcome = await this.resolveCloseOrderOutcome(
-        "linear",
-        current.exchange_symbol,
-        closeOrderLinkId,
-        ownExposure,
-        positionBindingGeometry(requirePhysicalBinding(current)),
-      );
-      if (resentOutcome === "incomplete") {
-        return closeExecutionIncompleteResult();
-      }
-      if (resentOutcome !== "matched") {
+      current = dispatched.record;
+      outcome = await this.resolveCloseOrderOutcome(current, closeOrderLinkId, ownExposure);
+      if (outcome.kind === "not_found") {
         return internalErrorResult();
       }
-      current = dispatched;
+    }
+    if (outcome.kind === "incomplete") {
+      return closeExecutionIncompleteResult();
+    }
+    if (outcome.kind !== "matched") {
+      return internalErrorResult();
+    }
+
+    // order_id comes from the close order's own read-back row; the id from
+    // the dispatch answer names the same order when the row omits it.
+    const closeOrderId = outcome.orderId !== "" ? outcome.orderId : current.close_order_id;
+    if (closeOrderId === null || closeOrderId === "") {
+      return internalErrorResult();
     }
 
     if (!(await this.verifyTerminalPostconditions(current, ownExposure, protectionProof))) {
       return internalErrorResult();
     }
-    return this.persistTerminal(command, current);
+    return this.persistTerminal(command, { ...current, close_order_id: closeOrderId }, {
+      strategy_instance_id: current.strategy_instance_id,
+      trade_cycle_id: current.trade_cycle_id,
+      reason: "runtime_signal",
+      order_id: closeOrderId,
+      order_link_id: closeOrderLinkId,
+      parent_order_link_id: null,
+    });
   }
 
   private async dispatchCloseOrder(
     command: CloseCommand,
     record: EntryPackageExecutionRecord,
     ownExposure: string,
-  ): Promise<EntryPackageExecutionRecord | undefined> {
+  ): Promise<{ record: EntryPackageExecutionRecord; acknowledged: boolean } | undefined> {
     const closeOrderLinkId =
       record.close_order_link_id ??
       buildEntryPackageOrderLinkId(command.strategyInstanceId, command.tradeCycleId, "close", record.generation);
@@ -410,43 +496,38 @@ export class CloseApplicationService {
       return undefined;
     }
 
-    return { ...current, close_order_id: readBybitOrderId(result.bybitResponse) };
+    return {
+      record: { ...current, close_order_id: readBybitOrderId(result.bybitResponse) },
+      acknowledged: isAcknowledged(result.bybitResponse),
+    };
   }
 
-  private async resolveCloseOrderOutcome(
-    category: "linear",
-    symbol: string,
-    closeOrderLinkId: string,
-    ownExposure: string,
-    binding: PositionBindingGeometry,
-  ): Promise<"matched" | "incomplete" | "not_found" | "ambiguous"> {
-    const query = { category, symbol, orderLinkId: closeOrderLinkId, limit: "1" as const };
-
-    for (let attempt = 0; attempt < BOUNDED_ATTEMPTS; attempt += 1) {
-      const outcome = await classifyOwnCloseOrderOutcome({
-        bybit: this.deps.bybit,
-        getCloseOrderPayload: query,
-        getCloseOrderHistoryPayload: query,
-        expectedQty: ownExposure,
-        binding,
-      });
-
-      if (outcome.kind === "matched") {
-        return "matched";
-      }
-      if (outcome.kind === "zero_fill" || outcome.kind === "qty_mismatch") {
-        return "incomplete";
-      }
-      if (outcome.kind === "not_found") {
-        return "not_found";
-      }
-      if (attempt < BOUNDED_ATTEMPTS - 1) {
-        await sleep(RETRY_DELAY_MS);
-      }
-    }
-    return "ambiguous";
+  // The own close identity has no execution at all: the complete paged
+  // execution list for that orderLinkId is empty.
+  private async closeIdentityNeverExecuted(record: EntryPackageExecutionRecord, closeOrderLinkId: string): Promise<boolean> {
+    const executions = await resolveFirstAttributableFillAtMs({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      orderLinkId: closeOrderLinkId,
+    });
+    return executions.kind === "no_executions_found";
   }
 
+  private resolveCloseOrderOutcome(record: EntryPackageExecutionRecord, closeOrderLinkId: string, ownExposure: string) {
+    return resolveOwnCloseOrderFate({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      closeOrderLinkId,
+      ownExposure,
+      binding: positionBindingGeometry(requirePhysicalBinding(record)),
+    });
+  }
+
+  // D5 step 9: own entry terminal, the same own protection pair in class
+  // neutralized (not merely terminal: a filled leg is never absence), and
+  // the own close order matched for Q.
   private async verifyTerminalPostconditions(
     record: EntryPackageExecutionRecord,
     ownExposure: string,
@@ -456,6 +537,7 @@ export class CloseApplicationService {
     if (orderLinkId === null) {
       return false;
     }
+    const binding = positionBindingGeometry(requirePhysicalBinding(record));
     const entryQuery = {
       category: "linear" as const,
       symbol: record.exchange_symbol,
@@ -468,26 +550,14 @@ export class CloseApplicationService {
         bybit: this.deps.bybit,
         getEntryOrderPayload: entryQuery,
         getEntryOrderHistoryPayload: entryQuery,
-        binding: positionBindingGeometry(requirePhysicalBinding(record)),
+        binding,
       });
-      const protection = await resolveOwnAttachedProtection({
-        bybit: this.deps.bybit,
-        category: "linear",
-        symbol: record.exchange_symbol,
-        entryOrderLinkId: orderLinkId,
-        binding: positionBindingGeometry(requirePhysicalBinding(record)),
-      });
+      const protection = await this.classifyProtection(record, orderLinkId, ownExposure, binding);
 
       let closeMatched = compareDecimal(ownExposure, "0") === 0;
       if (!closeMatched && record.close_order_link_id !== null) {
         closeMatched =
-          (await this.resolveCloseOrderOutcome(
-            "linear",
-            record.exchange_symbol,
-            record.close_order_link_id,
-            ownExposure,
-            positionBindingGeometry(requirePhysicalBinding(record)),
-          )) === "matched";
+          (await this.resolveCloseOrderOutcome(record, record.close_order_link_id, ownExposure)).kind === "matched";
       }
 
       if (entry.kind === "terminal" && protectionMatchesProof(protection, protectionProof) && closeMatched) {
@@ -500,37 +570,33 @@ export class CloseApplicationService {
     return false;
   }
 
+  // D3: terminal_closed and the closure fields in one save, only after
+  // proof; leaving the active statuses is what releases the physical scope.
   private async persistTerminal(
     command: CloseCommand,
     record: EntryPackageExecutionRecord,
+    closure: TradeCycleClosure | null,
   ): Promise<PositionManagementHttpResult> {
-    await this.deps.correlationRepository.save({
-      ...record,
-      status: "terminal_closed",
-      pending_action: null,
-      updated_at: new Date().toISOString(),
-    });
-    return closedResult(command);
+    await this.deps.correlationRepository.save(terminalClosedRecord(record, closure));
+    return closedResult(command, closure);
   }
 }
 
 function protectionMatchesProof(
-  resolution: AttachedProtectionResolution,
+  protection: { resolution: AttachedProtectionResolution; protectionClass: ProtectionClass },
   proof: ProtectionNeutralizationProof,
 ): boolean {
-  if (resolution.kind === "none") {
-    return proof.cleanAbsenceAllowed;
-  }
-  if (resolution.kind === "ambiguous") {
+  if (protection.protectionClass.kind !== "neutralized") {
     return false;
   }
+  const { resolution } = protection;
+  if (resolution.kind === "none") {
+    return proof.expectedStopOrderId === null && proof.expectedTakeOrderId === null;
+  }
   return (
-    proof.expectedStopOrderId !== null &&
-    proof.expectedTakeOrderId !== null &&
+    resolution.kind === "attributed" &&
     resolution.stop.orderId === proof.expectedStopOrderId &&
-    resolution.take.orderId === proof.expectedTakeOrderId &&
-    isTerminalOrderStatus(resolution.stop.orderStatus) &&
-    isTerminalOrderStatus(resolution.take.orderStatus)
+    resolution.take.orderId === proof.expectedTakeOrderId
   );
 }
 
@@ -542,10 +608,6 @@ function requirePhysicalBinding(record: EntryPackageExecutionRecord) {
   return binding;
 }
 
-function isTerminalOrderStatus(orderStatus: string): boolean {
-  return FILLED_STATUSES.has(orderStatus) || TERMINAL_WITHOUT_FILL_STATUSES.has(orderStatus);
-}
-
 function isAcknowledged(response: unknown): boolean {
   return (
     typeof response === "object" &&
@@ -555,12 +617,13 @@ function isAcknowledged(response: unknown): boolean {
   );
 }
 
-function closedResult(command: CloseCommand): PositionManagementHttpResult {
+function closedResult(command: CloseCommand, closure: TradeCycleClosure | null): PositionManagementHttpResult {
   return serializeTradeCycleClosed({
     strategyInstanceId: command.strategyInstanceId,
     tradeCycleId: command.tradeCycleId,
     positionZeroVerified: true,
     noAttributedActiveOrdersVerified: true,
     correlationCompleteAndConsistent: true,
+    closure,
   });
 }

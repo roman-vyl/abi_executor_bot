@@ -427,7 +427,9 @@ export async function confirmEntryOrderNeutralized(input: {
 }
 
 export type OwnCloseOrderOutcome =
-  | { kind: "matched" }
+  // orderId is the close order's own read-back Bybit id ("" when the row
+  // carries none); closure proof reports it as the closing order.
+  | { kind: "matched"; orderId: string }
   | { kind: "zero_fill" }
   | { kind: "qty_mismatch" }
   | { kind: "not_found" }
@@ -475,7 +477,7 @@ export async function classifyOwnCloseOrderOutcome(input: {
 
   if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
     return decimalEquals(confirmation.observation.cumulative_filled_qty, input.expectedQty)
-      ? { kind: "matched" }
+      ? { kind: "matched", orderId: confirmation.order.orderId }
       : { kind: "qty_mismatch" };
   }
   if (confirmation.kind === "terminal_without_fill") {

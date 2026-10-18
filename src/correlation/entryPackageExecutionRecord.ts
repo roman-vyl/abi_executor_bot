@@ -1,4 +1,5 @@
 import type { DesiredEntryDto } from "../domain/entryPackageApi.js";
+import { TRADE_CYCLE_CLOSURE_REASONS, type TradeCycleClosureReason } from "../domain/tradeCycleClosure.js";
 import type { ExchangeInstrumentCategory } from "../exchange/exchangeInstrumentResolver.js";
 import {
   directionalPositionSlot,
@@ -111,6 +112,15 @@ export type EntryPackageExecutionRecord = {
   // order_id is never used for lookup either.
   close_order_link_id: string | null;
   close_order_id: string | null;
+  // The proven completion of this cycle (abi-trade-cycle-closure-confirmation-v1
+  // D3): written only together with status "terminal_closed", in the same
+  // save, and never changed afterwards. All four are null on every other
+  // record, and on a terminal_closed record whose completion was not proven
+  // by one of this cycle's own orders (zero own exposure, or a legacy close).
+  closure_reason: TradeCycleClosureReason | null;
+  closure_order_id: string | null;
+  closure_order_link_id: string | null;
+  closure_parent_order_link_id: string | null;
   // This cycle's own raw attributable first-fill timestamp — the earliest
   // execTime among this cycle's own entry order's own executions
   // (abi-pair-scoped-open-position-resolution-v1), never a canonical
@@ -262,6 +272,15 @@ export function isValidEntryPackageExecutionRecord(value: unknown): value is Ent
       (typeof record.first_fill_at_ms === "number" &&
         Number.isInteger(record.first_fill_at_ms) &&
         record.first_fill_at_ms >= 0)) &&
+    // Rows written before abi-trade-cycle-closure-confirmation-v1 lack these
+    // keys; replay() normalizes a missing key to null before this runs.
+    (record.closure_reason === undefined ||
+      record.closure_reason === null ||
+      (typeof record.closure_reason === "string" &&
+        TRADE_CYCLE_CLOSURE_REASONS.has(record.closure_reason as TradeCycleClosureReason))) &&
+    isOptionalNullableString(record.closure_order_id) &&
+    isOptionalNullableString(record.closure_order_link_id) &&
+    isOptionalNullableString(record.closure_parent_order_link_id) &&
     typeof record.generation === "number" &&
     Number.isInteger(record.generation) &&
     record.generation >= 0 &&
@@ -326,6 +345,10 @@ function isValidBindingHistoryEntry(value: unknown): value is BindingHistoryEntr
       (typeof entry.end_reason === "string" &&
         END_REASONS.has(entry.end_reason as Exclude<BindingHistoryEndReason, null>)))
   );
+}
+
+function isOptionalNullableString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
 }
 
 function isNonEmptyString(value: unknown): value is string {

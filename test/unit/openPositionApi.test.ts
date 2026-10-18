@@ -20,9 +20,11 @@ test("open result enforces the cross-field invariant at construction time", () =
     position_open: true,
     first_fill_at_ms: 1785000012345,
     average_entry_price: "100000",
+    closure: null,
   });
   assert.deepEqual(Object.keys(result.body).sort(), [
     "average_entry_price",
+    "closure",
     "first_fill_at_ms",
     "position_open",
   ]);
@@ -48,6 +50,7 @@ test("closed result nulls both facts", () => {
       position_open: false,
       first_fill_at_ms: null,
       average_entry_price: null,
+      closure: null,
     },
   });
 });

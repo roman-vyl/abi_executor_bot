@@ -39,7 +39,7 @@ for (const status of DURABLY_CLOSED) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
       });
       assertNoExchangeCalls(bybit);
     });
@@ -83,7 +83,7 @@ for (const status of LIVE_QUERY_ADMISSIBLE) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
       });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
       assert.equal(bybit.getExecutionListCalls.length, 0);
@@ -101,7 +101,7 @@ for (const status of LIVE_QUERY_ADMISSIBLE) {
 
       assert.deepEqual(result, {
         statusCode: 200,
-        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null },
+        body: { position_open: false, first_fill_at_ms: null, average_entry_price: null, closure: null },
       });
       assert.equal(bybit.getOpenPositionsCalls.length, 0);
       assert.equal(bybit.getExecutionListCalls.length, 0);
@@ -121,7 +121,7 @@ test("a live, still-partial own fill is reported open, sourced from own evidence
       statusCode: 200,
       // average_entry_price is this cycle's own avg execution price
       // ("99900"), never the aggregate's ("100500") — proves sourcing.
-      body: { position_open: true, first_fill_at_ms: 12345, average_entry_price: "99900" },
+      body: { position_open: true, first_fill_at_ms: 12345, average_entry_price: "99900", closure: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 0);
   });
@@ -141,7 +141,7 @@ test("a fresh full fill with no captured first_fill_at_ms triggers exactly one e
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 721_000, average_entry_price: "100000" },
+      body: { position_open: true, first_fill_at_ms: 721_000, average_entry_price: "100000", closure: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 1);
     assert.deepEqual(bybit.getExecutionListCalls[0], {
@@ -248,7 +248,7 @@ test("already-final observation with first_fill_at_ms already captured needs no 
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 555, average_entry_price: "99950" },
+      body: { position_open: true, first_fill_at_ms: 555, average_entry_price: "99950", closure: null },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
     assert.equal(bybit.getOrderHistoryCalls.length, 0);
@@ -275,7 +275,7 @@ test("backward-compat backfill: an already-final observation without a captured 
 
     assert.deepEqual(result, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 654_321, average_entry_price: "99950" },
+      body: { position_open: true, first_fill_at_ms: 654_321, average_entry_price: "99950", closure: null },
     });
     assert.equal(bybit.getOrderByLinkIdCalls.length, 0);
     assert.equal(bybit.getExecutionListCalls.length, 1);
@@ -301,7 +301,7 @@ test("first capture is durable and stable across repeated GETs — a second GET 
     const second = await service.resolve({ strategyInstanceId: "instance-1", tradeCycleId: "cycle-1" });
     assert.deepEqual(second, {
       statusCode: 200,
-      body: { position_open: true, first_fill_at_ms: 111_000, average_entry_price: "100000" },
+      body: { position_open: true, first_fill_at_ms: 111_000, average_entry_price: "100000", closure: null },
     });
     assert.equal(bybit.getExecutionListCalls.length, 1);
   });
@@ -535,6 +535,10 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    closure_reason: null,
+    closure_order_id: null,
+    closure_order_link_id: null,
+    closure_parent_order_link_id: null,
     first_fill_at_ms: overrides.firstFillAtMs ?? null,
     generation: 1,
     status: overrides.status ?? "applied",

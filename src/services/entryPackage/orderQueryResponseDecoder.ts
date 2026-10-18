@@ -182,6 +182,9 @@ export type BybitChildOrderCandidate = {
   triggerPrice: string;
   qty: string;
   leavesQty: string;
+  // "" when the row omits it. Read only by closure proof
+  // (abi-trade-cycle-closure-confirmation-v1 D1); never by attribution.
+  cumExecQty: string;
   positionIdx?: 0 | 1 | 2;
 };
 
@@ -200,6 +203,7 @@ export type ChildOrderListProtocolFailureReason =
   | "invalid_trigger_price"
   | "invalid_qty"
   | "invalid_leaves_qty"
+  | "invalid_cumulative_filled_qty"
   | "invalid_position_idx";
 
 export type DecodedChildOrderList =
@@ -309,6 +313,11 @@ export function decodeChildOrderListResponse(input: {
       return { kind: "protocol_failure", reason: "invalid_leaves_qty" };
     }
 
+    const cumExecQtyField = readOptionalStringField(record, "cumExecQty");
+    if (!cumExecQtyField.ok || !isNonNegativeOrEmptyExactDecimal(cumExecQtyField.value)) {
+      return { kind: "protocol_failure", reason: "invalid_cumulative_filled_qty" };
+    }
+
     // This decoder is symbol-scoped, so a valid response may contain rows
     // from other owners and other hedge slots. Validate the exchange field's
     // structure here; exact binding compatibility is checked only after the
@@ -332,6 +341,7 @@ export function decodeChildOrderListResponse(input: {
       triggerPrice: triggerPriceField.value,
       qty: qtyField.value,
       leavesQty: leavesQtyField.value,
+      cumExecQty: cumExecQtyField.value,
     };
     if (positionIdx !== undefined) {
       item.positionIdx = positionIdx;

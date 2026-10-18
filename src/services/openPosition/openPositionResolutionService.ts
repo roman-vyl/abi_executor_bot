@@ -20,8 +20,16 @@ import {
   unknownTradeCycleBindingResult,
   unsupportedExchangeScopeResult,
 } from "../../domain/openPositionApi.js";
-import type { BybitAdapter, BybitOrderSide } from "../../exchange/bybitAdapter.js";
-import { confirmEntryPackage, isFillFactFinal, resolveFirstAttributableFillAtMs } from "../entryPackage/packageConfirmation.js";
+import type { BybitAdapter, BybitOrderSide, PositionQueryResult } from "../../exchange/bybitAdapter.js";
+import {
+  confirmEntryPackage,
+  FILLED_STATUSES,
+  isFillFactFinal,
+  resolveFirstAttributableFillAtMs,
+  TERMINAL_WITHOUT_FILL_STATUSES,
+} from "../entryPackage/packageConfirmation.js";
+import { classifyOwnProtection, proveOwnCycleCompletion, storedClosure, terminalClosedRecord } from "../closure/tradeCycleClosure.js";
+import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
 
 export type OpenPositionQuery = {
   strategyInstanceId: string;
@@ -72,6 +80,13 @@ export type PositionDetermination =
 
 type NonOpenDetermination = Exclude<PositionDetermination, { kind: "open" }>;
 
+type OwnFillFacts = {
+  cumulativeFilledQty: string;
+  avgExecutionPrice: string | undefined;
+  // The own entry order is proven terminal: closure proof requires it.
+  entryTerminal: boolean;
+};
+
 // Resolves a truthful, live current open-position answer for one
 // (strategy_instance_id, trade_cycle_id) pair, sourced from this cycle's
 // own attributable execution evidence.
@@ -100,9 +115,9 @@ export class OpenPositionResolutionService {
 
     if (classifyStatus(record.status) !== "live_query_admissible") {
       // durably_closed/unresolved outcomes need no lock and no durable
-      // write — byte-for-byte the same code path as before this change.
-      const determination = await this.determine(record);
-      return determination.kind === "open" ? internalErrorResult() : this.buildNonOpenHttpResult(determination);
+      // write. A terminal_closed record answers its stored closure with no
+      // exchange call (abi-trade-cycle-closure-confirmation-v1 D3).
+      return this.nonLiveResult(record);
     }
 
     const key = correlationRecordKey(query.strategyInstanceId, query.tradeCycleId);
@@ -167,24 +182,97 @@ export class OpenPositionResolutionService {
       binding,
     });
 
-    if (queryResult.kind === "failure" || queryResult.kind === "no_position") {
-      // Own evidence proves a fill, but the aggregate sanity check
-      // disagrees (query failure or no matching row) — fails closed rather
-      // than reporting position_open from own evidence alone.
+    return evaluateOpen(record, ownFacts, queryResult);
+  }
+
+  private nonLiveResult(record: EntryPackageExecutionRecord): OpenPositionHttpResult {
+    if (classifyStatus(record.status) !== "durably_closed") {
+      return internalErrorResult();
+    }
+    const closure = storedClosure(record);
+    return openPositionClosedResult(
+      closure === null
+        ? null
+        : { closure, strategyInstanceId: record.strategy_instance_id, tradeCycleId: record.trade_cycle_id },
+    );
+  }
+
+  // D4. Under the pair mutex, for a live record. A filled cycle resolves
+  // its own protection on every lookup; proof runs when the cycle's own
+  // close order exists, when the aggregate shows no position, or when any
+  // own protection leg shows a fill. Otherwise the answer is unchanged.
+  private async lookupLive(record: EntryPackageExecutionRecord): Promise<OpenPositionHttpResult | PositionDetermination> {
+    if (record.exchange_category !== "linear") {
+      return { kind: "unsupported_scope" };
+    }
+    const physicalBinding = resolveRecordPhysicalPositionBinding(record);
+    if (physicalBinding === undefined || record.order_link_id === null) {
       return { kind: "error" };
     }
+    const binding = positionBindingGeometry(physicalBinding);
 
-    if (!sideMatches(queryResult.row.side, record.desired_entry)) {
+    const ownFacts = await this.resolveOwnFillFacts(record);
+    if (ownFacts === undefined) {
       return { kind: "error" };
     }
+    const ownExposure = ownFacts.cumulativeFilledQty;
+    if (compareDecimal(ownExposure, "0") <= 0) {
+      return { kind: "closed" };
+    }
 
-    return {
-      kind: "open",
-      firstFillAtMs: record.first_fill_at_ms,
-      averageEntryPrice: ownFacts.avgExecutionPrice,
-      confirmedStopLoss: queryResult.row.stopLoss,
-      confirmedTakeProfit: queryResult.row.takeProfit,
-    };
+    const resolution = await resolveOwnAttachedProtection({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      entryOrderLinkId: record.order_link_id,
+      binding,
+    });
+    const protection = await classifyOwnProtection({
+      bybit: this.deps.bybit,
+      category: "linear",
+      symbol: record.exchange_symbol,
+      resolution,
+      ownExposure,
+    });
+    const queryResult = await this.deps.bybit.queryPositionForInstrument({
+      category: "linear",
+      symbol: record.exchange_symbol,
+      binding,
+    });
+
+    const needsProof =
+      record.close_order_link_id !== null ||
+      queryResult.kind === "no_position" ||
+      protection.kind === "completed" ||
+      protection.kind === "partial_or_contradictory" ||
+      // An observed own protection fill that cannot be classified (e.g. its
+      // execution list is unreadable) never yields the unchanged open answer.
+      protection.anyLegFilled;
+    if (!needsProof) {
+      return evaluateOpen(record, ownFacts, queryResult);
+    }
+
+    const proof = await proveOwnCycleCompletion({
+      bybit: this.deps.bybit,
+      record,
+      ownExposure,
+      entryTerminal: ownFacts.entryTerminal,
+      protection,
+      binding,
+    });
+    if (proof.kind !== "completed") {
+      return internalErrorResult();
+    }
+    try {
+      await this.deps.correlationRepository.save(terminalClosedRecord(record, proof.closure));
+    } catch {
+      return internalErrorResult();
+    }
+    return openPositionClosedResult({
+      closure: proof.closure,
+      strategyInstanceId: record.strategy_instance_id,
+      tradeCycleId: record.trade_cycle_id,
+    });
   }
 
   // Resolves this cycle's own cumulative fill facts: reuses the stored,
@@ -194,14 +282,13 @@ export class OpenPositionResolutionService {
   // resolveOwnExposure (abi-pair-scoped-close-execution-v1) already
   // established for this exact "already final -> reuse; otherwise refresh"
   // shape, applied here for a read instead of a write.
-  private async resolveOwnFillFacts(
-    record: EntryPackageExecutionRecord,
-  ): Promise<{ cumulativeFilledQty: string; avgExecutionPrice: string | undefined } | undefined> {
+  private async resolveOwnFillFacts(record: EntryPackageExecutionRecord): Promise<OwnFillFacts | undefined> {
     const observation = record.early_execution_observation;
     if (observation !== null && isFillFactFinal(observation)) {
       return {
         cumulativeFilledQty: observation.cumulative_filled_qty,
         avgExecutionPrice: observation.avg_execution_price,
+        entryTerminal: true,
       };
     }
 
@@ -224,13 +311,15 @@ export class OpenPositionResolutionService {
     });
 
     if (confirmation.kind === "full_fill" || confirmation.kind === "partial_fill") {
+      const status = confirmation.order.orderStatus;
       return {
         cumulativeFilledQty: confirmation.observation.cumulative_filled_qty,
         avgExecutionPrice: confirmation.observation.avg_execution_price,
+        entryTerminal: FILLED_STATUSES.has(status) || TERMINAL_WITHOUT_FILL_STATUSES.has(status),
       };
     }
     if (confirmation.kind === "terminal_without_fill") {
-      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined };
+      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: true };
     }
     if (confirmation.kind === "pending_confirmed") {
       // Entry order live but zero own cumulative fill so far — a normal,
@@ -238,7 +327,7 @@ export class OpenPositionResolutionService {
       // not an error. Reported the same as terminal_without_fill here:
       // zero fill facts, which determine() correctly turns into "closed"
       // (position_open=false), never "open" and never fabricated.
-      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined };
+      return { cumulativeFilledQty: "0", avgExecutionPrice: undefined, entryTerminal: false };
     }
     // "not_found" / "ambiguous": still treated as unresolved/error — no
     // fill evidence obtainable at all, as opposed to pending_confirmed's
@@ -258,7 +347,15 @@ export class OpenPositionResolutionService {
       return unknownTradeCycleBindingResult();
     }
 
-    const determination = await this.determine(record);
+    if (classifyStatus(record.status) !== "live_query_admissible") {
+      return this.nonLiveResult(record);
+    }
+
+    const lookup = await this.lookupLive(record);
+    if ("statusCode" in lookup) {
+      return lookup;
+    }
+    const determination = lookup;
 
     if (determination.kind !== "open") {
       return this.buildNonOpenHttpResult(determination);
@@ -366,4 +463,33 @@ function exhaustive(value: never): never {
 
 function exhaustiveNonOpenDetermination(value: never): never {
   throw new Error(`Unhandled PositionDetermination: ${JSON.stringify(value)}`);
+}
+
+function evaluateOpen(
+  record: EntryPackageExecutionRecord,
+  ownFacts: OwnFillFacts,
+  queryResult: PositionQueryResult,
+): PositionDetermination {
+  if (ownFacts.avgExecutionPrice === undefined) {
+    return { kind: "error" };
+  }
+
+  if (queryResult.kind === "failure" || queryResult.kind === "no_position") {
+    // Own evidence proves a fill, but the aggregate sanity check
+    // disagrees (query failure or no matching row) — fails closed rather
+    // than reporting position_open from own evidence alone.
+    return { kind: "error" };
+  }
+
+  if (!sideMatches(queryResult.row.side, record.desired_entry)) {
+    return { kind: "error" };
+  }
+
+  return {
+    kind: "open",
+    firstFillAtMs: record.first_fill_at_ms,
+    averageEntryPrice: ownFacts.avgExecutionPrice,
+    confirmedStopLoss: queryResult.row.stopLoss,
+    confirmedTakeProfit: queryResult.row.takeProfit,
+  };
 }

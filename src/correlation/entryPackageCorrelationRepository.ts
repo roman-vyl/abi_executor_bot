@@ -437,6 +437,18 @@ function normalizeLegacyCloseIdentityFields(value: unknown): void {
   if (!("first_fill_at_ms" in record)) {
     record.first_fill_at_ms = null;
   }
+  // Same precedent, for rows written before
+  // abi-trade-cycle-closure-confirmation-v1 shipped.
+  for (const key of [
+    "closure_reason",
+    "closure_order_id",
+    "closure_order_link_id",
+    "closure_parent_order_link_id",
+  ]) {
+    if (!(key in record)) {
+      record[key] = null;
+    }
+  }
 }
 
 // Missing means a record was written before this foundation, when every

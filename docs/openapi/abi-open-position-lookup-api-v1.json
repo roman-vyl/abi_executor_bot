@@ -43,14 +43,31 @@
                     "value": {
                       "position_open": true,
                       "first_fill_at_ms": 1785000012345,
-                      "average_entry_price": "100000"
+                      "average_entry_price": "100000",
+                      "closure": null
                     }
                   },
                   "closed": {
                     "value": {
                       "position_open": false,
                       "first_fill_at_ms": null,
-                      "average_entry_price": null
+                      "average_entry_price": null,
+                      "closure": null
+                    }
+                  },
+                  "closed_by_stop_loss": {
+                    "value": {
+                      "position_open": false,
+                      "first_fill_at_ms": null,
+                      "average_entry_price": null,
+                      "closure": {
+                        "strategy_instance_id": "runtime-owned-instance-id",
+                        "trade_cycle_id": "runtime-owned-cycle-id",
+                        "reason": "stop_loss",
+                        "order_id": "exchange-protection-order-id",
+                        "order_link_id": null,
+                        "parent_order_link_id": "abi-entry-order-link-id"
+                      }
                     }
                   }
                 }
@@ -137,7 +154,8 @@
         "required": [
           "position_open",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "closure"
         ],
         "properties": {
           "position_open": {
@@ -150,6 +168,9 @@
           "average_entry_price": {
             "type": "string",
             "format": "positive-exact-decimal"
+          },
+          "closure": {
+            "type": "null"
           }
         }
       },
@@ -159,7 +180,8 @@
         "required": [
           "position_open",
           "first_fill_at_ms",
-          "average_entry_price"
+          "average_entry_price",
+          "closure"
         ],
         "properties": {
           "position_open": {
@@ -170,6 +192,111 @@
           },
           "average_entry_price": {
             "type": "null"
+          },
+          "closure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TradeCycleClosure"
+              }
+            ],
+            "description": "The proven completion when one of this cycle's own orders closed it; null when the cycle holds no own exposure or its completion carries no own order."
+          }
+        }
+      },
+      "TradeCycleClosure": {
+        "description": "Proven completion of this trade cycle by full execution of an order ABI attributes to this exact pair. Execution price and time are not part of V1.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TradeCycleClosureRuntimeSignal"
+          },
+          {
+            "$ref": "#/components/schemas/TradeCycleClosureProtection"
+          }
+        ]
+      },
+      "TradeCycleClosureRuntimeSignal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "reason",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "const": "runtime_signal"
+          },
+          "order_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exchange order id of ABI's own close order"
+          },
+          "order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of ABI's own close order"
+          },
+          "parent_order_link_id": {
+            "type": "null"
+          }
+        }
+      },
+      "TradeCycleClosureProtection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "reason",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "const": "stop_loss"
+              },
+              {
+                "const": "take_profit"
+              }
+            ]
+          },
+          "order_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exchange order id of the executed protection order"
+          },
+          "order_link_id": {
+            "type": "null"
+          },
+          "parent_order_link_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Client identifier of this cycle's own entry order"
           }
         }
       },

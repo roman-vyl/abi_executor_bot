@@ -1,16 +1,22 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
 import { isPositiveExactDecimalText } from "./entryPackageApi.js";
+import type { TradeCycleClosure } from "./tradeCycleClosure.js";
+import { isValidTradeCycleClosureFor } from "./tradeCycleClosure.js";
 
 export type OpenPositionSuccessResponse =
   | {
       position_open: true;
       first_fill_at_ms: number;
       average_entry_price: string;
+      closure: null;
     }
   | {
       position_open: false;
       first_fill_at_ms: null;
       average_entry_price: null;
+      // The proven completion when this cycle's own order closed it
+      // (abi-trade-cycle-closure-confirmation-v1 D6); null otherwise.
+      closure: TradeCycleClosure | null;
     };
 
 export type OpenPositionErrorCode =
@@ -55,17 +61,27 @@ export function openPositionOpenResult(input: {
       position_open: true,
       first_fill_at_ms: input.firstFillAtMs,
       average_entry_price: input.averageEntryPrice,
+      closure: null,
     },
   };
 }
 
-export function openPositionClosedResult(): OpenPositionHttpResult {
+export function openPositionClosedResult(
+  closure: { closure: TradeCycleClosure; strategyInstanceId: string; tradeCycleId: string } | null = null,
+): OpenPositionHttpResult {
+  if (
+    closure !== null &&
+    !isValidTradeCycleClosureFor(closure.closure, closure.strategyInstanceId, closure.tradeCycleId)
+  ) {
+    return internalErrorResult();
+  }
   return {
     statusCode: 200,
     body: {
       position_open: false,
       first_fill_at_ms: null,
       average_entry_price: null,
+      closure: closure?.closure ?? null,
     },
   };
 }

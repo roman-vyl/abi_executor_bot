@@ -135,7 +135,7 @@ test("active native pair is cancelled by exact child orderId and freshly re-read
   });
 });
 
-test("clean absence after an accepted exact child cancel bridges Bybit terminal-history propagation lag", async () => {
+test("clean absence after an accepted exact child cancel is never neutralization proof", async () => {
   await withService(async ({ service, bybit, repo }) => {
     await repo.save(makeRecord());
     setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
@@ -147,18 +147,18 @@ test("clean absence after an accepted exact child cancel bridges Bybit terminal-
     bybit.cancelOrder = async (payload) => {
       const response = await realCancel(payload);
       if (payload.orderId === "stop-link-1") {
-        // Real Demo behavior: both children leave realtime immediately,
-        // while terminal history can remain empty for a propagation gap.
+        // Both children leave realtime while terminal history is still
+        // empty: an accepted cancel does not prove the stop did not fill.
         installNoProtection(bybit);
       }
       return response;
     };
 
     const result = await service.apply(makeCommand());
-    assert.equal(result.statusCode, 200);
+    assert.equal(result.statusCode, 500);
     assert.equal(bybit.cancelOrderCalls.length, 1);
-    assert.equal(bybit.createOrderCalls.length, 1);
-    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
   });
 });
 
@@ -367,6 +367,7 @@ test("simultaneous hedge close A neutralizes only slot-1 protection and creates 
       const response = await realCancel(payload);
       if (payload.orderId === "stop-link-a") {
         bybit.activeOrdersResponse = childList(bRows);
+        bybit.orderHistoryForSymbolResponse = childList(aRows.map((row) => ({ ...row, orderStatus: "Deactivated", leavesQty: "0" })));
       }
       return response;
     };
@@ -409,6 +410,7 @@ test("simultaneous hedge close B neutralizes only slot-2 protection and creates 
       const response = await realCancel(payload);
       if (payload.orderId === "stop-link-b") {
         bybit.activeOrdersResponse = childList(aRows);
+        bybit.orderHistoryForSymbolResponse = childList(bRows.map((row) => ({ ...row, orderStatus: "Deactivated", leavesQty: "0" })));
       }
       return response;
     };
@@ -539,24 +541,26 @@ test("close identity is durable before a guarded or throwing write and reused on
 
 test("reappearing protection after exact close execution blocks terminal_closed", async () => {
   await withService(async ({ service, bybit, repo }) => {
-    const identity = closeId();
-    await repo.save(makeRecord({ closeOrderLinkId: identity }));
+    await repo.save(makeRecord());
     setEntry(bybit, "link-1", "Filled", "0.003", "0.003");
     installTerminalProtection(bybit, "link-1", "0.003");
     setPosition(bybit, "Buy", "0.003");
-    setOrder(bybit, identity, "Filled", "0.003", "0.003");
+    installFilledCloseAfterCreate(bybit, closeId(), "0.003");
 
     let activeReads = 0;
-    const terminal = bybit.activeOrdersResponse;
-    bybit.getActiveOrders = async () => {
+    const realActive = bybit.getActiveOrders.bind(bybit);
+    bybit.getActiveOrders = async (input) => {
       activeReads += 1;
-      return activeReads === 1 ? terminal : childList(activeProtectionRows("link-1", "0.003"));
+      if (activeReads > 1) {
+        bybit.activeOrdersResponse = childList(activeProtectionRows("link-1", "0.003"));
+      }
+      return realActive(input);
     };
 
     const result = await service.apply(makeCommand());
     assert.equal(result.statusCode, 500);
     assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
-    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(bybit.createOrderCalls.length, 1);
   });
 });
 
@@ -640,6 +644,10 @@ function makeRecord(
     order_id: overrides.orderLinkId === null ? null : "order-1",
     close_order_link_id: overrides.closeOrderLinkId ?? null,
     close_order_id: null,
+    closure_reason: null,
+    closure_order_id: null,
+    closure_order_link_id: null,
+    closure_parent_order_link_id: null,
     first_fill_at_ms: null,
     generation: overrides.generation ?? 1,
     status: overrides.status ?? "applied",
@@ -671,7 +679,7 @@ function setOrder(
   const response = {
     retCode: 0,
     result: {
-      list: [{ orderStatus, triggerPrice: "100000", qty, cumExecQty, stopLoss: "99000", takeProfit: "103000", ...(positionIdx === undefined ? {} : { positionIdx }) }],
+      list: [{ orderId: `order-${orderLinkId}`, orderStatus, triggerPrice: "100000", qty, cumExecQty, stopLoss: "99000", takeProfit: "103000", ...(positionIdx === undefined ? {} : { positionIdx }) }],
     },
   };
   bybit.orderByLinkIdResponseByLinkId.set(orderLinkId, response);
@@ -736,6 +744,7 @@ function stopRow(parentOrderLinkId: string, qty: string, overrides: Record<strin
     triggerPrice: "99000",
     qty,
     leavesQty: qty,
+    cumExecQty: "0",
     ...overrides,
   };
 }

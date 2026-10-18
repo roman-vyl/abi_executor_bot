@@ -23,6 +23,7 @@ test("success DTO is a closed object satisfying the cross-field invariant (open)
     assert.equal(response.status(), 200);
     assert.deepEqual(Object.keys(response.body()).sort(), [
       "average_entry_price",
+      "closure",
       "first_fill_at_ms",
       "position_open",
     ]);
@@ -43,6 +44,7 @@ test("success DTO is a closed object satisfying the cross-field invariant (close
       position_open: false,
       first_fill_at_ms: null,
       average_entry_price: null,
+      closure: null,
     });
   });
 });
@@ -160,6 +162,10 @@ function makeRecord(
     order_id: "order-1",
     close_order_link_id: null,
     close_order_id: null,
+    closure_reason: null,
+    closure_order_id: null,
+    closure_order_link_id: null,
+    closure_parent_order_link_id: null,
     first_fill_at_ms: overrides.firstFillAtMs ?? null,
     generation: 1,
     status: overrides.status ?? "applied",

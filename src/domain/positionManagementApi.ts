@@ -1,6 +1,8 @@
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
 import { isExactDecimalText, isPositiveExactDecimalText } from "./entryPackageApi.js";
 import { decimalEquals } from "./exactDecimal.js";
+import type { TradeCycleClosure } from "./tradeCycleClosure.js";
+import { isValidTradeCycleClosureFor } from "./tradeCycleClosure.js";
 
 export type ProtectionRequestBody = {
   stop_price: string;
@@ -36,6 +38,7 @@ export type TradeCycleClosedResponse = {
   strategy_instance_id: string;
   trade_cycle_id: string;
   status: "trade_cycle_closed";
+  closure: TradeCycleClosure | null;
 };
 
 export type PositionManagementErrorCode =
@@ -292,15 +295,20 @@ export type CloseConfirmation = {
   positionZeroVerified: boolean;
   noAttributedActiveOrdersVerified: boolean;
   correlationCompleteAndConsistent: boolean;
+  // The proven completion (abi-trade-cycle-closure-confirmation-v1 D6), or
+  // null when no own order of this cycle executed (nothing to close).
+  closure?: TradeCycleClosure | null;
 };
 
 export function serializeTradeCycleClosed(input: CloseConfirmation): PositionManagementHttpResult {
+  const closure = input.closure ?? null;
   if (
     input.strategyInstanceId.length === 0 ||
     input.tradeCycleId.length === 0 ||
     !input.positionZeroVerified ||
     !input.noAttributedActiveOrdersVerified ||
-    !input.correlationCompleteAndConsistent
+    !input.correlationCompleteAndConsistent ||
+    (closure !== null && !isValidTradeCycleClosureFor(closure, input.strategyInstanceId, input.tradeCycleId))
   ) {
     return internalErrorResult();
   }
@@ -311,6 +319,7 @@ export function serializeTradeCycleClosed(input: CloseConfirmation): PositionMan
       strategy_instance_id: input.strategyInstanceId,
       trade_cycle_id: input.tradeCycleId,
       status: "trade_cycle_closed",
+      closure,
     },
   };
 }

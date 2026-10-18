@@ -19,6 +19,8 @@ export type AttachedProtectionLeg = {
   triggerPrice: string;
   qty: string;
   leavesQty: string;
+  // "" when Bybit omits it; read only by closure proof.
+  cumExecQty: string;
 };
 
 export type AttachedProtectionAmbiguousReason =
@@ -39,7 +41,16 @@ export type AttachedProtectionAmbiguousReason =
 export type AttachedProtectionResolution =
   | { kind: "none" }
   | { kind: "attributed"; stop: AttachedProtectionLeg; take: AttachedProtectionLeg }
-  | { kind: "ambiguous"; reason: AttachedProtectionAmbiguousReason };
+  | {
+      kind: "ambiguous";
+      reason: AttachedProtectionAmbiguousReason;
+      // Present only when at least one decoded row attributed to this entry
+      // by parentOrderLinkId already shows an execution (cumExecQty > 0, or
+      // a Filled / PartiallyFilled status). An observed own fill is a fact
+      // closure proof must never lose because the pair could not be
+      // classified (abi-trade-cycle-closure-confirmation-v1).
+      ownFillObserved?: true;
+    };
 
 // Pure, query-driven, fail-closed classification of one trade cycle's own
 // Bybit-native attached protection children (materialized under
@@ -99,6 +110,10 @@ export async function resolveOwnAttachedProtection(input: {
     (candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId,
   );
 
+  const ownFillObserved = [...ownRealtimeCandidates, ...ownHistoryCandidates].some(candidateShowsFill);
+  const ambiguous = (reason: AttachedProtectionAmbiguousReason): AttachedProtectionResolution =>
+    ownFillObserved ? { kind: "ambiguous", reason, ownFillObserved: true } : { kind: "ambiguous", reason };
+
   if (input.binding !== undefined) {
     const expectedPositionIdx = encodeBybitPositionIdx(input.binding);
     // The predecessor contract requires this ordering: exact-parent first,
@@ -109,16 +124,30 @@ export async function resolveOwnAttachedProtection(input: {
         (candidate) => candidate.positionIdx !== expectedPositionIdx,
       )
     ) {
-      return { kind: "ambiguous", reason: "query_failed" };
+      return ambiguous("query_failed");
     }
   }
 
   const deduped = dedupeByOrderId(ownRealtimeCandidates, ownHistoryCandidates);
   if (deduped.kind === "inconsistent") {
-    return { kind: "ambiguous", reason: "inconsistent_duplicate" };
+    return ambiguous("inconsistent_duplicate");
   }
 
-  return classify(deduped.items);
+  const classified = classify(deduped.items);
+  return classified.kind === "ambiguous" ? ambiguous(classified.reason) : classified;
+}
+
+const FILL_STATUSES = new Set(["Filled", "PartiallyFilled"]);
+
+function candidateShowsFill(candidate: BybitChildOrderCandidate): boolean {
+  if (FILL_STATUSES.has(candidate.orderStatus)) {
+    return true;
+  }
+  try {
+    return candidate.cumExecQty !== "" && compareDecimal(candidate.cumExecQty, "0") > 0;
+  } catch {
+    return false;
+  }
 }
 
 // Merges realtime and history candidates by orderId — the only reliable
@@ -216,5 +245,6 @@ function toLeg(candidate: BybitChildOrderCandidate, role: "stop" | "take"): Atta
     triggerPrice: candidate.triggerPrice,
     qty: candidate.qty,
     leavesQty: candidate.leavesQty,
+    cumExecQty: candidate.cumExecQty,
   };
 }

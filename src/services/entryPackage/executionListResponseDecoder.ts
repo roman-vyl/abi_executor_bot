@@ -1,5 +1,9 @@
+import { compareDecimal } from "../../domain/exactDecimal.js";
+
 export type BybitExecutionView = {
   execTimeMs: number;
+  // "" when the row omits it; closure proof requires it present.
+  execQty: string;
 };
 
 export type ExecutionListProtocolFailureReason =
@@ -9,7 +13,8 @@ export type ExecutionListProtocolFailureReason =
   | "malformed_item"
   | "symbol_mismatch"
   | "invalid_exec_type"
-  | "invalid_exec_time";
+  | "invalid_exec_time"
+  | "invalid_exec_qty";
 
 export type DecodedExecutionListPage =
   | { kind: "ok"; executions: BybitExecutionView[]; nextCursor: string }
@@ -85,8 +90,25 @@ export function decodeExecutionListResponsePage(input: {
       return { kind: "protocol_failure", reason: "invalid_exec_time" };
     }
 
-    executions.push({ execTimeMs });
+    const execQty = record.execQty;
+    let execQtyText = "";
+    if (Object.hasOwn(record, "execQty")) {
+      if (typeof execQty !== "string" || !isPositiveExactDecimal(execQty)) {
+        return { kind: "protocol_failure", reason: "invalid_exec_qty" };
+      }
+      execQtyText = execQty;
+    }
+
+    executions.push({ execTimeMs, execQty: execQtyText });
   }
 
   return { kind: "ok", executions, nextCursor: nextPageCursor };
+}
+
+function isPositiveExactDecimal(text: string): boolean {
+  try {
+    return compareDecimal(text, "0") > 0;
+  } catch {
+    return false;
+  }
 }

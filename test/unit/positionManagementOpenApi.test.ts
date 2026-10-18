@@ -56,6 +56,7 @@ test("close OpenAPI examples conform to runtime request and response contracts",
       positionZeroVerified: true,
       noAttributedActiveOrdersVerified: true,
       correlationCompleteAndConsistent: true,
+      closure: closed.closure,
     }).body,
     closed,
   );
