@@ -19,6 +19,12 @@ Both facts reflect this specific trade cycle's own execution evidence, never an 
 - **AND** `first_fill_at_ms` and `average_entry_price` are both non-null
 - **AND** `closure` is `null`
 
+#### Scenario: Closed position response nulls both facts
+- **WHEN** ABI determines the current position is closed or was never opened under the current binding
+- **THEN** ABI returns HTTP `200`
+- **AND** `position_open` is `false`
+- **AND** `first_fill_at_ms` and `average_entry_price` are both `null`
+
 #### Scenario: Never-filled entry nulls both facts and closure
 - **WHEN** this cycle's own entry order has no fill under the current binding
 - **THEN** ABI returns HTTP `200` with `position_open: false`, both facts `null`, and `closure: null`

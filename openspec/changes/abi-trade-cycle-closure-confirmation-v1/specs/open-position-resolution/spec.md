@@ -19,6 +19,11 @@ For a durably closed record, `closure` SHALL be the record's stored closure when
 - **THEN** ABI returns `position_open: false` with both facts `null` and `closure: null`
 - **AND** ABI does not query the exchange
 
+#### Scenario: Terminally-closed durably proves no exposure
+- **WHEN** the record's status is `terminal_closed`
+- **THEN** ABI returns `position_open: false` with both facts `null`
+- **AND** ABI does not query the exchange
+
 #### Scenario: Terminally-closed record answers from its stored closure
 - **WHEN** the record's status is `terminal_closed` with a stored closure
 - **THEN** ABI returns `position_open: false` with both facts `null` and that closure
