@@ -99,6 +99,21 @@ async function reconcile(bybit: FakeBybitAdapter, desiredState: DesiredProtectio
   });
 }
 
+// The attributed leg the reconciliation is expected to return, as decoded
+// from attributedPair()'s rows (leavesQty is never touched by the amend
+// wrapper; cumExecQty is "" because the fixture rows omit it).
+function expectedLeg(role: "stop" | "take", overrides: Partial<{ triggerPrice: string; qty: string; orderStatus: string }> = {}) {
+  return {
+    role,
+    orderId: role === "stop" ? "stop-1" : "take-1",
+    orderStatus: overrides.orderStatus ?? "Untriggered",
+    triggerPrice: overrides.triggerPrice ?? (role === "stop" ? "99000" : "103000"),
+    qty: overrides.qty ?? "0.004",
+    leavesQty: "0.001",
+    cumExecQty: "",
+  };
+}
+
 // ---- computeSurrogateTakePrice (task 4.2) ----
 
 test("computeSurrogateTakePrice is deterministic and idempotent across repeated calls with unchanged inputs", () => {
@@ -155,7 +170,7 @@ test("9.1 already-attributed pair matching desired exactly returns already_satis
 
   const result = await reconcile(bybit, desired());
 
-  assert.deepEqual(result, { kind: "already_satisfied" });
+  assert.deepEqual(result, { kind: "already_satisfied", stop: expectedLeg("stop"), take: expectedLeg("take") });
   assert.equal(bybit.amendOrderCalls.length, 0);
 });
 
@@ -165,7 +180,7 @@ test("9.2 only stop_price changed → exactly one amendOrder call on the STOP le
 
   const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, { kind: "reconciled", stop: expectedLeg("stop", { triggerPrice: "98000" }), take: expectedLeg("take") });
   assert.equal(bybit.amendOrderCalls.length, 1);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -181,7 +196,7 @@ test("9.3 only qty changed → exactly one amendOrder call, deterministically on
 
   const result = await reconcile(bybit, desired({ qty: "0.006" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, { kind: "reconciled", stop: expectedLeg("stop", { qty: "0.006" }), take: expectedLeg("take", { qty: "0.006" }) });
   assert.equal(bybit.amendOrderCalls.length, 1);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -197,7 +212,11 @@ test("9.4 both stop_price and take_price changed, qty unchanged → exactly two 
 
   const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000", takeTriggerPrice: "104000" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, {
+    kind: "reconciled",
+    stop: expectedLeg("stop", { triggerPrice: "98000" }),
+    take: expectedLeg("take", { triggerPrice: "104000" }),
+  });
   assert.equal(bybit.amendOrderCalls.length, 2);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -222,7 +241,11 @@ test("9.4a qty and both triggerPrices change together → STOP carries triggerPr
     desired({ stopTriggerPrice: "98000", takeTriggerPrice: "104000", qty: "0.006" }),
   );
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, {
+    kind: "reconciled",
+    stop: expectedLeg("stop", { triggerPrice: "98000", qty: "0.006" }),
+    take: expectedLeg("take", { triggerPrice: "104000", qty: "0.006" }),
+  });
   assert.equal(bybit.amendOrderCalls.length, 2);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -245,7 +268,11 @@ test("9.4b qty changed and only TAKE's triggerPrice also changed → STOP carrie
 
   const result = await reconcile(bybit, desired({ takeTriggerPrice: "104000", qty: "0.006" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, {
+    kind: "reconciled",
+    stop: expectedLeg("stop", { qty: "0.006" }),
+    take: expectedLeg("take", { triggerPrice: "104000", qty: "0.006" }),
+  });
   assert.equal(bybit.amendOrderCalls.length, 2);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -267,7 +294,7 @@ test("9.5 take_price: null against an already-materialized real TAKE reconciles 
 
   const result = await reconcile(bybit, desired({ takeTriggerPrice: "150000" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, { kind: "reconciled", stop: expectedLeg("stop"), take: expectedLeg("take", { triggerPrice: "150000" }) });
   assert.equal(bybit.amendOrderCalls.length, 1);
   assert.deepEqual(bybit.amendOrderCalls[0], {
     category: CATEGORY,
@@ -441,9 +468,87 @@ test("9.9 reconciling one cycle's own pair never touches another cycle's orderId
 
   const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000" }));
 
-  assert.deepEqual(result, { kind: "reconciled" });
+  assert.deepEqual(result, { kind: "reconciled", stop: expectedLeg("stop", { triggerPrice: "98000" }), take: expectedLeg("take") });
   assert.equal(bybit.amendOrderCalls.length, 1);
   assert.equal(bybit.amendOrderCalls[0].orderId, "stop-1");
+});
+
+// ---- abi-protection-orders-identity-v1: success carries the proving legs ----
+
+// Counts every fresh attribution read (getActiveOrders) without changing
+// what it returns.
+function countActiveOrderReads(bybit: FakeBybitAdapter): { reads: number } {
+  const counter = { reads: 0 };
+  const original = bybit.getActiveOrders.bind(bybit);
+  bybit.getActiveOrders = async (queryInput) => {
+    counter.reads += 1;
+    return original(queryInput);
+  };
+  return counter;
+}
+
+test("already_satisfied returns the initial read's legs as Bybit returned them (trailing zeros kept), with no write and one read", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit, { stop: { triggerPrice: "99000.0", qty: "0.0040" }, take: { triggerPrice: "103000.00", qty: "0.0040" } });
+  const counter = countActiveOrderReads(bybit);
+
+  const result = await reconcile(bybit, desired());
+
+  assert.deepEqual(result, {
+    kind: "already_satisfied",
+    stop: expectedLeg("stop", { triggerPrice: "99000.0", qty: "0.0040" }),
+    take: expectedLeg("take", { triggerPrice: "103000.00", qty: "0.0040" }),
+  });
+  assert.equal(bybit.amendOrderCalls.length, 0);
+  assert.equal(counter.reads, 1);
+});
+
+test("reconciled returns the post-amend read-back legs, not the initial read or the write plan, with no extra read", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit);
+  let reads = 0;
+  const originalGetActiveOrders = bybit.getActiveOrders.bind(bybit);
+  bybit.getActiveOrders = async (queryInput) => {
+    reads += 1;
+    if (reads >= 2) {
+      // The read-back formats the amended values differently from the
+      // write plan ("98000") and the initial read ("99000").
+      return realtimeList([
+        childRow({ orderId: "stop-1", stopOrderType: "PartialStopLoss", triggerPrice: "98000.00", qty: "0.0040" }),
+        childRow({
+          orderId: "take-1",
+          stopOrderType: "PartialTakeProfit",
+          createType: "CreateByPartialTakeProfit",
+          triggerPrice: "103000.0",
+          qty: "0.0040",
+        }),
+      ]);
+    }
+    return originalGetActiveOrders(queryInput);
+  };
+
+  const result = await reconcile(bybit, desired({ stopTriggerPrice: "98000" }));
+
+  assert.deepEqual(result, {
+    kind: "reconciled",
+    stop: expectedLeg("stop", { triggerPrice: "98000.00", qty: "0.0040" }),
+    take: expectedLeg("take", { triggerPrice: "103000.0", qty: "0.0040" }),
+  });
+  assert.equal(bybit.amendOrderCalls.length, 1);
+  assert.equal(reads, 2);
+});
+
+test("a surrogate take (take_price: null) is returned as the take leg like any other take", async () => {
+  const bybit = new FakeBybitAdapter();
+  attributedPair(bybit, { take: { triggerPrice: "150000" } });
+
+  const result = await reconcile(bybit, desired({ takeTriggerPrice: "150000" }));
+
+  assert.deepEqual(result, {
+    kind: "already_satisfied",
+    stop: expectedLeg("stop"),
+    take: expectedLeg("take", { triggerPrice: "150000" }),
+  });
 });
 
 // ---- Finding #1: terminal attributed protection is never active coverage ----

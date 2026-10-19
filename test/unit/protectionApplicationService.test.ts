@@ -91,7 +91,37 @@ test("already-satisfied native Partial pair returns the closed public success wi
         status: "protection_applied",
         stop_price: "99000",
         take_price: "103000",
+        protection_orders: {
+          quantity: "0.001",
+          stop: { order_id: "stop-1", trigger_price: "99000" },
+          take: { order_id: "take-1", trigger_price: "103000" },
+        },
       },
+    });
+    assert.equal(bybit.amendOrderCalls.length, 0);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 1, "one fresh attribution read, no extra read for protection_orders");
+  });
+});
+
+test("protection_orders carries the matching read's Bybit strings unchanged while stop_price/take_price echo the request", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    await repo.save(makeRecord());
+    setOpenLong(bybit);
+    installAttributedRows(bybit, {
+      stop: { triggerPrice: "99000.00", qty: "0.0010" },
+      take: { triggerPrice: "103000.0", qty: "0.0010" },
+    });
+
+    const result = await service.apply(makeCommand());
+
+    assert.equal(result.statusCode, 200);
+    const body = result.body as Record<string, unknown>;
+    assert.equal(body.stop_price, "99000");
+    assert.equal(body.take_price, "103000");
+    assert.deepEqual(body.protection_orders, {
+      quantity: "0.0010",
+      stop: { order_id: "stop-1", trigger_price: "99000.00" },
+      take: { order_id: "take-1", trigger_price: "103000.0" },
     });
     assert.equal(bybit.amendOrderCalls.length, 0);
   });
@@ -114,6 +144,12 @@ test("explicit take changes reconcile in place and succeed only after fresh read
       ],
     );
     assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 2, "pre-amend and post-amend attribution are both fresh");
+    // The post-amend read-back legs, not the initial read (98000/104000).
+    assert.deepEqual((result.body as Record<string, unknown>).protection_orders, {
+      quantity: "0.001",
+      stop: { order_id: "stop-1", trigger_price: "99000" },
+      take: { order_id: "take-1", trigger_price: "103000" },
+    });
   });
 });
 
@@ -129,6 +165,8 @@ test("quantity change travels on STOP and Bybit-synchronized sibling qty is fres
     assert.deepEqual(bybit.amendOrderCalls, [
       { category: "linear", symbol: "BTCUSDT", orderId: "stop-1", qty: "0.001" },
     ]);
+    // quantity is the read-back's common qty, not the initial 0.0005.
+    assert.equal((result.body as { protection_orders: { quantity: string } }).protection_orders.quantity, "0.001");
   });
 });
 
@@ -146,6 +184,12 @@ test("take_price null uses the deterministic surrogate but preserves public null
     assert.deepEqual(bybit.amendOrderCalls, [
       { category: "linear", symbol: "BTCUSDT", orderId: "take-1", triggerPrice: "150000" },
     ]);
+    // The dormant surrogate take order is reported as it is on the exchange.
+    assert.deepEqual((result.body as Record<string, unknown>).protection_orders, {
+      quantity: "0.001",
+      stop: { order_id: "stop-1", trigger_price: "99000" },
+      take: { order_id: "take-1", trigger_price: "150000" },
+    });
   });
 });
 

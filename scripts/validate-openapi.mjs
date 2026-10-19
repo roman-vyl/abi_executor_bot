@@ -308,6 +308,29 @@ function validatePositionManagementDocument(document) {
   assert.equal(schemas.ProtectionRequest.additionalProperties, false);
   assert.equal(schemas.ProtectionAppliedResponse.additionalProperties, false);
   assert.equal(schemas.ProtectionAppliedResponse.properties.status.const, "protection_applied");
+  // abi-protection-orders-identity-v1: protection_orders is required and
+  // closed at every level.
+  assert.deepEqual(schemas.ProtectionAppliedResponse.required, [
+    "strategy_instance_id",
+    "trade_cycle_id",
+    "status",
+    "stop_price",
+    "take_price",
+    "protection_orders",
+  ]);
+  assert.deepEqual(schemas.ProtectionAppliedResponse.properties.protection_orders, {
+    $ref: "#/components/schemas/ProtectionOrders",
+  });
+  assert.equal(schemas.ProtectionOrders.additionalProperties, false);
+  assert.deepEqual(schemas.ProtectionOrders.required, ["quantity", "stop", "take"]);
+  assert.equal(schemas.ProtectionOrders.properties.quantity.format, "positive-exact-decimal");
+  for (const leg of ["stop", "take"]) {
+    assert.deepEqual(schemas.ProtectionOrders.properties[leg], { $ref: "#/components/schemas/ProtectionOrder" });
+  }
+  assert.equal(schemas.ProtectionOrder.additionalProperties, false);
+  assert.deepEqual(schemas.ProtectionOrder.required, ["order_id", "trigger_price"]);
+  assert.equal(schemas.ProtectionOrder.properties.order_id.minLength, 1);
+  assert.equal(schemas.ProtectionOrder.properties.trigger_price.format, "positive-exact-decimal");
 
   const protectionBusinessErrorRefs = schemas.ProtectionBusinessError.oneOf.map((entry) => entry.$ref);
   assert.deepEqual(protectionBusinessErrorRefs, [

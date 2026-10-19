@@ -22,6 +22,30 @@ export type ProtectionAppliedResponse = {
   status: "protection_applied";
   stop_price: string;
   take_price: string | null;
+  protection_orders: ProtectionOrders;
+};
+
+// The native protective children that proved a protection success, as
+// Bybit returned them (abi-protection-orders-identity-v1 D1/D3). take is
+// always present — the dormant surrogate take when take_price is null.
+export type ProtectionOrders = {
+  quantity: string;
+  stop: ProtectionOrderIdentity;
+  take: ProtectionOrderIdentity;
+};
+
+export type ProtectionOrderIdentity = {
+  order_id: string;
+  trigger_price: string;
+};
+
+// The subset of an attributed protective leg the success body exposes.
+// Structurally satisfied by AttachedProtectionLeg, kept local so the domain
+// layer does not import from services.
+export type ProtectionProvingLeg = {
+  orderId: string;
+  triggerPrice: string;
+  qty: string;
 };
 
 // V1 accepts only a canonical exposureFraction — an exact-decimal string
@@ -250,6 +274,9 @@ export type ProtectionConfirmation = {
   confirmedStopPrice: string;
   confirmedTakePrice: string | null;
   verificationSucceeded: boolean;
+  // The attributed stop/take legs of the fresh read that proved success.
+  stopLeg: ProtectionProvingLeg;
+  takeLeg: ProtectionProvingLeg;
 };
 
 export function serializeProtectionApplied(input: ProtectionConfirmation): PositionManagementHttpResult {
@@ -265,7 +292,10 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
     !isNumericallyEqualExactDecimal(input.acceptedStopPrice, input.confirmedStopPrice) ||
     (input.acceptedTakePrice !== null &&
       input.confirmedTakePrice !== null &&
-      !isNumericallyEqualExactDecimal(input.acceptedTakePrice, input.confirmedTakePrice))
+      !isNumericallyEqualExactDecimal(input.acceptedTakePrice, input.confirmedTakePrice)) ||
+    !isWellFormedProvingLeg(input.stopLeg) ||
+    !isWellFormedProvingLeg(input.takeLeg) ||
+    !isNumericallyEqualExactDecimal(input.stopLeg.qty, input.takeLeg.qty)
   ) {
     return internalErrorResult();
   }
@@ -281,8 +311,26 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
       status: "protection_applied",
       stop_price: input.acceptedStopPrice,
       take_price: input.acceptedTakePrice,
+      // Bybit's own strings, unchanged (trailing zeros kept); quantity is
+      // the legs' common qty, taken from the stop leg.
+      protection_orders: {
+        quantity: input.stopLeg.qty,
+        stop: { order_id: input.stopLeg.orderId, trigger_price: input.stopLeg.triggerPrice },
+        take: { order_id: input.takeLeg.orderId, trigger_price: input.takeLeg.triggerPrice },
+      },
     },
   };
+}
+
+function isWellFormedProvingLeg(leg: ProtectionProvingLeg): boolean {
+  return (
+    typeof leg.orderId === "string" &&
+    leg.orderId.length > 0 &&
+    typeof leg.triggerPrice === "string" &&
+    isPositiveExactDecimalText(leg.triggerPrice) &&
+    typeof leg.qty === "string" &&
+    isPositiveExactDecimalText(leg.qty)
+  );
 }
 
 // Close success requires all three postconditions to be verified under

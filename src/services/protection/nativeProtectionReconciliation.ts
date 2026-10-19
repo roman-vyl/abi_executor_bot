@@ -31,9 +31,13 @@ export type DesiredProtectionState = {
   take: DesiredProtectionLeg; // always present — surrogate when the command's take_price is null
 };
 
+// Both success outcomes carry the attributed legs of the fresh read that
+// proved them (abi-protection-orders-identity-v1 D2): the matching initial
+// read for already_satisfied, the matching post-amend read-back for
+// reconciled — never the write plan, the request or an earlier read.
 export type ReconciliationOutcome =
-  | { kind: "already_satisfied" }
-  | { kind: "reconciled" }
+  | { kind: "already_satisfied"; stop: AttachedProtectionLeg; take: AttachedProtectionLeg }
+  | { kind: "reconciled"; stop: AttachedProtectionLeg; take: AttachedProtectionLeg }
   | { kind: "fail_closed"; reason: ReconciliationFailureReason };
 
 export type ReconciliationFailureReason =
@@ -153,7 +157,7 @@ export async function reconcileNativePartialProtection(input: {
   }
 
   if (matchesDesired(initial, desired)) {
-    return { kind: "already_satisfied" };
+    return { kind: "already_satisfied", stop: initial.stop, take: initial.take };
   }
 
   const writePlan = buildWritePlan(initial, desired);
@@ -208,7 +212,7 @@ export async function reconcileNativePartialProtection(input: {
     return { kind: "fail_closed", reason: "amend_race" };
   }
 
-  return { kind: "reconciled" };
+  return { kind: "reconciled", stop: readBack.stop, take: readBack.take };
 }
 
 function hasTerminalLeg(pair: { stop: AttachedProtectionLeg; take: AttachedProtectionLeg }): boolean {

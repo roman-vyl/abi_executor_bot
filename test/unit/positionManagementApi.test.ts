@@ -169,6 +169,8 @@ function verifiedProtection(overrides: Partial<ProtectionConfirmation> = {}): Pr
     confirmedStopPrice: "99000",
     confirmedTakePrice: "103000",
     verificationSucceeded: true,
+    stopLeg: { orderId: "stop-1", triggerPrice: "99000", qty: "0.004" },
+    takeLeg: { orderId: "take-1", triggerPrice: "103000", qty: "0.004" },
     ...overrides,
   };
 }
@@ -184,6 +186,11 @@ test("serializeProtectionApplied returns 200 with the accepted request strings w
       status: "protection_applied",
       stop_price: "99000",
       take_price: "103000",
+      protection_orders: {
+        quantity: "0.004",
+        stop: { order_id: "stop-1", trigger_price: "99000" },
+        take: { order_id: "take-1", trigger_price: "103000" },
+      },
     },
   });
 });
@@ -210,6 +217,7 @@ test("serializeProtectionApplied nulls take_price through unchanged when both si
 
   assert.equal(result.statusCode, 200);
   assert.deepEqual(Object.keys(result.body).sort(), [
+    "protection_orders",
     "status",
     "stop_price",
     "strategy_instance_id",
@@ -217,6 +225,77 @@ test("serializeProtectionApplied nulls take_price through unchanged when both si
     "trade_cycle_id",
   ]);
   assert.equal((result.body as Record<string, unknown>).take_price, null);
+});
+
+test("serializeProtectionApplied reports the surrogate take leg when take_price is null", () => {
+  const result = serializeProtectionApplied(
+    verifiedProtection({
+      acceptedTakePrice: null,
+      confirmedTakePrice: null,
+      takeLeg: { orderId: "surrogate-take-1", triggerPrice: "150000", qty: "0.004" },
+    }),
+  );
+
+  assert.equal(result.statusCode, 200);
+  const body = result.body as Record<string, unknown>;
+  assert.equal(body.take_price, null);
+  assert.deepEqual(body.protection_orders, {
+    quantity: "0.004",
+    stop: { order_id: "stop-1", trigger_price: "99000" },
+    take: { order_id: "surrogate-take-1", trigger_price: "150000" },
+  });
+});
+
+test("serializeProtectionApplied returns the legs' Bybit strings unchanged, trailing zeros kept, quantity from the common qty", () => {
+  const result = serializeProtectionApplied(
+    verifiedProtection({
+      stopLeg: { orderId: "stop-1", triggerPrice: "99000.00", qty: "0.0040" },
+      takeLeg: { orderId: "take-1", triggerPrice: "103000.0", qty: "0.0040" },
+    }),
+  );
+
+  assert.equal(result.statusCode, 200);
+  const body = result.body as Record<string, unknown>;
+  // stop_price/take_price still echo the request; only protection_orders
+  // carries the exchange's strings.
+  assert.equal(body.stop_price, "99000");
+  assert.equal(body.take_price, "103000");
+  assert.deepEqual(body.protection_orders, {
+    quantity: "0.0040",
+    stop: { order_id: "stop-1", trigger_price: "99000.00" },
+    take: { order_id: "take-1", trigger_price: "103000.0" },
+  });
+});
+
+test("serializeProtectionApplied fails closed when the legs carry different qty", () => {
+  assert.deepEqual(
+    serializeProtectionApplied(
+      verifiedProtection({ takeLeg: { orderId: "take-1", triggerPrice: "103000", qty: "0.005" } }),
+    ),
+    internalErrorResult(),
+  );
+});
+
+test("serializeProtectionApplied fails closed on a malformed proving leg", () => {
+  const malformed: Array<Partial<ProtectionConfirmation>> = [
+    { stopLeg: { orderId: "", triggerPrice: "99000", qty: "0.004" } },
+    { takeLeg: { orderId: "", triggerPrice: "103000", qty: "0.004" } },
+    { stopLeg: { orderId: "stop-1", triggerPrice: "0", qty: "0.004" } },
+    { takeLeg: { orderId: "take-1", triggerPrice: "-103000", qty: "0.004" } },
+    { stopLeg: { orderId: "stop-1", triggerPrice: "not-a-number", qty: "0.004" } },
+    { takeLeg: { orderId: "take-1", triggerPrice: "", qty: "0.004" } },
+    {
+      stopLeg: { orderId: "stop-1", triggerPrice: "99000", qty: "0" },
+      takeLeg: { orderId: "take-1", triggerPrice: "103000", qty: "0" },
+    },
+    {
+      stopLeg: { orderId: "stop-1", triggerPrice: "99000", qty: "abc" },
+      takeLeg: { orderId: "take-1", triggerPrice: "103000", qty: "abc" },
+    },
+  ];
+  for (const overrides of malformed) {
+    assert.deepEqual(serializeProtectionApplied(verifiedProtection(overrides)), internalErrorResult(), JSON.stringify(overrides));
+  }
 });
 
 test("serializeProtectionApplied fails closed when verification did not succeed", () => {
