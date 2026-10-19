@@ -9,7 +9,7 @@
   - `already_satisfied` returns the initial legs, no write;
   - `take_price: null` returns the surrogate take leg;
   - Bybit strings returned unchanged (trailing zeros kept);
-  - malformed leg gives `internal_error`;
+  - `quantity` equals both legs' `qty`; legs with different `qty` or a malformed leg give `internal_error`;
   - Bybit call count per protection call unchanged;
   - existing tests unchanged apart from the added key.
 - [ ] 1.6 `npm test`, `tsc --noEmit`, `validate:openapi`, `openspec validate --all --strict` green.

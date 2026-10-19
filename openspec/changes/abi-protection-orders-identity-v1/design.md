@@ -14,11 +14,10 @@ Facts from ABI main `b7ed3b8`:
 
 ### D1. One required key, closed shapes
 
-`protection_orders` is required in every protection success body. It is a closed object with exactly `stop` and `take`; each is a closed object with exactly:
+`protection_orders` is required in every protection success body. It is a closed object with exactly `quantity`, `stop` and `take`:
 
-- `order_id`: non-empty string (Bybit `orderId`);
-- `trigger_price`: positive exact decimal string (Bybit `triggerPrice`);
-- `quantity`: positive exact decimal string (Bybit `qty`).
+- `quantity`: positive exact decimal string, the position quantity the protection covers: the cycle's current own filled quantity, which both legs carry as Bybit `qty` (success already requires both legs' `qty` to equal it); taken from the stop leg's `qty`;
+- `stop`, `take`: closed objects with exactly `order_id` (non-empty string, Bybit `orderId`) and `trigger_price` (positive exact decimal string, Bybit `triggerPrice`).
 
 The whole body stays a closed object of six keys.
 
@@ -33,7 +32,7 @@ The two success outcomes carry those legs: `{kind: "already_satisfied" | "reconc
 
 ### D3. Bybit strings unchanged
 
-`order_id`, `trigger_price` and `quantity` are Bybit's own strings, not reformatted (trailing zeros kept). Only `orderStatus`, `leavesQty`, `cumExecQty` are not exposed. If a proving leg has an empty `orderId` or a non-positive / non-decimal `triggerPrice` or `qty`, `serializeProtectionApplied` returns `internal_error`, as it already does for any malformed success input.
+`order_id`, `trigger_price` and `quantity` are Bybit's own strings, not reformatted (trailing zeros kept). Only `orderStatus`, `leavesQty`, `cumExecQty` are not exposed. If a proving leg has an empty `orderId`, a non-positive / non-decimal `triggerPrice` or `qty`, or the two legs' `qty` differ, `serializeProtectionApplied` returns `internal_error`, as it already does for any malformed success input.
 
 ### D4. Unchanged
 
@@ -47,4 +46,4 @@ The two success outcomes carry those legs: `{kind: "already_satisfied" | "reconc
 
 - **Runtime strict codecs.** A Runtime that does not know the key rejects every protection success, so position management stops moving stops until both are deployed. Rollout: Runtime merges first, both deploy together, both roll back together.
 - **Surrogate take visible.** For `take_price: null`, the body shows a real far take order. Readers must not treat it as a requested take; `take_price: null` stays the request fact.
-- **Quantity is the leg's qty at proof time**, the cycle's current own filled quantity; later partial fills change it on a later call.
+- **Quantity is the position quantity at proof time** (the cycle's current own filled quantity); a later partial fill changes it on a later call.

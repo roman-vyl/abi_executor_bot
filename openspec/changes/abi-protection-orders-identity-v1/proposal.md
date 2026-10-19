@@ -7,15 +7,16 @@ Runtime is to journal every confirmed protection change as `protection_applied`,
 - The protection `200` success body gets one new required key, `protection_orders`:
   ```
   protection_orders: {
-    stop: { order_id, trigger_price, quantity },
-    take: { order_id, trigger_price, quantity }
+    quantity,                       # position quantity both legs protect
+    stop: { order_id, trigger_price },
+    take: { order_id, trigger_price }
   }
   ```
 - Values are the attributed native protective children that proved the success:
   - `reconciled`: the fresh read-back after the amend;
   - `already_satisfied`: the fresh read that matched without a write.
 - `take` is always present: when the request's `take_price` is `null`, it is the dormant surrogate take order ABI keeps on the exchange.
-- Values are Bybit's own strings (`orderId`, `triggerPrice`, `qty`) unchanged. No `order_link_id`: native children have an empty `orderLinkId`; they are attributed by `parentOrderLinkId`, the entry order's link id that Runtime already has.
+- `quantity` is the cycle's current own filled position quantity, which both legs carry on Bybit (ABI already proves both legs' `qty` equal it). Values are Bybit's own strings (`orderId`, `triggerPrice`, `qty`) unchanged. No `order_link_id`: native children have an empty `orderLinkId`; they are attributed by `parentOrderLinkId`, the entry order's link id that Runtime already has.
 - Nothing else changes:
   - no new Bybit request;
   - no change to when protection counts as applied, to the write plan, the surrogate take, the read-back, the live-execution guard, or the error responses;
