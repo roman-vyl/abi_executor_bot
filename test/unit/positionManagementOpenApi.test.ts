@@ -32,6 +32,16 @@ test("protection OpenAPI examples conform to runtime request and response contra
       confirmedStopPrice: applied.stop_price,
       confirmedTakePrice: applied.take_price,
       verificationSucceeded: true,
+      stopLeg: {
+        orderId: applied.protection_orders.stop.order_id,
+        triggerPrice: applied.protection_orders.stop.trigger_price,
+        qty: applied.protection_orders.quantity,
+      },
+      takeLeg: {
+        orderId: applied.protection_orders.take.order_id,
+        triggerPrice: applied.protection_orders.take.trigger_price,
+        qty: applied.protection_orders.quantity,
+      },
     }).body,
     applied,
   );

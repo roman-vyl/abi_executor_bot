@@ -176,6 +176,8 @@ export class ProtectionApplicationService {
       confirmedStopPrice: command.stopPrice,
       confirmedTakePrice: command.takePrice,
       verificationSucceeded: true,
+      stopLeg: outcome.stop,
+      takeLeg: outcome.take,
     });
   }
 }

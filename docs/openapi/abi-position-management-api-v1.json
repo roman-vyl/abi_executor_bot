@@ -52,7 +52,12 @@
                       "trade_cycle_id": "runtime-owned-cycle-id",
                       "status": "protection_applied",
                       "stop_price": "99000",
-                      "take_price": "103000"
+                      "take_price": "103000",
+                      "protection_orders": {
+                        "quantity": "0.010",
+                        "stop": { "order_id": "native-stop-order-id", "trigger_price": "99000.0" },
+                        "take": { "order_id": "native-take-order-id", "trigger_price": "103000.0" }
+                      }
                     }
                   }
                 }
@@ -284,7 +289,7 @@
       "ProtectionAppliedResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["strategy_instance_id", "trade_cycle_id", "status", "stop_price", "take_price"],
+        "required": ["strategy_instance_id", "trade_cycle_id", "status", "stop_price", "take_price", "protection_orders"],
         "properties": {
           "strategy_instance_id": { "type": "string", "minLength": 1 },
           "trade_cycle_id": { "type": "string", "minLength": 1 },
@@ -292,7 +297,32 @@
           "stop_price": { "type": "string", "format": "positive-exact-decimal" },
           "take_price": {
             "oneOf": [{ "type": "string", "format": "positive-exact-decimal" }, { "type": "null" }]
-          }
+          },
+          "protection_orders": { "$ref": "#/components/schemas/ProtectionOrders" }
+        }
+      },
+      "ProtectionOrders": {
+        "type": "object",
+        "description": "The attributed native protective orders of the exchange read that proved this success (the post-amend read-back, or the matching initial read when no write was sent). Values are the exchange's own strings, unchanged. take is always present: when take_price is null it is the dormant surrogate take order.",
+        "additionalProperties": false,
+        "required": ["quantity", "stop", "take"],
+        "properties": {
+          "quantity": {
+            "type": "string",
+            "format": "positive-exact-decimal",
+            "description": "The position quantity both protective orders carry (the exchange order quantity, equal on both legs): the cycle's current own filled quantity."
+          },
+          "stop": { "$ref": "#/components/schemas/ProtectionOrder" },
+          "take": { "$ref": "#/components/schemas/ProtectionOrder" }
+        }
+      },
+      "ProtectionOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["order_id", "trigger_price"],
+        "properties": {
+          "order_id": { "type": "string", "minLength": 1, "description": "The exchange order id" },
+          "trigger_price": { "type": "string", "format": "positive-exact-decimal", "description": "The exchange trigger price" }
         }
       },
       "CloseRequest": {
