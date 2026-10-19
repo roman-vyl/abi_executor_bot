@@ -12,6 +12,8 @@ Facts from ABI main `b7ed3b8`:
 
 ## Decisions
 
+Owner decisions (2026-10-19): the disabled take is reported as it is on the exchange (option A), nothing hidden or substituted; `quantity` is this trade cycle's quantity, not the whole physical position on the instrument; ABI protection behaviour is not changed.
+
 ### D1. One required key, closed shapes
 
 `protection_orders` is required in every protection success body. It is a closed object with exactly `quantity`, `stop` and `take`:
