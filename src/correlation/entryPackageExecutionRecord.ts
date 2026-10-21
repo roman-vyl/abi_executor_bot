@@ -9,6 +9,12 @@ import {
 } from "../domain/positionScope.js";
 
 export type EntryPackageExecutionStatus =
+  // Durable admission intent for a pair whose first PUT is being processed
+  // (abi-entry-admission-durable-outcome-v1): written before any step that
+  // can fail, with no order identity and no exchange scope. It never reaches
+  // the exchange; it becomes pending_create at the provisional write or
+  // absent when processing fails before it.
+  | "admission_pending"
   | "pending_create"
   | "applied"
   | "pending_replace"
@@ -187,6 +193,7 @@ export function correlationRecordKey(strategyInstanceId: string, tradeCycleId: s
 }
 
 const STATUSES: ReadonlySet<EntryPackageExecutionStatus> = new Set([
+  "admission_pending",
   "pending_create",
   "applied",
   "pending_replace",

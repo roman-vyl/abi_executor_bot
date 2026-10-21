@@ -136,7 +136,23 @@ test("classifyEntryPackageResult: a status body is completed, never failed", () 
 
 test("classifyEntryPackageResult: an internal_error error body is failed", () => {
   const result = classifyEntryPackageResult({ error: { code: "internal_error" } });
-  assert.deepEqual(result, { outcome: "internal_error", failed: true });
+  assert.deepEqual(result, {
+    outcome: "internal_error",
+    failed: true,
+    failureFields: { failure_stage: "unexpected", error_cause: "not_recorded" },
+  });
+});
+
+test("classifyEntryPackageResult: a diagnosed internal_error carries its stage and cause", () => {
+  const result = classifyEntryPackageResult(
+    { error: { code: "internal_error" } },
+    { failure_stage: "quantity_calculation", error_cause: "Error: rules unavailable" },
+  );
+  assert.deepEqual(result, {
+    outcome: "internal_error",
+    failed: true,
+    failureFields: { failure_stage: "quantity_calculation", error_cause: "Error: rules unavailable" },
+  });
 });
 
 test("classifyProtectionResult: a handled business-negative error body stays completed", () => {

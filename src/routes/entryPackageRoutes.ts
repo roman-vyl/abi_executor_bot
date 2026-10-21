@@ -103,7 +103,7 @@ async function handleEntryPackageRoutesSafely(
       tradeCycleId: validation.command.tradeCycleId,
     },
     () => applicationService.apply(validation.command),
-    (httpResult) => classifyEntryPackageResult(httpResult.body),
+    (httpResult) => classifyEntryPackageResult(httpResult.body, httpResult.diagnostic),
   );
   writeResult(response, result);
   return true;

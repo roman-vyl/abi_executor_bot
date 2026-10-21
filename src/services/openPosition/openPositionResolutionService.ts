@@ -452,6 +452,7 @@ function classifyStatus(status: EntryPackageExecutionStatus): StatusBucket {
     case "pending_replace":
     case "pending_cancel":
       return "live_query_admissible";
+    case "admission_pending":
     case "pending_create":
     case "create_failed":
     case "unknown":

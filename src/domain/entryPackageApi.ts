@@ -72,9 +72,27 @@ export type EntryPackageResponseBody =
   | EntryPackageAbsentResponse
   | EntryPackageErrorResponse;
 
+export type EntryPackageFailureStage =
+  | "admission_write"
+  | "instrument_resolution"
+  | "quantity_calculation"
+  | "binding_mode"
+  | "scope_admission"
+  | "provisional_write"
+  | "exchange_create"
+  | "confirmation"
+  | "unexpected";
+
+// Log-only cause of an internal_error. Never serialized into the HTTP body.
+export type EntryPackageFailureDiagnostic = {
+  failure_stage: EntryPackageFailureStage;
+  error_cause: string;
+};
+
 export type EntryPackageHttpResult = {
   statusCode: 200 | 400 | 415 | 422 | 500;
   body: EntryPackageResponseBody;
+  diagnostic?: EntryPackageFailureDiagnostic;
 };
 
 export type EntryPackageValidationResult =
@@ -292,6 +310,35 @@ export function validationFailedResult(
 
 export function internalErrorResult(): EntryPackageHttpResult {
   return errorResult(500, "internal_error", "internal error");
+}
+
+const MAX_ERROR_CAUSE_LENGTH = 300;
+
+// Exception class and message for logs only. Exchange errors may embed a raw
+// response body or request payload (bybitAdapter), so everything from the
+// first JSON-looking character on, and any non-JSON body text, is dropped.
+export function describeErrorCause(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return `non-error thrown: ${typeof error}`;
+  }
+  let message = error.message.split("\n")[0];
+  const nonJsonBody = /^(Bybit returned non-JSON response with HTTP \d+)/.exec(message);
+  if (nonJsonBody !== null) {
+    message = nonJsonBody[1];
+  }
+  const payloadStart = message.search(/[{[]/);
+  if (payloadStart !== -1) {
+    message = `${message.slice(0, payloadStart).trimEnd()} [payload omitted]`;
+  }
+  const text = `${error.name}: ${message}`;
+  return text.length > MAX_ERROR_CAUSE_LENGTH ? text.slice(0, MAX_ERROR_CAUSE_LENGTH) : text;
+}
+
+export function diagnosedInternalErrorResult(
+  failureStage: EntryPackageFailureStage,
+  errorCause: string,
+): EntryPackageHttpResult {
+  return { ...internalErrorResult(), diagnostic: { failure_stage: failureStage, error_cause: errorCause } };
 }
 
 export function isSupportedJsonContentType(value: string | string[] | undefined): boolean {

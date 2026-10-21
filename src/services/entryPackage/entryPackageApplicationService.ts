@@ -15,10 +15,13 @@ import {
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type { DesiredEntryDto, EntryPackageCommand, EntryPackageHttpResult } from "../../domain/entryPackageApi.js";
 import {
+  describeErrorCause,
+  diagnosedInternalErrorResult,
   internalErrorResult,
   serializeAbsentEntryPackage,
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
+import { emitEvent } from "../../observability/events.js";
 import { buildEntryPackageOrderLinkId } from "../../domain/entryPackageOrderIdentity.js";
 import {
   instrumentPositionScope,
@@ -75,6 +78,10 @@ export type EntryPackageApplicationServiceDeps = {
   exchangeInstrumentResolver: ExchangeInstrumentResolver;
 };
 
+// Set by createOrder() immediately before the provisional pending_create write
+// is awaited; from that point on a failure is never closed as absent.
+type CreateOrderProgress = { exchangeBoundaryReached: boolean };
+
 // Orchestrates APPLY / REPLACE / CANCEL / confirm-absent for a validated
 // entry-package command. Owns nothing else: the HTTP route only calls this
 // service and never touches correlation state, Bybit, or the mutex directly.
@@ -93,8 +100,8 @@ export class EntryPackageApplicationService {
   private async applyLocked(command: EntryPackageCommand): Promise<EntryPackageHttpResult> {
     try {
       return await this.process(command);
-    } catch {
-      return internalErrorResult();
+    } catch (error) {
+      return diagnosedInternalErrorResult("unexpected", describeErrorCause(error));
     }
   }
 
@@ -276,8 +283,8 @@ export class EntryPackageApplicationService {
     desiredEntry: DesiredEntryDto,
     record: EntryPackageExecutionRecord | undefined,
   ): Promise<EntryPackageHttpResult> {
-    if (record === undefined) {
-      return this.createOrder(command, desiredEntry, undefined, 1);
+    if (record === undefined || record.status === "admission_pending") {
+      return this.admitNewPair(command, desiredEntry);
     }
 
     if (record.status === "terminal_unfilled" || record.status === "terminal_closed") {
@@ -310,13 +317,103 @@ export class EntryPackageApplicationService {
     return this.cancelLiveOrder(command, record);
   }
 
+  // First PUT for a pair (or a repeat after a pre-exchange failure whose
+  // absent write failed): durable admission intent first, so every PUT that
+  // reaches this service leaves a durable trace for its pair. A failure before
+  // the provisional pending_create write is closed as absent, conditional on
+  // the durable record still being admission_pending — the progress flag only
+  // picks this branch, it is never evidence by itself.
+  private async admitNewPair(
+    command: EntryPackageCommand,
+    desiredEntry: DesiredEntryDto,
+  ): Promise<EntryPackageHttpResult> {
+    try {
+      await this.persistAdmissionIntent(command, desiredEntry);
+    } catch (error) {
+      return diagnosedInternalErrorResult("admission_write", describeErrorCause(error));
+    }
+
+    const progress: CreateOrderProgress = { exchangeBoundaryReached: false };
+    let result: EntryPackageHttpResult;
+    try {
+      result = await this.createOrder(command, desiredEntry, undefined, 1, progress);
+    } catch (error) {
+      if (!progress.exchangeBoundaryReached) {
+        await this.closeRejectedAdmission(command, "unexpected");
+      }
+      throw error;
+    }
+
+    if (result.statusCode === 500 && !progress.exchangeBoundaryReached) {
+      await this.closeRejectedAdmission(command, result.diagnostic?.failure_stage ?? "unexpected");
+    }
+    return result;
+  }
+
+  private async persistAdmissionIntent(command: EntryPackageCommand, desiredEntry: DesiredEntryDto): Promise<void> {
+    const now = new Date().toISOString();
+    await this.deps.correlationRepository.save({
+      strategy_instance_id: command.strategyInstanceId,
+      trade_cycle_id: command.tradeCycleId,
+      ticker: command.ticker,
+      exchange_symbol: "",
+      exchange_category: "",
+      position_binding_mode: "one_way",
+      created_at: now,
+      updated_at: now,
+      desired_entry: desiredEntry,
+      risk_multiplier: command.riskMultiplier,
+      calculated_quantity: null,
+      order_link_id: null,
+      order_id: null,
+      close_order_link_id: null,
+      close_order_id: null,
+      closure_reason: null,
+      closure_order_id: null,
+      closure_order_link_id: null,
+      closure_parent_order_link_id: null,
+      first_fill_at_ms: null,
+      generation: 0,
+      status: "admission_pending",
+      early_execution_observation: null,
+      binding_history: [],
+      pending_action: null,
+      current_binding_started_at: null,
+    });
+  }
+
+  // Never throws: a failed write leaves the record admission_pending, which
+  // recovery answers with a safe internal_error and startup closes later.
+  private async closeRejectedAdmission(command: EntryPackageCommand, failureStage: string): Promise<void> {
+    const current = this.deps.correlationRepository.get(command.strategyInstanceId, command.tradeCycleId);
+    if (current === undefined || current.status !== "admission_pending") {
+      return;
+    }
+    try {
+      await this.persistTransitionToAbsent(current);
+    } catch {
+      return;
+    }
+    emitEvent("warn", "entry_admission_rejected", {
+      strategy_instance_id: command.strategyInstanceId,
+      trade_cycle_id: command.tradeCycleId,
+      failure_stage: failureStage,
+    });
+  }
+
   private async createOrder(
     command: EntryPackageCommand,
     desiredEntry: DesiredEntryDto,
     priorRecord: EntryPackageExecutionRecord | undefined,
     generation: number,
+    progress: CreateOrderProgress = { exchangeBoundaryReached: false },
   ): Promise<EntryPackageHttpResult> {
-    const identity = this.deps.exchangeInstrumentResolver.resolve(command.ticker);
+    let identity: ReturnType<ExchangeInstrumentResolver["resolve"]>;
+    try {
+      identity = this.deps.exchangeInstrumentResolver.resolve(command.ticker);
+    } catch (error) {
+      return diagnosedInternalErrorResult("instrument_resolution", describeErrorCause(error));
+    }
     const orderLinkId = buildEntryPackageOrderLinkId(
       command.strategyInstanceId,
       command.tradeCycleId,
@@ -333,8 +430,8 @@ export class EntryPackageApplicationService {
         command.riskMultiplier,
         { resolvedSymbol: identity.symbol, resolvedCategory: identity.category },
       );
-    } catch {
-      return internalErrorResult();
+    } catch (error) {
+      return diagnosedInternalErrorResult("quantity_calculation", describeErrorCause(error));
     }
 
     const now = new Date().toISOString();
@@ -346,7 +443,7 @@ export class EntryPackageApplicationService {
       ? priorRecord.position_binding_mode
       : effectivePositionBindingMode(identity.category, this.deps.config.bybitLinearPositionBindingMode);
     if (positionBindingMode === null) {
-      return internalErrorResult();
+      return diagnosedInternalErrorResult("binding_mode", "no_effective_position_binding_mode");
     }
     const currentBindingStartedAt = isRetryOfSameBinding
       ? priorRecord.current_binding_started_at ?? priorRecord.updated_at
@@ -395,7 +492,7 @@ export class EntryPackageApplicationService {
     // need to prove or claim the same physical scope.
     const claim = await this.deps.scopeMutex.withKeyLock(
       instrumentPositionScopeKey(instrumentPositionScope(identity.category, identity.symbol)),
-      async (): Promise<"claimed" | "conflict"> => {
+      async (): Promise<"claimed" | "conflict" | "provisional_write_failed"> => {
         const activeRecords = this.deps.correlationRepository.findActiveRecordsForInstrumentScope(
           instrumentPositionScope(identity.category, identity.symbol),
         );
@@ -433,8 +530,15 @@ export class EntryPackageApplicationService {
         // intended binding and scope ownership before causing an external
         // side effect. This write both claims the scope (via the repository's
         // live byScope update) and remains the pre-exchange-call record — no
-        // separate reservation write is introduced.
-        await this.deps.correlationRepository.save(provisional);
+        // separate reservation write is introduced. The boundary is marked
+        // before the write is awaited, so a failed or ambiguous write is
+        // never closed as absent.
+        progress.exchangeBoundaryReached = true;
+        try {
+          await this.deps.correlationRepository.save(provisional);
+        } catch {
+          return "provisional_write_failed";
+        }
         return "claimed";
       },
     );
@@ -442,9 +546,12 @@ export class EntryPackageApplicationService {
     if (claim === "conflict") {
       // Another pair already holds this physical scope and has not
       // durably proven it no longer can. Fail closed before any exchange
-      // write; no correlation write happens for this attempt, and no new
+      // write; no provisional write happens for this attempt, and no new
       // public error code is introduced for this internal ownership conflict.
-      return internalErrorResult();
+      return diagnosedInternalErrorResult("scope_admission", "scope_conflict");
+    }
+    if (claim === "provisional_write_failed") {
+      return diagnosedInternalErrorResult("provisional_write", "provisional_write_failed");
     }
 
     const payloads = mapEntryPackageToBybit(this.deps.config, {
@@ -466,7 +573,7 @@ export class EntryPackageApplicationService {
         bybit: this.deps.bybit,
         payload: payloads.createEntryOrder,
       });
-    } catch {
+    } catch (error) {
       // A thrown exception here means we genuinely don't know whether
       // Bybit received and applied the command — "unknown", not a
       // definitive "create_failed", so a later retry still resends rather
@@ -476,17 +583,21 @@ export class EntryPackageApplicationService {
         status: "unknown",
         updated_at: new Date().toISOString(),
       });
-      return internalErrorResult();
+      return diagnosedInternalErrorResult("exchange_create", describeErrorCause(error));
     }
 
     if (executionResult.status === "skipped_live_execution") {
-      return internalErrorResult();
+      return diagnosedInternalErrorResult("exchange_create", "skipped_live_execution");
     }
 
     const orderId = readBybitOrderId(executionResult.bybitResponse);
     const withOrderId: EntryPackageExecutionRecord = { ...provisional, order_id: orderId };
 
-    return this.confirmAndFinalize(command, withOrderId, payloads, desiredEntry);
+    const finalized = await this.confirmAndFinalize(command, withOrderId, payloads, desiredEntry);
+    if (finalized.statusCode === 500 && finalized.diagnostic === undefined) {
+      return { ...finalized, diagnostic: { failure_stage: "confirmation", error_cause: "confirmation_not_applied" } };
+    }
+    return finalized;
   }
 
   private async repeatPutRevalidate(
