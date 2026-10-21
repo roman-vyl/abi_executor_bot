@@ -3,9 +3,7 @@
 ## Purpose
 
 Gives Abi's process output a stable, machine-readable operational-event shape so future collectors and diagnostics tooling can consume it without parsing free-text log lines.
-
 ## Requirements
-
 ### Requirement: Structured Event Envelope
 Every ABI-controlled operational event — i.e. every line emitted through the ABI event emission path defined by this capability — SHALL be exactly one single-line JSON object (no multi-line pretty-printed JSON, no bare/free-text lines). This requirement governs ABI-controlled emission only; it does not extend to output the Node.js runtime itself may write outside that path (e.g. an uncaught-exception stack trace printed before or without reaching the emitter). Each event SHALL include the base envelope fields `timestamp`, `level`, `service`, and `event`. `level` SHALL be exactly one of `info`, `warn`, or `error` — no other value is permitted. `service` SHALL be the fixed literal `"abi_executor_bot"`. Events with `level=error` SHALL be written to stderr; events with `level=info` or `level=warn` SHALL be written to stdout.
 
@@ -103,3 +101,42 @@ No operational event emitted by Abi SHALL include secrets (API keys, credentials
 #### Scenario: Raw exchange payloads are not logged
 - **WHEN** Abi emits an `operation_completed` or `operation_failed` event for an execution operation that involved a Bybit request/response
 - **THEN** the event does not include the raw request or response body — only structured fields such as `operation`, `outcome`, identifiers, and `duration_ms`
+
+### Requirement: Entry-package failures name their stage and cause
+Every `entry_package` `operation_failed` event SHALL include `failure_stage` (one of
+`admission_write`, `instrument_resolution`, `quantity_calculation`, `binding_mode`,
+`scope_admission`, `provisional_write`, `exchange_create`, `confirmation`, `unexpected`)
+taken from the typed internal result, and `error_cause`: exception class and message
+truncated to 300 characters, or a fixed reason such as `scope_conflict`.
+
+#### Scenario: Quantity calculation throws
+- **WHEN** an entry-package PUT fails because quantity calculation threw
+- **THEN** `operation_failed` carries `failure_stage: "quantity_calculation"` and the
+  exception class and message in `error_cause`
+
+#### Scenario: Scope conflict is named
+- **WHEN** an entry-package PUT fails on scope admission without an exception
+- **THEN** `operation_failed` carries `failure_stage: "scope_admission"` and
+  `error_cause: "scope_conflict"`
+
+#### Scenario: Failure without a recorded stage
+- **WHEN** an entry-package `internal_error` carries no recorded stage
+- **THEN** `operation_failed` carries `failure_stage: "unexpected"` and
+  `error_cause: "not_recorded"`
+
+#### Scenario: No secrets or payloads
+- **WHEN** any `operation_failed` event for `entry_package` is emitted
+- **THEN** `error_cause` contains no raw exchange payload and no credentials
+
+### Requirement: Pre-exchange rejection emits one event
+When ABI durably persists `absent` for a pair because its PUT failed before the exchange
+boundary or because startup closed a leftover `admission_pending` record, it SHALL emit
+exactly one `entry_admission_rejected` event at `level: "warn"` with
+`strategy_instance_id`, `trade_cycle_id` and `failure_stage` (`startup_recovery` for the
+startup case).
+
+#### Scenario: Scope conflict rejection
+- **WHEN** a new pair is rejected by scope admission and its record becomes `absent`
+- **THEN** one `entry_admission_rejected` event with `failure_stage: "scope_admission"` is
+  emitted
+

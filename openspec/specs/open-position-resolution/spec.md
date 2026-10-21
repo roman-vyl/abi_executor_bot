@@ -2,7 +2,6 @@
 
 ## Purpose
 Define how ABI resolves a truthful, current open-position answer for one Runtime-owned `(strategy_instance_id, trade_cycle_id)` pair, sourced from this cycle's own attributable entry-order fill facts (durably tracked on its correlation record) — never from the aggregate physical position, which cannot distinguish this cycle's exposure from any other trade cycle sharing the same exchange scope. The aggregate physical position query is retained only as weak existence/side sanity and to supply `PUT .../protection`'s confirmed stop-loss/take-profit values.
-
 ## Requirements
 ### Requirement: Position resolution starts from a direct composite correlation lookup
 ABI SHALL resolve the requested pair using the existing `EntryPackageCorrelationRepository.get(strategy_instance_id, trade_cycle_id)` composite-key lookup and no other lookup mechanism. ABI SHALL NOT introduce an index or lookup keyed on `strategy_instance_id` alone, and SHALL NOT apply any record-selection or cardinality-handling logic, since the pair is a single-record key by construction.
@@ -20,24 +19,35 @@ ABI SHALL resolve the requested pair using the existing `EntryPackageCorrelation
 ### Requirement: Record status is classified into durably-closed, live-query-admissible, and unresolved buckets
 ABI SHALL classify a found record's `status` into exactly one of three buckets before taking any further action:
 
-- Durably closed (`absent`, `terminal_unfilled`, `terminal_closed`): no live exchange query is made; the response is `position_open: false` directly.
-- Live-query-admissible (`applied`, `pending_replace`, `pending_cancel`): resolution requires at least a fresh check of this cycle's own attributable fill facts, and (when they show a nonzero fill) the aggregate physical position as a weak sanity check.
+- Durably closed (`absent`, `terminal_unfilled`, `terminal_closed`): no live exchange query is made; the response is `position_open: false` directly, with `closure` taken from the record as specified below.
+- Live-query-admissible (`applied`, `pending_replace`, `pending_cancel`): resolution requires at least a fresh check of this cycle's own attributable fill facts, and (when they show a nonzero fill) own protection and the aggregate physical position.
 - Unresolved (`pending_create`, `create_failed`, `unknown`): ABI fails closed without attempting a live query.
+
+For a durably closed record, `closure` SHALL be the record's stored closure when present; for a `terminal_closed` record without a stored closure but with both `close_order_link_id` and `close_order_id`, a `runtime_signal` closure built from those two values; otherwise `null`.
 
 #### Scenario: Absent record durably proves no exposure
 - **WHEN** the record's status is `absent`
-- **THEN** ABI returns `position_open: false` with both facts `null`
+- **THEN** ABI returns `position_open: false` with both facts `null` and `closure: null`
 - **AND** ABI does not query the exchange
 
 #### Scenario: Terminal-without-fill durably proves no exposure
 - **WHEN** the record's status is `terminal_unfilled`
-- **THEN** ABI returns `position_open: false` with both facts `null`
+- **THEN** ABI returns `position_open: false` with both facts `null` and `closure: null`
 - **AND** ABI does not query the exchange
 
 #### Scenario: Terminally-closed durably proves no exposure
 - **WHEN** the record's status is `terminal_closed`
 - **THEN** ABI returns `position_open: false` with both facts `null`
 - **AND** ABI does not query the exchange
+
+#### Scenario: Terminally-closed record answers from its stored closure
+- **WHEN** the record's status is `terminal_closed` with a stored closure
+- **THEN** ABI returns `position_open: false` with both facts `null` and that closure
+- **AND** ABI does not query the exchange
+
+#### Scenario: Legacy terminally-closed record closed by Runtime
+- **WHEN** the record's status is `terminal_closed` without a stored closure but with `close_order_link_id` and `close_order_id`
+- **THEN** `closure` is `runtime_signal` with those identifiers
 
 #### Scenario: Applied status requires a live query
 - **WHEN** the record's status is `applied`
@@ -368,3 +378,112 @@ Bybit's position query is scoped to `category`+`symbol` under the configured API
 - **THEN** the documentation SHALL state that correct attribution depends on no overlapping manual or other-strategy-owned exposure existing on the same symbol under the configured credentials, regardless of whether that other exposure was itself placed through ABI or outside ABI
 - **AND** the documentation SHALL NOT claim that the symbol query or side match alone proves the position was caused by this record's own order
 - **AND** ABI SHALL NOT implement any account, subaccount, or cross-record mechanism in this capability to detect or enforce that precondition
+
+### Requirement: Physical sanity for open-position resolution follows the stored binding
+For a live-query-admissible record with positive own fill evidence, ABI SHALL query and validate the
+physical position binding stored on that record. One-way records SHALL retain one-way semantics;
+explicit hedge records SHALL consult only their derived directional slot. Own entry-order fill
+facts SHALL remain the source of owner-attributed quantity, average entry price, and first-fill
+time.
+
+#### Scenario: Hedge owner has own fills and target-slot exposure
+- **WHEN** an explicit hedge record has positive own attributable fill evidence and its expected
+  directional slot reports compatible exposure
+- **THEN** ABI may resolve that owner's position as open using its own fill facts
+
+#### Scenario: Only opposite slot has exposure
+- **WHEN** an explicit hedge record has positive own fill evidence but only the opposite slot
+  reports exposure
+- **THEN** ABI fails closed on the contradiction
+- **AND** it does not report the owner open from the opposite slot
+
+#### Scenario: One-way behavior is preserved
+- **WHEN** an explicit one-way record is resolved
+- **THEN** ABI applies the existing strict one-way position geometry and own-fill attribution rules
+
+### Requirement: Target-slot protection fields never come from the opposite slot
+When open-position determination supplies confirmed stop-loss or take-profit values to protection
+handling, those fields SHALL come only from the validated row for the record's expected physical
+binding.
+
+#### Scenario: Long and short slots report different protection values
+- **WHEN** the target hedge slot and opposite slot report different stop-loss or take-profit values
+- **THEN** ABI returns only the values from the target slot to the owning lifecycle
+
+### Requirement: The entry order identifiers come only from the proof's own order identity
+For an open result, ABI SHALL take `entry_order_link_id` from the current binding's `order_link_id`, the identity the fill proof used for its order read and for the `first_fill_at_ms` execution query, and never from `binding_history`. ABI SHALL take `entry_order_id` only from a Bybit order row matched by that `orderLinkId`:
+
+- on the fresh path, from the `orderId` of the row whose read produced the open result;
+- on the reuse path (a final stored `early_execution_observation`), from the observation's `order_id`, which the apply-time confirmation writes from the `orderId` of the same row the observation is built from;
+- `null` when that row had no usable `orderId`, or the stored observation has no `order_id`.
+
+ABI SHALL NOT use the correlation record's `order_id` captured from the create acknowledgement, SHALL NOT issue an additional exchange request to obtain an identifier, and SHALL NOT change how `position_open`, `average_entry_price`, `first_fill_at_ms` or any partial-fill outcome is determined. An observation without the `order_id` key SHALL be read as `order_id: null`, and no stored record SHALL be rewritten for this.
+
+#### Scenario: Fresh path
+- **WHEN** the stored observation is `null` or not final, and the fresh read of this cycle's own entry order shows a fill
+- **THEN** `entry_order_id` is that row's `orderId`, or `null` if the row has none
+
+#### Scenario: Entry filled at placement
+- **WHEN** the apply-time confirmation found this cycle's own entry order filled and stored a final observation with `order_id`
+- **THEN** a later lookup reuses the observation without an exchange call and returns that `order_id` as `entry_order_id`
+
+#### Scenario: Stored observation without an order id
+- **WHEN** the reused final observation has no `order_id`
+- **THEN** `entry_order_id` is `null`, no exchange call is made for it, and the create-acknowledgement `order_id` is not returned
+
+#### Scenario: Partial fill
+- **WHEN** this cycle's own entry order is partially filled and still live
+- **THEN** the result is open exactly as before, and the identifiers name that same order
+
+### Requirement: Own protection is classified into exactly one state class
+For a cycle whose own entry is terminal with cumulative filled quantity `Q`, ABI SHALL classify the result of resolving own attached protection (attribution by `parentOrderLinkId` equal to the entry `orderLinkId`, role by `stopOrderType`) into exactly one class:
+
+- active: an attributed pair, both legs with zero executed quantity, at least one leg live;
+- neutralized: an attributed pair, both legs with zero executed quantity and terminal without fill; or no candidates when `Q` is zero;
+- completed: an attributed pair where one leg is `Filled` with `leavesQty` zero and `cumExecQty` equal to `Q`, the other leg is terminal without fill with zero executed quantity, and the filled leg's `Trade` executions sum to exactly `Q`;
+- partial or contradictory: an attributed pair with any other executed quantity on either leg;
+- unknown: no candidates while `Q` is positive, or any ambiguous result (`partial_pair`, `query_failed`, `inconsistent_duplicate`, `duplicate_role`, `extra_candidates`, `unclassified_role`).
+
+No candidates and `partial_pair` SHALL NOT be treated as proof that protection did not execute.
+
+#### Scenario: Demo stop exit
+- **WHEN** the stop child is `Filled` with `cumExecQty` equal to `Q` and `leavesQty` zero, the take child is `Deactivated`, and the stop's `Trade` executions sum to `Q`
+- **THEN** the class is completed with role stop
+
+#### Scenario: Partially executed leg
+- **WHEN** a leg is `PartiallyFilled`, or filled for a quantity other than `Q`
+- **THEN** the class is partial or contradictory
+
+#### Scenario: Children not visible
+- **WHEN** `Q` is positive and no own child is found
+- **THEN** the class is unknown
+
+### Requirement: Completion is proven only by full execution of the pair's own order
+ABI SHALL prove completion only as `runtime_signal`, when the pair's own close order is fully executed for exactly `Q`, or as `stop_loss` / `take_profit`, when the protection class is completed. A protection execution of any size together with an executed own close order, or a protection class of partial or contradictory, SHALL be contradictory. The aggregate position, its size, a received Close command and an accepted cancel SHALL NOT be proof. Contradictory or unproven evidence SHALL yield `internal_error` with no durable write.
+
+#### Scenario: History not yet propagated
+- **WHEN** the scope is flat but neither protection nor an own close order shows an execution yet
+- **THEN** ABI returns `internal_error` and writes nothing
+
+### Requirement: The lookup runs the proof whenever the pair's own orders may have ended the cycle
+For a live-query-admissible record with `Q` positive, ABI SHALL run the completion proof when the pair has a close order identity, independently of the aggregate position; when the aggregate query reports no position; or when the protection class is completed or partial or contradictory. Otherwise the existing open answer SHALL be kept.
+
+#### Scenario: Own close executed while a sibling keeps the slot open
+- **WHEN** the pair's own close order executed for `Q` and a same-side sibling still holds a position in the slot
+- **THEN** ABI returns the `runtime_signal` closure, not `position_open: true`
+
+#### Scenario: Sibling position does not hide an own stop exit
+- **WHEN** a same-side sibling keeps a position and this cycle's protection class is completed
+- **THEN** ABI returns the `stop_loss` closure
+
+#### Scenario: Active protection on an open position
+- **WHEN** protection is active, the pair has no close order and the aggregate shows a same-side position
+- **THEN** ABI returns `position_open: true` as today
+
+### Requirement: A proven completion is recorded durably before it is reported and is never re-derived
+On a proven completion ABI SHALL, under the pair's mutex, save `status: "terminal_closed"` together with the closure reason and identifiers in one record write before answering. The closure fields SHALL exist only on `terminal_closed` records and SHALL NOT change afterwards. Leaving the active statuses releases the physical scope, so the scope SHALL be released only after proof. A failed write SHALL yield `internal_error`. Later lookups SHALL answer from the record without exchange calls.
+
+#### Scenario: Repeated lookup after proof
+- **WHEN** completion was proven and recorded on an earlier lookup
+- **THEN** a later lookup returns the same closure without any exchange call
+
