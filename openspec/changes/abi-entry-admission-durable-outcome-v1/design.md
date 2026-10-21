@@ -70,12 +70,31 @@ flag is false, this invocation cannot have contacted the exchange for the pair.
 If the `absent` write itself fails, the record stays `admission_pending`; D3 converts it
 at the next start; until then recovery answers safe `500`.
 
+Invariant (owner review 2026-10-21): the flag is not evidence. It only selects which
+error branch runs. The proof that the exchange was never contacted is the durable state:
+the transition to `absent` is a conditional write applied only when the pair's current
+record, re-read under the pair lock, is still `admission_pending`. Recovery answers
+`terminal_without_fill` only from the durable `absent` status. The flag is set before
+`save(provisional)` is awaited, so a failed or ambiguous provisional write never leads to
+`absent` in this invocation: the record stays `admission_pending` in memory (the store
+indexes a record only after its append succeeded), recovery answers safe `500`, and after
+a restart replay sees either `pending_create` (bytes reached disk; existing ambiguous-CREATE
+recovery applies) or `admission_pending` (D3).
+
 ### D3. Startup conversion of leftover `admission_pending`
 
 During correlation replay, before readiness, every `admission_pending` record is
-transitioned to `absent` with a durable write. A failed write fails readiness, as replay
-failures already do. Rationale: no in-flight PUT survives a process restart, and none of
-those records reached the exchange boundary.
+transitioned to `absent` with a durable write. A failed write fails readiness. Rationale:
+no in-flight PUT survives a process restart, and none of those records reached the
+exchange boundary.
+
+Precondition (existing, not new): exactly one live ABI process writes a given correlation
+store. The repository is already documented as a single-writer store
+(`EntryPackageCorrelationRepository`), the deployment runs one `abi` service with no
+replicas, and a restart stops the old process before the new one replays. D3 relies on
+that invariant and adds no distributed locking. Running two ABI processes on one store is
+outside the contract: D3 could then close an intent that the other process is still
+admitting. The deploy note for this change restates the precondition.
 
 ### D4. Recovery-state and open-position behavior
 
@@ -103,7 +122,7 @@ parsed from text. ABI emits `entry_admission_rejected` (`level: warn`, pair ids,
 - `500` stays the HTTP answer for pre-exchange rejection, so Runtime still spends one
   recovery tick (30 s) before clearing. Accepted to keep Runtime unchanged.
 
-## Open question (owner decision, not part of this change)
+## Remaining gap (decided 2026-10-21: separate change, not part of this one)
 
 A PUT that never reaches the application service (Runtime timeout before ABI read it, ABI
 down, decode rejection after Runtime committed the marker) or whose intent write fails
@@ -114,4 +133,7 @@ a `desired_entry: null` PUT for an unknown pair durably writes `absent` and retu
 in-flight PUT. A Runtime-side change could send that CANCEL on `unknown_trade_cycle_binding`
 and clear only on exact `entry_package_absent`. That is a separate Runtime change and needs
 one more ABI guard: a later non-null PUT arriving after such a tombstone must not create
-an order for the same pair. Left for the owner to decide.
+an order for the same pair. Owner chose this protocol on 2026-10-21 as a separate
+change: a recovery tombstone for an unknown pair permanently forbids non-null mutation
+of that pair, repeated CANCEL is idempotent, and a delayed non-null PUT arriving after the
+CANCEL is a mandatory acceptance test.

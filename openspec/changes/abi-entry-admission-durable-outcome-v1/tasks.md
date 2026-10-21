@@ -34,9 +34,11 @@
 - [ ] 5.1 Focused tests: each pre-boundary failure → durable `absent`, no Bybit call,
   `500`, recovery `terminal_without_fill`; failure after the boundary unchanged
   (`unknown`); crash simulation with leftover `admission_pending` → startup `absent`;
-  in-flight `admission_pending` → recovery `500`; scope finder ignores
+  in-flight `admission_pending` → recovery `500`; failed provisional write → no `absent`;
+  `absent` transition applied only when the re-read record is `admission_pending`; scope finder ignores
   `admission_pending`; failed `absent` write leaves `admission_pending`; event fields
   contain no payloads or secrets.
 - [ ] 5.2 `npm test` and `npm run typecheck`.
-- [ ] 5.3 Demo check after deploy (on owner's word only): no new orders created by the
+- [ ] 5.3 Deploy note restates the single-writer precondition for the correlation store.
+- [ ] 5.4 Demo check after deploy (on owner's word only): no new orders created by the
   check itself; existing records replay; readiness green.

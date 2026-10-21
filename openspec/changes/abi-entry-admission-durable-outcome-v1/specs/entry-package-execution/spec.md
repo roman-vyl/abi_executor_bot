@@ -27,6 +27,17 @@ before it, by returned `internal_error` or by exception, ABI SHALL durably move 
 responding `500 internal_error`. A record at `pending_create` or later SHALL NOT be moved
 by this rule.
 
+#### Scenario: Durable state, not a local flag, proves no exchange call
+- **WHEN** ABI decides to persist `absent` after a pre-boundary failure
+- **THEN** the write is applied only if the pair's current record, re-read under the pair
+  lock, is still `admission_pending`
+- **AND** an in-process flag alone never causes `absent` or a terminal recovery answer
+
+#### Scenario: Provisional write fails
+- **WHEN** the durable `pending_create` write fails or its outcome is ambiguous
+- **THEN** ABI does not persist `absent` in this invocation and responds
+  `500 internal_error`
+
 #### Scenario: Quantity calculation fails
 - **WHEN** quantity calculation fails for a new pair
 - **THEN** the pair's record is durably `absent`
@@ -55,7 +66,8 @@ by this rule.
 ### Requirement: Leftover admission intents are closed at startup
 During startup correlation recovery and before reporting readiness, ABI SHALL durably
 transition every `admission_pending` record to `absent`. A failed transition SHALL fail
-readiness.
+readiness. This relies on the existing precondition that exactly one live ABI process
+writes a correlation store.
 
 #### Scenario: Process died during admission
 - **WHEN** ABI starts and the store contains an `admission_pending` record
