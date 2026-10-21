@@ -25,3 +25,9 @@ ABI SHALL complete binding compatibility checks and required position-mode assur
 - **WHEN** a candidate hedge entry cannot prove compatible exchange geometry
 - **THEN** no provisional hedge record is appended
 - **AND** no create order is submitted
+
+## REMOVED Requirements
+
+### Requirement: Production entry remains one-way after lifecycle readiness
+**Reason**: Superseded by this change. Linear production entries now follow the configured deployment geometry, with one-way as the default and hedge only after assurance, so the lifecycle-readiness restriction no longer holds.
+**Migration**: See "New production bindings use the selected instrument geometry" and "No hedge provisional write precedes assurance" above. Dry-run behavior, the Demo/testnet live guard and mainnet blocking stay unchanged.
