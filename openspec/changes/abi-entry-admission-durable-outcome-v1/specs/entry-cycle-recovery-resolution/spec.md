@@ -20,4 +20,5 @@ exchange query.
 
 #### Scenario: Open-position lookup on an admission intent
 - **WHEN** open-position lookup is queried for a pair whose record is `admission_pending`
-- **THEN** ABI reports no open position and does not report a scope binding
+- **THEN** ABI fails safe with `500 internal_error`, never reports an open position and
+  never reports a scope binding

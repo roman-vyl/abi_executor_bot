@@ -8,6 +8,9 @@ import { assureConfiguredActiveBindings } from "./positionModeAssuranceSeams.js"
 
 export type CorrelationReplayer = {
   replay(): Promise<CorrelationReplayResult>;
+  // Closes admission intents left by a previous process; see
+  // EntryPackageCorrelationRepository.closeLeftoverAdmissionIntents.
+  closeLeftoverAdmissionIntents(): Promise<EntryPackageExecutionRecord[]>;
 };
 
 // Runs correlation-store replay with correlation_replay_*/readiness_*
@@ -37,6 +40,22 @@ export async function replayCorrelationStore(
 
   if (result.ok) {
     emitEvent("info", "correlation_replay_succeeded");
+    let closedAdmissions: EntryPackageExecutionRecord[];
+    try {
+      closedAdmissions = await repository.closeLeftoverAdmissionIntents();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "closing leftover admission intents failed";
+      emitEvent("error", "readiness_failed", { reason });
+      readiness.markNotReady(reason);
+      return;
+    }
+    for (const record of closedAdmissions) {
+      emitEvent("warn", "entry_admission_rejected", {
+        strategy_instance_id: record.strategy_instance_id,
+        trade_cycle_id: record.trade_cycle_id,
+        failure_stage: "startup_recovery",
+      });
+    }
     if (activation !== undefined) {
       let assurance: Awaited<ReturnType<typeof assureConfiguredActiveBindings>>;
       try {

@@ -802,8 +802,7 @@ test("a malformed instruments-info response never fabricates success: internal_e
 
     assertInternalError(result);
     assert.equal(bybit.createOrderCalls.length, 0);
-    const record = repo.get("instance-1", "cycle-1");
-    assert.equal(record, undefined);
+    assertClosedBeforeExchange(repo.get("instance-1", "cycle-1"));
   });
 });
 
@@ -821,8 +820,7 @@ test("an unsupported spot instruments-info lookup never fabricates success: inte
 
     assertInternalError(result);
     assert.equal(bybit.createOrderCalls.length, 0);
-    const record = repo.get("instance-1", "cycle-1");
-    assert.equal(record, undefined);
+    assertClosedBeforeExchange(repo.get("instance-1", "cycle-1"));
   });
 });
 
@@ -1259,7 +1257,7 @@ test("a sequential same-side join succeeds and a retry of the first pair does no
   });
 });
 
-test("opposite-side and corrupt scope ownership fail before correlation or exchange write", async () => {
+test("opposite-side and corrupt scope ownership fail before exchange write and close the admission as absent", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
     assertApplied(
@@ -1276,7 +1274,7 @@ test("opposite-side and corrupt scope ownership fail before correlation or excha
     );
     assertInternalError(opposite);
     assert.equal(bybit.createOrderCalls.length, callsBefore);
-    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
+    assertClosedBeforeExchange(repo.get("instance-B", "cycle-B1"));
   });
 
   await withService(async ({ service, bybit, repo }) => {
@@ -1284,7 +1282,7 @@ test("opposite-side and corrupt scope ownership fail before correlation or excha
     const corrupt = await service.apply(makeCommand({ strategyInstanceId: "instance-B", tradeCycleId: "cycle-B1" }));
     assertInternalError(corrupt);
     assert.equal(bybit.createOrderCalls.length, 0);
-    assert.equal(repo.get("instance-B", "cycle-B1"), undefined);
+    assertClosedBeforeExchange(repo.get("instance-B", "cycle-B1"));
   });
 });
 
@@ -1338,14 +1336,14 @@ test("hedge policy admits opposite slots and same-slot siblings after one serial
   }, { bybitLinearPositionBindingMode: "hedge" });
 });
 
-test("hedge lazy assurance failure writes no record and sends no create", async () => {
+test("hedge lazy assurance failure closes the admission as absent and sends no create", async () => {
   await withService(async ({ service, bybit, repo }) => {
     bybit.openPositionsResponse = flatPositionResponse();
 
     const result = await service.apply(makeCommand());
 
     assertInternalError(result);
-    assert.equal(repo.get("instance-1", "cycle-1"), undefined);
+    assertClosedBeforeExchange(repo.get("instance-1", "cycle-1"));
     assert.equal(bybit.createOrderCalls.length, 0);
     assert.equal(bybit.getOpenPositionsCalls.length, 1);
   }, { bybitLinearPositionBindingMode: "hedge" });
@@ -1989,4 +1987,15 @@ async function withRealRulesProviderService(
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// abi-entry-admission-durable-outcome-v1: a PUT that fails before the
+// provisional pending_create write leaves a durable absent record with no
+// order identity and no exchange scope.
+function assertClosedBeforeExchange(record: EntryPackageExecutionRecord | undefined): void {
+  assert.ok(record !== undefined);
+  assert.equal(record.status, "absent");
+  assert.equal(record.desired_entry, null);
+  assert.equal(record.order_link_id, null);
+  assert.equal(record.exchange_category, "");
 }

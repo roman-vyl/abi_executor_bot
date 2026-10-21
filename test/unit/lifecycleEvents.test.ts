@@ -57,6 +57,9 @@ test("successful replay emits correlation_replay_started -> correlation_replay_s
     async replay(): Promise<CorrelationReplayResult> {
       return { ok: true };
     },
+    async closeLeftoverAdmissionIntents() {
+      return [];
+    },
   };
 
   try {
@@ -80,6 +83,9 @@ test("failed replay (typed result) emits correlation_replay_started -> correlati
   const repository: CorrelationReplayer = {
     async replay(): Promise<CorrelationReplayResult> {
       return { ok: false, reason: "corrupt line 3" };
+    },
+    async closeLeftoverAdmissionIntents() {
+      return [];
     },
   };
 
@@ -106,6 +112,9 @@ test("replay() rejecting is also treated as a replay failure", async () => {
   const repository: CorrelationReplayer = {
     async replay(): Promise<CorrelationReplayResult> {
       throw new Error("disk exploded");
+    },
+    async closeLeftoverAdmissionIntents() {
+      return [];
     },
   };
 
@@ -135,7 +144,7 @@ test("hedge startup accepts both explicit slots only after matching read-only as
   const activeRecords = [activeRecord("hedge", "long", "long-owner"), activeRecord("hedge", "short", "short-owner")];
 
   try {
-    await replayCorrelationStore({ replay: async () => ({ ok: true }) }, state.readiness, {
+    await replayCorrelationStore({ replay: async () => ({ ok: true }), closeLeftoverAdmissionIntents: async () => [] }, state.readiness, {
       bybit,
       linearPolicy: "hedge",
       getActiveRecords: () => activeRecords,
@@ -157,7 +166,7 @@ test("hedge startup fails closed on policy incompatibility before exchange assur
   const bybit = new FakeBybitAdapter();
 
   try {
-    await replayCorrelationStore({ replay: async () => ({ ok: true }) }, state.readiness, {
+    await replayCorrelationStore({ replay: async () => ({ ok: true }), closeLeftoverAdmissionIntents: async () => [] }, state.readiness, {
       bybit,
       linearPolicy: "hedge",
       getActiveRecords: () => [activeRecord("one_way", "long", "owner")],
@@ -183,7 +192,7 @@ test("hedge startup fails closed on unavailable or mismatched mode evidence", as
     const bybit = new FakeBybitAdapter();
     bybit.openPositionsResponse = response;
     try {
-      await replayCorrelationStore({ replay: async () => ({ ok: true }) }, state.readiness, {
+      await replayCorrelationStore({ replay: async () => ({ ok: true }), closeLeftoverAdmissionIntents: async () => [] }, state.readiness, {
         bybit,
         linearPolicy: "hedge",
         getActiveRecords: () => [activeRecord("hedge", "long", "owner")],
@@ -207,7 +216,7 @@ test("empty hedge startup and default one-way startup add no exchange assurance 
     const state = fakeReadiness();
     const bybit = new FakeBybitAdapter();
     try {
-      await replayCorrelationStore({ replay: async () => ({ ok: true }) }, state.readiness, {
+      await replayCorrelationStore({ replay: async () => ({ ok: true }), closeLeftoverAdmissionIntents: async () => [] }, state.readiness, {
         bybit,
         linearPolicy,
         getActiveRecords: () => [...activeRecords],

@@ -55,8 +55,9 @@ pair's record to `absent` (`desired_entry: null`, `order_link_id: null`, `update
 now; for a pre-existing record its prior closed status/history is preserved, i.e. only an
 `admission_pending` record is changed). Then ABI returns the same `500 internal_error`.
 
-`applyLocked`'s catch re-reads the record under the pair lock: if it is still
-`admission_pending`, it applies the same transition. A record already at `pending_create`
+An exception escaping `createOrder` before the boundary is handled the same way in
+`admitNewPair` (still under the pair lock) before it propagates to `applyLocked`, which
+maps it to `internal_error` with `failure_stage: "unexpected"`. A record already at `pending_create`
 or later is never touched by this path.
 
 Why `absent` and not a new terminal status: `absent` is already durably closed, already
@@ -100,8 +101,9 @@ admitting. The deploy note for this change restates the precondition.
 
 `admission_pending` is not durably closed and has `order_link_id: null`, so the existing
 rule already returns safe `500 internal_error` (retry later). Recovery convergence never
-writes `admission_pending` and never converges it. Open-position lookup treats it as no
-open position and no binding (same as `absent`), never as an error that leaks scope.
+writes `admission_pending` and never converges it. Open-position lookup classifies it as
+unresolved (safe `500`), exactly like `pending_create`, and never reports a position or a
+scope binding.
 
 ### D5. Failure cause in logs
 

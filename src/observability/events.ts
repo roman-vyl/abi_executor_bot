@@ -94,6 +94,9 @@ type OperationIdentity<TOperation extends ExecutionOperation> = {
 type OperationClassification<TOperation extends ExecutionOperation> = {
   outcome: OperationOutcomeMap[TOperation];
   failed: boolean;
+  // Extra log-only fields for operation_failed (entry_package failure stage
+  // and sanitized cause). Never part of any HTTP response.
+  failureFields?: Record<string, string>;
 };
 
 // Wraps one Runtime-facing execution operation invocation with
@@ -133,9 +136,10 @@ export async function withOperationEvents<TOperation extends ExecutionOperation,
     throw error;
   }
 
-  const { outcome, failed } = classify(result);
+  const { outcome, failed, failureFields } = classify(result);
   emitEvent(failed ? "error" : "info", failed ? "operation_failed" : "operation_completed", {
     ...fields,
+    ...(failed ? failureFields : undefined),
     outcome,
     duration_ms: elapsedMs(startedAt),
   });
@@ -159,19 +163,22 @@ function elapsedMs(startedAt: bigint): number {
 // instrumentation boundary), is defensively classified failed/error rather
 // than widening the outcome vocabulary to describe an unreachable case.
 
-export function classifyEntryPackageResult(body: {
-  status?: EntryPackageOperationOutcome;
-  error?: { code: string };
-}): OperationClassification<"entry_package"> {
+export function classifyEntryPackageResult(
+  body: {
+    status?: EntryPackageOperationOutcome;
+    error?: { code: string };
+  },
+  diagnostic?: { failure_stage: string; error_cause: string },
+): OperationClassification<"entry_package"> {
   if (body.status !== undefined) {
     return { outcome: body.status, failed: false };
   }
 
-  if (body.error?.code === "internal_error") {
-    return { outcome: "internal_error", failed: true };
-  }
-
-  return { outcome: "internal_error", failed: true };
+  const failureFields = {
+    failure_stage: diagnostic?.failure_stage ?? "unexpected",
+    error_cause: diagnostic?.error_cause ?? "not_recorded",
+  };
+  return { outcome: "internal_error", failed: true, failureFields };
 }
 
 export function classifyProtectionResult(body: {

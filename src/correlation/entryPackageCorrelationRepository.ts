@@ -129,6 +129,30 @@ export class EntryPackageCorrelationRepository {
     return { ok: true };
   }
 
+  // Startup step after a successful replay, before readiness. Relies on the
+  // single-writer precondition of this store: no other live process can still
+  // be admitting these pairs, and none of them reached the provisional
+  // pending_create write, so none of them contacted the exchange.
+  async closeLeftoverAdmissionIntents(): Promise<EntryPackageExecutionRecord[]> {
+    const leftovers = [...this.byCompositeKey.values()].filter((record) => record.status === "admission_pending");
+    const closed: EntryPackageExecutionRecord[] = [];
+    for (const record of leftovers) {
+      const absent: EntryPackageExecutionRecord = {
+        ...record,
+        desired_entry: null,
+        order_link_id: null,
+        order_id: null,
+        status: "absent",
+        pending_action: null,
+        current_binding_started_at: null,
+        updated_at: new Date().toISOString(),
+      };
+      await this.save(absent);
+      closed.push(absent);
+    }
+    return closed;
+  }
+
   get(strategyInstanceId: string, tradeCycleId: string): EntryPackageExecutionRecord | undefined {
     return this.byCompositeKey.get(correlationRecordKey(strategyInstanceId, tradeCycleId));
   }
@@ -263,6 +287,11 @@ export class EntryPackageCorrelationRepository {
 
     for (const record of this.byCompositeKey.values()) {
       if (record.exchange_category !== "linear" && record.exchange_category !== "spot") {
+        // An admission intent never has an exchange binding; replay leaves it
+        // for closeLeftoverAdmissionIntents() to close before readiness.
+        if (record.status === "admission_pending") {
+          continue;
+        }
         // "" is the valid never-bound shape (persistAbsentNoHistory) only
         // when durably closed. A non-durably-closed record with no real
         // exchange identity is a contradiction the current write paths

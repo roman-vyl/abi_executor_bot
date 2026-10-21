@@ -17,6 +17,11 @@ truncated to 300 characters, or a fixed reason such as `scope_conflict`.
 - **THEN** `operation_failed` carries `failure_stage: "scope_admission"` and
   `error_cause: "scope_conflict"`
 
+#### Scenario: Failure without a recorded stage
+- **WHEN** an entry-package `internal_error` carries no recorded stage
+- **THEN** `operation_failed` carries `failure_stage: "unexpected"` and
+  `error_cause: "not_recorded"`
+
 #### Scenario: No secrets or payloads
 - **WHEN** any `operation_failed` event for `entry_package` is emitted
 - **THEN** `error_cause` contains no raw exchange payload and no credentials
