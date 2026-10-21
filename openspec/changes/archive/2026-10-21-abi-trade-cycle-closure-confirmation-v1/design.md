@@ -59,7 +59,7 @@ Answers for a `terminal_closed` record, with no exchange call, both for lookup a
 
 ### D5. Close sequence
 
-Steps of `CloseApplicationService.process` in order; only steps 1–3 may run before the first proof, and none of them can change exposure:
+Steps of `CloseApplicationService.apply` in order; only steps 1–3 may run before the first proof, and none of them can change exposure:
 
 1. Existing classification: unknown binding, `terminal_closed` (answer from D3), `absent`/`terminal_unfilled` (existing terminal write, `closure: null`), scope and side checks.
 2. `neutralizeEntry`: cancel this cycle's own entry order if still live and confirm it terminal. This is the only cancel allowed before the proof; it removes a source of new exposure and never reduces any.

@@ -72,7 +72,7 @@ Before performing any exchange write, ABI SHALL resolve the requested pair to ex
 - **AND** ABI proceeds to the endpoint's own size-dependent check rather than failing on scope alone
 
 ### Requirement: Protection success is a closed object, confirmed by exact numeric equality
-A successful response SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status: "protection_applied"`, `stop_price`, and `take_price` (`take_price` `null` when the request's `take_price` was `null`). `protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. ABI SHALL NOT canonicalize, reformat, or otherwise alter the accepted request values: the response SHALL return the exact `stop_price`/`take_price` strings ABI accepted in the request, unchanged. When the exchange's confirmed protection already numerically equals the requested values before any write, ABI SHALL return `protection_applied` without sending an exchange write.
+A successful response SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status: "protection_applied"`, `stop_price`, `take_price` (`take_price` `null` when the request's `take_price` was `null`), and `protection_orders`. `protection_orders` SHALL be a closed object with exactly `quantity`, `stop` and `take`: `quantity` SHALL be the position quantity both protective legs carry (positive exact decimal string, Bybit `qty`, equal on both legs); `stop` and `take` SHALL each be a closed object with exactly `order_id` (non-empty string) and `trigger_price` (positive exact decimal string), taken unchanged from the Bybit `orderId` and `triggerPrice` of the attributed protective child read that proved this success; `take` SHALL be present even when `take_price` is `null`. `protection_applied` SHALL be returned only once ABI has verified, via exact-decimal numeric comparison, that the exchange's confirmed protection equals the requested `stop_price`/`take_price` — string formatting differences (e.g. trailing zeros) SHALL NOT block confirmation, but any genuine numeric difference SHALL. An exchange acknowledgement that a write was accepted, submitted, or queued SHALL NOT by itself satisfy this requirement. ABI SHALL NOT canonicalize, reformat, or otherwise alter the accepted request values: the response SHALL return the exact `stop_price`/`take_price` strings ABI accepted in the request, unchanged. When the exchange's confirmed protection already numerically equals the requested values before any write, ABI SHALL return `protection_applied` without sending an exchange write.
 
 #### Scenario: Verified protection returns the accepted request strings unchanged
 - **WHEN** the exchange's confirmed stop/take are numerically equal to the requested values
@@ -80,7 +80,7 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 
 #### Scenario: Response object is closed, with take_price nulled through
 - **WHEN** ABI returns `protection_applied`
-- **THEN** the response contains exactly `strategy_instance_id`, `trade_cycle_id`, `status`, `stop_price`, and `take_price`, with no additional fields
+- **THEN** the response contains exactly `strategy_instance_id`, `trade_cycle_id`, `status`, `stop_price`, `take_price`, and `protection_orders`, with no additional fields
 - **AND** `take_price` is `null` when the request's `take_price` was `null`
 
 #### Scenario: Exchange-normalized value blocks success
@@ -94,6 +94,18 @@ A successful response SHALL be HTTP `200` with a closed JSON object containing e
 #### Scenario: Already-matching confirmed protection may return protection_applied without exchange mutation
 - **WHEN** the exchange's confirmed stop/take already numerically equal the requested values before ABI sends any write
 - **THEN** ABI returns HTTP `200` with `status: "protection_applied"` and the exact `stop_price`/`take_price` strings it accepted in the request, having sent no exchange write
+
+#### Scenario: Protective orders come from the proving read
+- **WHEN** ABI returns `protection_applied` after a write
+- **THEN** `protection_orders.stop` and `protection_orders.take` carry the `orderId` and `triggerPrice` of the post-write read-back legs, and `protection_orders.quantity` their common `qty`, as Bybit returned them
+
+#### Scenario: Protective orders on an already-satisfied state
+- **WHEN** ABI returns `protection_applied` without a write
+- **THEN** `protection_orders` carries the legs of the read that matched
+
+#### Scenario: Disabled take still reports the surrogate take order
+- **WHEN** the request's `take_price` is `null`
+- **THEN** the response has `take_price: null` and `protection_orders.take` describing the surrogate take order
 
 ### Requirement: Protection fails closed when the resolved scope has no live position to protect
 After ABI has resolved a single unambiguous, supported position scope for the pair (per the shared resolution requirement above), if the verified live position size at that scope is zero, ABI SHALL return HTTP `422` with `error.code` `position_not_open`, not `internal_error`.
@@ -132,21 +144,31 @@ ABI SHALL cancel every order it attributes to the requested pair — protective,
 
 ### Requirement: Close success means both postconditions are verified under complete pair correlation
 A successful response SHALL be HTTP `200` with a closed JSON object containing exactly
-`strategy_instance_id`, `trade_cycle_id`, and `status: "trade_cycle_closed"`. `trade_cycle_closed`
-SHALL be returned only once ABI has verified both: the requested cycle's own resolved exposure has
-actually been closed, and no order ABI attributes to the pair remains active — and only when the
+`strategy_instance_id`, `trade_cycle_id`, `status: "trade_cycle_closed"`, and `closure`.
+`trade_cycle_closed` SHALL be returned only once ABI has verified both: the requested cycle's own
+resolved exposure has actually been closed, and no order ABI attributes to the pair remains active — and only when the
 pair's stored correlation is complete and non-contradictory. ABI's proof that the requested cycle's
-own exposure was closed SHALL be attributable to that cycle's own close activity specifically, not
-inferred solely from a before/after change in the scope's aggregate live position size, since that
-aggregate can also move because of a sibling trade cycle sharing the same physical scope. Incomplete
-or contradictory correlation, or accepting the close request alone, SHALL NOT produce this status or
-any other `2xx`.
+own exposure was closed SHALL be attributable to that cycle's own close activity or its own native
+protection's full execution specifically, not inferred solely from a before/after change in the scope's
+aggregate live position size, since that aggregate can also move because of a sibling trade cycle
+sharing the same physical scope. Incomplete or contradictory correlation, or accepting the close
+request alone, SHALL NOT produce this status or any other `2xx`. `closure` SHALL have the shape of the
+open-position `closure` object: the proven reason and identifiers when the cycle's own entry had a
+fill, and `null` when it had none.
 
 #### Scenario: Verified full close is acknowledged
 - **WHEN** ABI has verified, attributably to the requested cycle's own close activity, that its
   resolved exposure is closed, and no attributable active order remains, under complete pair
   correlation
-- **THEN** ABI returns HTTP `200` with `status: "trade_cycle_closed"`
+- **THEN** ABI returns HTTP `200` with `status: "trade_cycle_closed"` and a `runtime_signal` closure
+
+#### Scenario: Close after a protection exit is acknowledged with that reason
+- **WHEN** the cycle's own stop or take-profit already fully closed it
+- **THEN** ABI returns HTTP `200` with `status: "trade_cycle_closed"` and a `stop_loss` or `take_profit` closure
+
+#### Scenario: Close of a never-filled cycle
+- **WHEN** the cycle's own entry never filled and cleanup is verified
+- **THEN** ABI returns HTTP `200` with `status: "trade_cycle_closed"` and `closure: null`
 
 #### Scenario: Incomplete or contradictory correlation blocks success
 - **WHEN** the pair's stored correlation data is incomplete or internally contradictory
@@ -199,3 +221,4 @@ ABI SHALL provide an OpenAPI 3.1 operation for each endpoint, matching the metho
 #### Scenario: OpenAPI and contract tests agree
 - **WHEN** the OpenAPI operations and contract-level tests are validated
 - **THEN** request and response schemas match this capability, and no internal ABI workflow or exchange detail appears in the public contract
+

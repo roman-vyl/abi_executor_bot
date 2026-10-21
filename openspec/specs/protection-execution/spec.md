@@ -295,3 +295,42 @@ outcome, not a thrown exception or a rejected Promise — when that resolution f
 - **AND** ABI does not throw an exception or leave the caller's request unresolved
 - **AND** ABI does not resolve the trade cycle's attributable protection state or send any amend request
   for this attempt
+
+### Requirement: Protection execution re-verifies membership at the binding level
+Before reconciling protection for an explicit hedge record, ABI SHALL verify that the pair remains
+an active owner of its derived directional slot. Other owners of the same slot and owners of the
+opposite slot SHALL not invalidate that membership. An active one-way/hedge geometry conflict or
+malformed ownership state SHALL fail closed.
+
+#### Scenario: Opposite hedge owner coexists in controlled lifecycle state
+- **WHEN** controlled internal state contains active long-slot and short-slot hedge owners and the
+  requested pair remains in its expected slot
+- **THEN** the protection lifecycle evaluates only that pair and slot
+- **AND** it does not reject solely because the opposite slot has an owner
+
+#### Scenario: Pair is absent from its expected slot
+- **WHEN** the record claims hedge geometry but the repository cannot reconstruct the pair in that
+  directional slot
+- **THEN** ABI performs no protection write
+
+### Requirement: Protection reconciliation preserves own evidence and slot isolation
+Protection desired quantity SHALL continue to come from the owner's own attributable fills, and
+native children SHALL continue to be selected by exact parent linkage. Hedge support SHALL add
+binding validation without using physical slot size, price, or timing as an ownership heuristic.
+
+#### Scenario: Same-slot owners have independent protection
+- **WHEN** multiple owners share one directional slot
+- **THEN** reconciling one owner's protection uses only that owner's fills and parent-linked children
+- **AND** sibling protection is not amended or cancelled
+
+### Requirement: A successful reconciliation returns the legs that proved it
+A reconciliation reported as satisfied (no write) or reconciled (after amend) SHALL carry the attributed stop and take legs of the fresh read that proved it: the matching initial read when no write was sent, the matching post-amend read-back otherwise. It SHALL NOT substitute values from the write plan, the request or an earlier read. This adds no exchange request and changes no success or failure condition.
+
+#### Scenario: Reconciled after amend
+- **WHEN** an amend was sent and the read-back matches the desired state with no terminal leg
+- **THEN** the outcome carries the read-back's stop and take legs
+
+#### Scenario: Already satisfied
+- **WHEN** the initial read matches the desired state with no terminal leg
+- **THEN** the outcome carries the initial read's stop and take legs and no amend is sent
+

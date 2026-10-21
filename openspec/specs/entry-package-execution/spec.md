@@ -46,8 +46,37 @@ existing binding.
   binding per the existing repeat-PUT revalidation requirement
 
 ### Requirement: ABI cancels or confirms absence of a desired entry package
-When the desired entry is null, ABI SHALL cancel any live order for that trade cycle and
-acknowledge absence, or confirm absence directly when nothing was ever live.
+When the desired entry is null, ABI SHALL cancel any positively found live order for that
+trade cycle and acknowledge absence only after cancellation is durably confirmed, or
+confirm absence directly from an already durable absent/terminal fact or trustworthy
+current evidence.
+
+For a record with the ambiguous-CREATE shape used by `entry_order_not_found` — status
+`pending_create` or `unknown`, pending action exactly `create`, non-null desired entry,
+non-empty exact order identity, valid binding start, and no durable observation/fill/close
+identity — clean order absence SHALL NOT directly confirm absence. Before persisting
+`status:absent` or returning `EntryPackageAbsent`, the CANCEL request itself SHALL repeat
+the complete three-attempt exact-own order/no-execution observation and SHALL validate at
+completion that Bybit server-time binding age is non-negative and strictly below seven
+days. A clean flat aggregate and clean same-side aggregate are both compatible; the
+latter may be a sibling cycle and is not attributable to this exact identity. Any
+aged-out, failed, malformed, mismatched, incomplete, ambiguous, opposite-side, or other
+contradictory evidence SHALL fail closed without persisting absence.
+
+This additional gate applies only when absence would be inferred from clean-empty reads
+for the ambiguous-CREATE shape. Positive live, terminal, or fill evidence and every other
+record shape retain their existing behavior.
+
+#### Scenario: Cancel a positively found live order
+- **WHEN** `desired_entry` is null and the exact live order exists for the trade cycle
+- **THEN** ABI SHALL cancel that order and return `entry_package_absent` only after the
+  cancellation is durably confirmed
+
+#### Scenario: Confirm already-durable absent state
+- **WHEN** `desired_entry` is null and ABI already holds a canonical durable absent or
+  terminal-without-fill fact for the trade cycle
+- **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
+  action occurred and without requiring the ambiguous-CREATE empty-read rule
 
 #### Scenario: Cancel a live order
 - **WHEN** `desired_entry` is null and a live order exists for the trade cycle
@@ -60,44 +89,75 @@ acknowledge absence, or confirm absence directly when nothing was ever live.
 - **THEN** ABI SHALL return `entry_package_absent` without asserting that a cancellation
   action occurred
 
+#### Scenario: Fresh full-budget ambiguous-CREATE absence can be confirmed
+- **WHEN** `desired_entry` is null for the ambiguous-CREATE shape, all three CANCEL-side
+  attempts are cleanly exact-order absent and exact-execution absent, every clean
+  aggregate result is flat or same-side, and validated Bybit server time proves completed
+  binding age strictly below seven days
+- **THEN** ABI MAY durably persist `status:absent` and return exact
+  `EntryPackageAbsent`
+- **AND** this confirmation does not assert that the original CREATE never existed or
+  never reached Bybit
+
+#### Scenario: Same-side sibling exposure remains compatible with formal absence
+- **WHEN** every exact-own and freshness condition passes but clean aggregate position
+  reports exposure on the desired side belonging potentially to a sibling cycle
+- **THEN** ABI SHALL NOT suppress `EntryPackageAbsent` on that aggregate fact alone
+- **AND** SHALL not attribute the sibling exposure to this exact order identity
+
+#### Scenario: Opposite-side or unavailable aggregate evidence fails closed
+- **WHEN** any attempt reports a clean opposite-side aggregate position or the aggregate
+  query fails or is malformed
+- **THEN** ABI SHALL NOT persist `status:absent` or return `EntryPackageAbsent`
+
+#### Scenario: Aged-out clean-empty evidence never confirms absence
+- **WHEN** `desired_entry` is null for the ambiguous-CREATE shape and completed binding
+  age is negative, exactly seven days, older than seven days, or cannot be validated
+- **THEN** ABI SHALL NOT persist `status:absent`
+- **AND** SHALL NOT return `EntryPackageAbsent`
+- **AND** SHALL return the existing safe error so Runtime retains its marker
+
+#### Scenario: Execution evidence prevents ambiguous-CREATE absence
+- **WHEN** order rows are absent but the exact-own execution query finds an attributable
+  execution during corrective CANCEL
+- **THEN** ABI SHALL NOT persist or return absence
+- **AND** SHALL honor existing fill handling when sufficient, otherwise fail closed
+
 #### Scenario: A query failure while confirming a cancellation never confirms absence
-- **WHEN** ABI queries the exchange to confirm a cancellation and the query fails or times
-  out, rather than cleanly reporting the order gone
-- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that failure, and
-  SHALL treat the cancellation as unconfirmed
+- **WHEN** any required order, execution, position, or server-time query fails or times
+  out
+- **THEN** ABI SHALL NOT return `entry_package_absent` and SHALL treat cancellation or
+  absence as unconfirmed
 
 #### Scenario: A structurally malformed response while confirming a cancellation never confirms absence
-- **WHEN** ABI queries the exchange to confirm a cancellation and the response is
-  structurally malformed (per the malformed-response conditions defined for confirming
-  package application) rather than a cleanly-reported empty list or clean terminal
-  status, on either the realtime or history query
-- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that response, and
-  SHALL treat the cancellation as unconfirmed
+- **WHEN** any required confirmation response is structurally malformed, identity-
+  mismatched, cursor-incomplete, or otherwise ambiguous
+- **THEN** ABI SHALL NOT return `entry_package_absent` and SHALL treat the outcome as
+  unconfirmed
 
 #### Scenario: An unrecognized realtime order status while confirming a cancellation never confirms absence
-- **WHEN** ABI queries the exchange to confirm a cancellation and the realtime query
-  returns a single, correctly-identified row with an unrecognized `orderStatus`
-- **THEN** ABI SHALL NOT return `entry_package_absent` on the basis of that result, even
-  if a subsequent history query cleanly reports the order absent
+- **WHEN** realtime returns the correctly identified order with an unrecognized status
+- **THEN** ABI SHALL NOT return `entry_package_absent` even if a later history read is
+  empty
 
 #### Scenario: A cancel transport failure is durably recorded as unknown, not silently left pending
 - **WHEN** ABI dispatches a cancel command and the exchange call throws or times out
   before ABI can classify the outcome
-- **THEN** ABI SHALL durably record `status: "unknown"` for the binding before returning a
-  safe error
-- **AND** `pending_action` SHALL remain `"cancel"` so a subsequent repeat PUT can safely
-  resend it
+- **THEN** ABI SHALL durably record `status:unknown` before returning a safe error
+- **AND** `pending_action` SHALL remain `cancel` so a later request can revalidate
 
 #### Scenario: A repeat cancel-intent PUT revalidates before resending
-- **WHEN** a PUT request specifies a null `desired_entry` and the stored record's status
-  is not already `absent` or `terminal_unfilled`
-- **THEN** ABI SHALL query the exchange for the existing order's current state before
-  resending the cancel command
-- **AND** ABI SHALL resend cancel only if that query confirms the order is still live
-- **AND** if the query confirms the order is already terminal, ABI SHALL record the
-  confirmed outcome without resending
-- **AND** if the query is inconclusive, ABI SHALL record `status: "unknown"` without
-  resending
+- **WHEN** a null-desired-entry request targets a record not already durably absent or
+  terminal-unfilled
+- **THEN** ABI SHALL query the exact current order before resending cancel
+- **AND** SHALL resend only when the exact order is positively live
+- **AND** SHALL honor a positively terminal/fill result through existing behavior
+- **AND** SHALL record `unknown` and fail safe when evidence is inconclusive
+
+#### Scenario: Other record shapes retain existing cancellation semantics
+- **WHEN** the target does not have the ambiguous-CREATE structural shape
+- **THEN** this change adds no freshness-based inference or new cancellation behavior
+- **AND** the pre-existing positive confirmation and fail-safe rules continue to apply
 
 ### Requirement: A changed ticker within an existing trade cycle is rejected without contacting the exchange
 The `ticker` associated with a trade cycle is fixed at first application. ABI SHALL
@@ -511,3 +571,138 @@ geometries.
 - **THEN** the documentation SHALL state that the side-to-direction mapping applies to
   the currently supported entry geometry and is not guaranteed for a future, differently
   shaped strategy
+
+### Requirement: Entry-package internals preserve one physical binding through mapping and confirmation
+ABI SHALL be able to map and confirm an entry against an explicitly supplied internal one-way or
+directional hedge binding. The binding used for the create payload, realtime confirmation,
+historical confirmation, cancellation, retry, and ambiguous-create evidence SHALL be the binding
+durably associated with that generation. A mismatch SHALL fail closed.
+
+#### Scenario: Controlled internal hedge entry mapping
+- **WHEN** a controlled internal or test path maps an explicit hedge-long or hedge-short binding
+- **THEN** the Bybit create payload contains the corresponding exchange slot encoding
+- **AND** every confirmation query expects the same physical binding
+
+#### Scenario: Retry cannot change binding
+- **WHEN** an unresolved create is retried for the same generation
+- **THEN** ABI reuses the record's existing physical binding
+- **AND** it does not select a binding from current account configuration or fresh side inference
+  that could disagree with the record
+
+### Requirement: Ambiguous-create absence is target-binding specific
+When own order and execution evidence are absent for an ambiguous create, ABI SHALL consult only
+the record's expected physical binding for physical sanity. Exposure or flatness in the opposite
+hedge slot SHALL neither prove nor disprove whether the target create occurred. Same-slot sibling
+exposure SHALL remain compatible with clean absence of this owner's own create.
+
+#### Scenario: Opposite slot is open while target create is absent
+- **WHEN** own order and execution evidence are cleanly absent and only the opposite hedge slot is
+  open
+- **THEN** ABI does not attribute that opposite exposure to the target create
+
+#### Scenario: Same-slot sibling exists
+- **WHEN** own order and execution evidence are cleanly absent while attributable owners already
+  contribute exposure to the same directional slot
+- **THEN** that aggregate same-slot exposure alone does not prevent clean absence convergence for
+  this owner
+
+### Requirement: New production bindings use the selected instrument geometry
+For a newly admitted production entry, ABI SHALL select one-way geometry for spot and the configured deployment geometry for linear instruments, persist that selection in the provisional correlation record before exchange I/O, and use the persisted binding for create and confirmation. A retry or restart SHALL reuse the durable binding rather than current configuration.
+
+#### Scenario: New linear hedge binding
+- **WHEN** linear hedge policy is active, assurance succeeds, and a new entry is admitted
+- **THEN** the provisional record durably stores `position_binding_mode = "hedge"`
+- **AND** entry create and confirmation target the directional slot derived from the record's immutable desired side
+
+#### Scenario: Durable binding survives configuration change
+- **WHEN** a hedge-bound generation is retried or recovered after deployment configuration changes
+- **THEN** ABI uses that generation's durable hedge binding
+- **AND** it does not remap the generation as one-way
+
+#### Scenario: Position index remains internal
+- **WHEN** a hedge entry is mapped to Bybit
+- **THEN** the exchange adapter derives the directional `positionIdx` internally
+- **AND** no public ABI request or response gains a position-index field
+
+### Requirement: No hedge provisional write precedes assurance
+ABI SHALL complete binding compatibility checks and required position-mode assurance inside serialized admission before durably persisting a new hedge provisional record. Failure before that write SHALL leave no claimed owner and SHALL authorize no exchange create.
+
+#### Scenario: Assurance mismatch before provisional write
+- **WHEN** a candidate hedge entry cannot prove compatible exchange geometry
+- **THEN** no provisional hedge record is appended
+- **AND** no create order is submitted
+
+### Requirement: Every received entry-package PUT leaves a durable trace for its pair
+For a non-null PUT on a pair with no correlation record, ABI SHALL durably write an
+admission intent record (`status: admission_pending`, no order identity, no exchange
+scope) as its first action, before any step that can end in `internal_error`. Such a
+record SHALL NOT claim or block any physical position scope.
+
+#### Scenario: Intent record precedes quantity calculation
+- **WHEN** a non-null PUT arrives for a pair with no correlation record
+- **THEN** ABI durably writes `status: admission_pending` before calculating the quantity
+- **AND** the record has `order_link_id: null` and an empty exchange category
+
+#### Scenario: Intent record never holds a scope
+- **WHEN** another pair checks scope admission for the same instrument while an
+  `admission_pending` record exists
+- **THEN** the `admission_pending` record is not counted as an active scope owner
+
+#### Scenario: Intent write fails
+- **WHEN** the durable `admission_pending` write fails
+- **THEN** ABI returns `500 internal_error` and contacts no exchange
+
+### Requirement: A failure before the exchange boundary is durably closed as absent
+The exchange boundary is the durable provisional `pending_create` write. When a PUT fails
+before it, by returned `internal_error` or by exception, ABI SHALL durably move the pair's
+`admission_pending` record to `absent` (no desired entry, no order identity) before
+responding `500 internal_error`. A record at `pending_create` or later SHALL NOT be moved
+by this rule.
+
+#### Scenario: Durable state, not a local flag, proves no exchange call
+- **WHEN** ABI decides to persist `absent` after a pre-boundary failure
+- **THEN** the write is applied only if the pair's current record, re-read under the pair
+  lock, is still `admission_pending`
+- **AND** an in-process flag alone never causes `absent` or a terminal recovery answer
+
+#### Scenario: Provisional write fails
+- **WHEN** the durable `pending_create` write fails or its outcome is ambiguous
+- **THEN** ABI does not persist `absent` in this invocation and responds
+  `500 internal_error`
+
+#### Scenario: Quantity calculation fails
+- **WHEN** quantity calculation fails for a new pair
+- **THEN** the pair's record is durably `absent`
+- **AND** ABI sent no exchange request for the pair
+- **AND** the response is `500 internal_error`
+
+#### Scenario: Scope conflict
+- **WHEN** scope admission returns a conflict for a new pair
+- **THEN** the pair's record is durably `absent` and no exchange request was sent
+
+#### Scenario: Unexpected exception before the boundary
+- **WHEN** an exception escapes processing while the pair's record is still
+  `admission_pending`
+- **THEN** ABI, still under the pair lock, durably transitions it to `absent` before
+  responding `500 internal_error`
+
+#### Scenario: Failure after the boundary is unchanged
+- **WHEN** the exchange call throws after the provisional `pending_create` save
+- **THEN** ABI keeps the existing behavior (`status: unknown`, `500 internal_error`) and
+  does not write `absent`
+
+#### Scenario: The absent write itself fails
+- **WHEN** the durable transition to `absent` fails
+- **THEN** the record stays `admission_pending` and ABI responds `500 internal_error`
+
+### Requirement: Leftover admission intents are closed at startup
+During startup correlation recovery and before reporting readiness, ABI SHALL durably
+transition every `admission_pending` record to `absent`. A failed transition SHALL fail
+readiness. This relies on the existing precondition that exactly one live ABI process
+writes a correlation store.
+
+#### Scenario: Process died during admission
+- **WHEN** ABI starts and the store contains an `admission_pending` record
+- **THEN** ABI durably writes `absent` for that pair before readiness
+- **AND** a later recovery-state query for the pair resolves `terminal_without_fill`
+
