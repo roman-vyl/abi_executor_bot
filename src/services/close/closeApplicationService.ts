@@ -35,6 +35,7 @@ import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttr
 import type { ProtectionClass, TradeCycleClosure } from "../closure/tradeCycleClosure.js";
 import {
   classifyOwnProtection,
+  historyScanFor,
   proveOwnCycleCompletion,
   resolveOwnCloseOrderFate,
   storedClosure,
@@ -273,6 +274,7 @@ export class CloseApplicationService {
       symbol: record.exchange_symbol,
       entryOrderLinkId,
       binding,
+      historyScan: historyScanFor(record),
     });
     const protectionClass = await classifyOwnProtection({
       bybit: this.deps.bybit,

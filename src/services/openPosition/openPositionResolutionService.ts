@@ -29,7 +29,13 @@ import {
   resolveFirstAttributableFillAtMs,
   TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
-import { classifyOwnProtection, proveOwnCycleCompletion, storedClosure, terminalClosedRecord } from "../closure/tradeCycleClosure.js";
+import {
+  classifyOwnProtection,
+  historyScanFor,
+  proveOwnCycleCompletion,
+  storedClosure,
+  terminalClosedRecord,
+} from "../closure/tradeCycleClosure.js";
 import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
 
 export type OpenPositionQuery = {
@@ -234,6 +240,7 @@ export class OpenPositionResolutionService {
       symbol: record.exchange_symbol,
       entryOrderLinkId: record.order_link_id,
       binding,
+      historyScan: historyScanFor(record),
     });
     const protection = await classifyOwnProtection({
       bybit: this.deps.bybit,

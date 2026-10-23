@@ -431,22 +431,232 @@ test("a proven protection fill together with an executed own Runtime close is co
   }
 });
 
-test("unknown protection with an observed own fill fails closed in lookup and Close", async () => {
-  await withServices(async ({ lookup, close, bybit, repo }) => {
-    await repo.save(makeRecord({ first_fill_at_ms: 111 }));
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+// abi-protection-history-bounded-lookup-v1 D3: one filled own leg proves the
+// completion when the whole cycle lifetime was read and no own order is
+// live; a sibling's position in the same scope is not a condition.
+test("single filled own leg with a sibling position in the scope closes the cycle in lookup", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
     setOrder(bybit, ENTRY_LINK, "Filled", QTY);
-    // Only the filled stop is visible (partial_pair): attribution is
-    // ambiguous, but the own fill was seen.
     installProtection(bybit, filledStop());
     bybit.executionListResponse = executions([QTY]);
     bybit.openPositionsResponse = position("Buy", "0.002");
 
-    assert.equal((await lookup.resolve(query())).statusCode, 500);
-    assert.equal((await close.apply(query())).statusCode, 500);
+    const result = await lookup.resolve(query());
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual((result.body as { closure: unknown }).closure, STOP_CLOSURE);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+    assert.equal(bybit.createOrderCalls.length + bybit.cancelOrderCalls.length, 0);
+  });
+});
+
+test("single filled own leg closes the cycle in Close without any order", async () => {
+  await withServices(async ({ close, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, filledStop());
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = position("Buy", "0.002");
+
+    const result = await close.apply(query());
+
+    assert.equal(result.statusCode, 200);
     assert.equal(bybit.createOrderCalls.length, 0);
     assert.equal(bybit.cancelOrderCalls.length, 0);
-    assertNotPersisted(repo, "partial_pair with fill");
+    assert.equal(repo.get("instance-1", "cycle-1")?.closure_reason, "stop_loss");
   });
+});
+
+test("single filled own leg is unknown when the history read did not reach the cycle start", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    // Ten weeks back needs more than the 8 windows the cap allows.
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 70 * DAY_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, filledStop());
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 8);
+    assertNotPersisted(repo, "incomplete read");
+  });
+});
+
+test("single filled own leg is unknown when a further page of active orders may hide a live leg", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, filledStop());
+    bybit.activeOrdersResponse = { retCode: 0, result: { category: "linear", nextPageCursor: "more", list: [] } };
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assertNotPersisted(repo, "active orders page 2");
+  });
+});
+
+test("a filled leg with the other leg still live is not completed", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, filledStop(), takeRow());
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assertNotPersisted(repo, "live sibling leg");
+  });
+});
+
+test("single filled own leg with executions that do not sum to the exposure is not completed", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    installProtection(bybit, filledStop());
+    bybit.executionListResponse = executions(["0.0004"]);
+    bybit.openPositionsResponse = flatPosition();
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assertNotPersisted(repo, "execution sum");
+  });
+});
+
+function foreignRows(count: number, tag: string): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_, index) =>
+    stopRow({ orderId: `${tag}-${index}`, parentOrderLinkId: "other-entry", orderStatus: "Cancelled", leavesQty: "0" }),
+  );
+}
+
+function historyPage(rows: Record<string, unknown>[], nextPageCursor = ""): unknown {
+  return { retCode: 0, result: { category: "linear", nextPageCursor, list: rows } };
+}
+
+test("own stop pushed off the first page by more than 50 later orders is found through the cursor", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 36 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    bybit.activeOrdersResponse = childList([]);
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.getOrderHistoryForSymbol = async (payload) => {
+      bybit.getOrderHistoryForSymbolCalls.push(payload);
+      return payload.cursor === undefined
+        ? historyPage(foreignRows(50, "later"), "page-2")
+        : historyPage([filledStop(), deactivatedTake()]);
+    };
+
+    const result = await lookup.resolve(query());
+
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual((result.body as { closure: unknown }).closure, STOP_CLOSURE);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 2);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls[1].cursor, "page-2");
+    assert.equal(bybit.getOrderHistoryForSymbolCalls[0].limit, "50");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "terminal_closed");
+  });
+});
+
+test("the pair found on the first page ends the read even when a cursor remains", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 36 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    bybit.activeOrdersResponse = childList([]);
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.getOrderHistoryForSymbol = async (payload) => {
+      bybit.getOrderHistoryForSymbolCalls.push(payload);
+      return historyPage([filledStop(), deactivatedTake()], "never-read");
+    };
+
+    assert.equal((await lookup.resolve(query())).statusCode, 200);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 1);
+  });
+});
+
+test("a cycle older than one request window reads consecutive windows of at most 7 days", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    const now = Date.now();
+    await repo.save(makeRecord({ first_fill_at_ms: now - 10 * DAY_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    bybit.activeOrdersResponse = childList([]);
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.getOrderHistoryForSymbol = async (payload) => {
+      bybit.getOrderHistoryForSymbolCalls.push(payload);
+      // Only the older window holds the exit.
+      return bybit.getOrderHistoryForSymbolCalls.length === 1
+        ? historyPage(foreignRows(3, "recent"))
+        : historyPage([filledStop(), deactivatedTake()]);
+    };
+
+    const result = await lookup.resolve(query());
+
+    assert.equal(result.statusCode, 200);
+    const [first, second] = bybit.getOrderHistoryForSymbolCalls;
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 2);
+    for (const call of [first, second]) {
+      assert.ok(call.endTime! - call.startTime! <= 7 * DAY_MS, "window within the 7-day bound");
+    }
+    assert.equal(second.endTime, first.startTime, "windows are contiguous, newest first");
+    assert.ok(second.startTime! <= now - 10 * DAY_MS, "the oldest window reaches the cycle start");
+  });
+});
+
+test("reaching the page cap is query_failed and writes nothing", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 36 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    bybit.activeOrdersResponse = childList([]);
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+    let counter = 0;
+    bybit.getOrderHistoryForSymbol = async (payload) => {
+      bybit.getOrderHistoryForSymbolCalls.push(payload);
+      counter += 1;
+      return historyPage(foreignRows(1, `p${counter}`), `cursor-${counter}`);
+    };
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assert.equal(bybit.getOrderHistoryForSymbolCalls.length, 200);
+    assertNotPersisted(repo, "page cap");
+  });
+});
+
+test("a cursor that does not advance, a failed page and a malformed page are all query_failed", async () => {
+  const cases: Array<{ name: string; page: (calls: number) => unknown }> = [
+    { name: "stuck cursor", page: () => historyPage(foreignRows(1, "s"), "same") },
+    {
+      name: "failed page",
+      page: (calls) => {
+        if (calls === 1) {
+          return historyPage(foreignRows(1, "f"), "next");
+        }
+        throw new Error("bybit down");
+      },
+    },
+    { name: "malformed page", page: () => ({ retCode: 0, result: { category: "linear", list: "bad" } }) },
+  ];
+  for (const item of cases) {
+    await withServices(async ({ lookup, bybit, repo }) => {
+      await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 36 * HOUR_MS }));
+      setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+      bybit.activeOrdersResponse = childList([]);
+      bybit.executionListResponse = executions([QTY]);
+      bybit.openPositionsResponse = flatPosition();
+      bybit.getOrderHistoryForSymbol = async (payload) => {
+        bybit.getOrderHistoryForSymbolCalls.push(payload);
+        return item.page(bybit.getOrderHistoryForSymbolCalls.length);
+      };
+
+      assert.equal((await lookup.resolve(query())).statusCode, 500, item.name);
+      assertNotPersisted(repo, item.name);
+    });
+  }
 });
 
 test("close resend: an accepted close order hidden by a temporary not_found is never sent twice", async () => {

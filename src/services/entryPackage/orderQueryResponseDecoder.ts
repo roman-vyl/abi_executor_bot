@@ -207,7 +207,12 @@ export type ChildOrderListProtocolFailureReason =
   | "invalid_position_idx";
 
 export type DecodedChildOrderList =
-  | { kind: "ok"; items: BybitChildOrderCandidate[] }
+  | {
+      kind: "ok";
+      items: BybitChildOrderCandidate[];
+      // "" when the response carries no cursor or an empty one: the last page.
+      nextPageCursor: string;
+    }
   | { kind: "protocol_failure"; reason: ChildOrderListProtocolFailureReason };
 
 export type ExpectedChildOrderListScope = {
@@ -349,7 +354,12 @@ export function decodeChildOrderListResponse(input: {
     items.push(item);
   }
 
-  return { kind: "ok", items };
+  const nextPageCursor = resultRecord.nextPageCursor;
+  if (nextPageCursor !== undefined && typeof nextPageCursor !== "string") {
+    return { kind: "protocol_failure", reason: "malformed_envelope" };
+  }
+
+  return { kind: "ok", items, nextPageCursor: nextPageCursor ?? "" };
 }
 
 // A field the exchange omits entirely (not an own key on the row) is a

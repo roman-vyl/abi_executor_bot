@@ -628,7 +628,7 @@ function makeRecord(
     exchange_symbol: overrides.exchangeSymbol ?? "BTCUSDT",
     exchange_category: overrides.exchangeCategory ?? "linear",
     position_binding_mode: overrides.positionBindingMode ?? "one_way",
-    created_at: "2026-01-01T00:00:00.000Z",
+    created_at: new Date(Date.now() - 3_600_000).toISOString(),
     updated_at: "2026-01-01T00:00:00.000Z",
     desired_entry: {
       side: overrides.side ?? "long",
