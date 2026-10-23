@@ -26,6 +26,11 @@ ABI SHALL resolve a cycle's own attached protection from the Bybit order history
 ### Requirement: An incomplete history read is never reported as an absent or partial result
 ABI SHALL report `ambiguous` with reason `query_failed` when the history read hits its page or window cap, a page fails or cannot be decoded, or the cursor does not advance. ABI SHALL NOT report `none` or a pair shape computed from a partially read history.
 
+#### Scenario: Page without a cursor field
+- **WHEN** a history page carries no cursor field, so the end of the window cannot be told
+- **THEN** the resolution is `ambiguous` with reason `query_failed`
+- **AND** a page of active orders without the cursor field is not a complete read for the single-leg rule
+
 #### Scenario: Page cap reached
 - **WHEN** the history read reaches its page cap before the cursor is empty
 - **THEN** the resolution is `ambiguous` with reason `query_failed`

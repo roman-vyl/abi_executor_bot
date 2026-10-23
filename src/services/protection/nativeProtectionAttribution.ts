@@ -223,7 +223,8 @@ async function resolveWithHistoryScan(input: {
   if (decodedRealtime.kind === "protocol_failure") {
     return failed;
   }
-  // A further page of active orders could hide a live own leg.
+  // A further page of active orders could hide a live own leg; a response
+  // without the cursor field cannot show that there is none.
   const realtimeComplete = decodedRealtime.nextPageCursor === "";
 
   const nowMs = input.historyScan.nowMs ?? Date.now();
@@ -270,7 +271,7 @@ async function resolveWithHistoryScan(input: {
       } catch {
         return failed;
       }
-      if (decoded.kind === "protocol_failure") {
+      if (decoded.kind === "protocol_failure" || decoded.nextPageCursor === undefined) {
         return failed;
       }
       historyItems.push(...decoded.items);

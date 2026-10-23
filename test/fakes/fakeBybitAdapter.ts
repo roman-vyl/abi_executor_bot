@@ -102,7 +102,10 @@ export class FakeBybitAdapter implements BybitAdapter {
 
   async getActiveOrders(input: GetActiveOrdersInput = {}): Promise<unknown> {
     void input;
-    return withDefaultOrderPositionIdx(this.activeOrdersResponse);
+    return withDefaultCategoryAndSymbol(withDefaultOrderPositionIdx(this.activeOrdersResponse), {
+      category: "linear",
+      symbol: input.symbol ?? "",
+    });
   }
 
   async getOpenPositions(input: GetOpenPositionsInput = {}): Promise<unknown> {
@@ -257,6 +260,10 @@ function withDefaultCategoryAndSymbol(
   const nextResult: Record<string, unknown> = { ...resultRecord };
   if (!("category" in resultRecord)) {
     nextResult.category = payload.category;
+  }
+  // Bybit always sends the cursor field, empty on the last page.
+  if (!("nextPageCursor" in resultRecord)) {
+    nextResult.nextPageCursor = "";
   }
 
   const list = resultRecord.list;

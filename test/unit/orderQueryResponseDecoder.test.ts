@@ -320,7 +320,7 @@ test("an empty list decodes as ok with zero items", () => {
     response: { retCode: 0, result: { category: "linear", list: [] } },
     expected: childListExpected,
   });
-  assert.deepEqual(decoded, { kind: "ok", items: [], nextPageCursor: "" });
+  assert.deepEqual(decoded, { kind: "ok", items: [], nextPageCursor: undefined });
 });
 
 test("several well-formed rows all decode", () => {

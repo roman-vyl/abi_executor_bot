@@ -171,7 +171,7 @@ async function classifySingleFilledLeg(
     return { kind: "unknown", anyLegFilled: true };
   }
   if (compareDecimal(executed, ownExposure) !== 0) {
-    return { kind: "partial_or_contradictory", anyLegFilled: true };
+    return { kind: "unknown", anyLegFilled: true };
   }
   return {
     kind: "completed",

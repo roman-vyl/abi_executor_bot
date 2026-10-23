@@ -526,6 +526,23 @@ test("single filled own leg with executions that do not sum to the exposure is n
   });
 });
 
+test("a history page without the cursor field is query_failed, never the last page", async () => {
+  await withServices(async ({ lookup, bybit, repo }) => {
+    await repo.save(makeRecord({ first_fill_at_ms: Date.now() - 3 * HOUR_MS }));
+    setOrder(bybit, ENTRY_LINK, "Filled", QTY);
+    bybit.activeOrdersResponse = childList([]);
+    bybit.executionListResponse = executions([QTY]);
+    bybit.openPositionsResponse = flatPosition();
+    bybit.getOrderHistoryForSymbol = async (payload) => {
+      bybit.getOrderHistoryForSymbolCalls.push(payload);
+      return { retCode: 0, result: { category: "linear", list: [filledStop()] } };
+    };
+
+    assert.equal((await lookup.resolve(query())).statusCode, 500);
+    assertNotPersisted(repo, "missing cursor");
+  });
+});
+
 function foreignRows(count: number, tag: string): Record<string, unknown>[] {
   return Array.from({ length: count }, (_, index) =>
     stopRow({ orderId: `${tag}-${index}`, parentOrderLinkId: "other-entry", orderStatus: "Cancelled", leavesQty: "0" }),
