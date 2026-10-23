@@ -100,6 +100,11 @@ export type BybitGetOrderHistoryForSymbolPayload = {
   category: string;
   symbol: string;
   limit: string;
+  // abi-protection-history-bounded-lookup-v1: a window of at most 7 days and
+  // the cursor Bybit returned for the previous page of the same window.
+  startTime?: number;
+  endTime?: number;
+  cursor?: string;
 };
 
 // Exactly one of orderLinkId / orderId, never both: Bybit's own documented

@@ -50,7 +50,27 @@ export type AttachedProtectionResolution =
       // closure proof must never lose because the pair could not be
       // classified (abi-trade-cycle-closure-confirmation-v1).
       ownFillObserved?: true;
+      // abi-protection-history-bounded-lookup-v1: present only on
+      // partial_pair, when exactly one own leg was found by a scan that read
+      // the cycle's whole lifetime (and every page of the active orders).
+      // The other leg can then only be one that already left the history.
+      singleLeg?: AttachedProtectionLeg;
+      historyComplete?: true;
     };
+
+// The cycle's lifetime window for a bounded historical read. `cycleStartMs`
+// is the first-fill time (the record's creation time when no fill time is
+// stored); `nowMs` is injectable for tests.
+export type HistoryScan = { cycleStartMs: number; nowMs?: number };
+
+// Bybit: endTime - startTime <= 7 days. One second less keeps the bound
+// strict whatever rounding Bybit applies.
+export const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 - 1000;
+export const HISTORY_START_MARGIN_MS = 60 * 1000;
+// These caps limit exchange requests only; they promise no depth of history.
+export const HISTORY_MAX_PAGES = 200;
+export const HISTORY_MAX_WINDOWS = 8;
+const HISTORY_PAGE_LIMIT = "50";
 
 // Pure, query-driven, fail-closed classification of one trade cycle's own
 // Bybit-native attached protection children (materialized under
@@ -72,7 +92,14 @@ export async function resolveOwnAttachedProtection(input: {
   symbol: string;
   entryOrderLinkId: string;
   binding?: PositionBindingGeometry;
+  // Absent: the two single-page queries every caller made before. Present:
+  // the history is read over the cycle's lifetime (open-position lookup and
+  // Close only).
+  historyScan?: HistoryScan;
 }): Promise<AttachedProtectionResolution> {
+  if (input.historyScan !== undefined) {
+    return resolveWithHistoryScan({ ...input, historyScan: input.historyScan });
+  }
   let realtimeResponse: unknown;
   let historyResponse: unknown;
   try {
@@ -103,16 +130,40 @@ export async function resolveOwnAttachedProtection(input: {
     return { kind: "ambiguous", reason: "query_failed" };
   }
 
-  const ownRealtimeCandidates = decodedRealtime.items.filter(
+  return finishResolution({
+    category: input.category,
+    entryOrderLinkId: input.entryOrderLinkId,
+    binding: input.binding,
+    realtimeItems: decodedRealtime.items,
+    historyItems: decodedHistory.items,
+  });
+}
+
+// Attribution and classification over everything read, shared by the
+// single-page and the scanned read.
+function finishResolution(input: {
+  category: "linear" | "spot";
+  entryOrderLinkId: string;
+  binding?: PositionBindingGeometry;
+  realtimeItems: BybitChildOrderCandidate[];
+  historyItems: BybitChildOrderCandidate[];
+  complete?: boolean;
+}): AttachedProtectionResolution {
+  const ownRealtimeCandidates = input.realtimeItems.filter(
     (candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId,
   );
-  const ownHistoryCandidates = decodedHistory.items.filter(
+  const ownHistoryCandidates = input.historyItems.filter(
     (candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId,
   );
 
   const ownFillObserved = [...ownRealtimeCandidates, ...ownHistoryCandidates].some(candidateShowsFill);
-  const ambiguous = (reason: AttachedProtectionAmbiguousReason): AttachedProtectionResolution =>
-    ownFillObserved ? { kind: "ambiguous", reason, ownFillObserved: true } : { kind: "ambiguous", reason };
+  const ambiguous = (
+    reason: AttachedProtectionAmbiguousReason,
+    extra: { singleLeg?: AttachedProtectionLeg; historyComplete?: true } = {},
+  ): AttachedProtectionResolution =>
+    ownFillObserved
+      ? { kind: "ambiguous", reason, ownFillObserved: true, ...extra }
+      : { kind: "ambiguous", reason, ...extra };
 
   if (input.binding !== undefined) {
     const expectedPositionIdx = encodeBybitPositionIdx(input.binding);
@@ -134,7 +185,127 @@ export async function resolveOwnAttachedProtection(input: {
   }
 
   const classified = classify(deduped.items);
-  return classified.kind === "ambiguous" ? ambiguous(classified.reason) : classified;
+  if (classified.kind !== "ambiguous") {
+    return classified;
+  }
+  if (classified.reason === "partial_pair" && input.complete === true && deduped.items.length === 1) {
+    return ambiguous("partial_pair", { singleLeg: toLegFromRole(deduped.items[0]), historyComplete: true });
+  }
+  return ambiguous(classified.reason);
+}
+
+// Reads the active orders once and the history over the cycle's lifetime:
+// windows of at most 7 days, newest first, the cursor followed inside each.
+// Two stop rules (design D2): a pair of own legs may end the read early; one
+// leg or none never does, so a single-leg result is only ever produced after
+// the whole lifetime was read. Any cap, failed page, malformed page or stuck
+// cursor is query_failed, never "none".
+async function resolveWithHistoryScan(input: {
+  bybit: BybitAdapter;
+  category: "linear" | "spot";
+  symbol: string;
+  entryOrderLinkId: string;
+  binding?: PositionBindingGeometry;
+  historyScan: HistoryScan;
+}): Promise<AttachedProtectionResolution> {
+  const expected = { category: input.category, symbol: input.symbol, binding: input.binding };
+  const failed: AttachedProtectionResolution = { kind: "ambiguous", reason: "query_failed" };
+
+  let decodedRealtime: ReturnType<typeof decodeChildOrderListResponse>;
+  try {
+    decodedRealtime = decodeChildOrderListResponse({
+      response: await input.bybit.getActiveOrders({ symbol: input.symbol }),
+      expected,
+    });
+  } catch {
+    return failed;
+  }
+  if (decodedRealtime.kind === "protocol_failure") {
+    return failed;
+  }
+  // A further page of active orders could hide a live own leg; a response
+  // without the cursor field cannot show that there is none.
+  const realtimeComplete = decodedRealtime.nextPageCursor === "";
+
+  const nowMs = input.historyScan.nowMs ?? Date.now();
+  const scanStartMs = Math.min(input.historyScan.cycleStartMs - HISTORY_START_MARGIN_MS, nowMs - 1);
+  const historyItems: BybitChildOrderCandidate[] = [];
+  const attributed = () => {
+    const own = historyItems.filter((candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId);
+    const ownRealtime = decodedRealtime.items.filter(
+      (candidate) => candidate.parentOrderLinkId === input.entryOrderLinkId,
+    );
+    const deduped = dedupeByOrderId(ownRealtime, own);
+    return deduped.kind === "ok" && classify(deduped.items).kind === "attributed";
+  };
+
+  let pages = 0;
+  let windows = 0;
+  let windowEnd = nowMs;
+  let readToCycleStart = false;
+  while (!readToCycleStart) {
+    if (windows >= HISTORY_MAX_WINDOWS) {
+      return failed;
+    }
+    windows += 1;
+    const windowStart = Math.max(scanStartMs, windowEnd - HISTORY_WINDOW_MS);
+    let cursor: string | undefined;
+    do {
+      if (pages >= HISTORY_MAX_PAGES) {
+        return failed;
+      }
+      pages += 1;
+      let decoded: ReturnType<typeof decodeChildOrderListResponse>;
+      try {
+        decoded = decodeChildOrderListResponse({
+          response: await input.bybit.getOrderHistoryForSymbol({
+            category: input.category,
+            symbol: input.symbol,
+            limit: HISTORY_PAGE_LIMIT,
+            startTime: windowStart,
+            endTime: windowEnd,
+            ...(cursor !== undefined ? { cursor } : {}),
+          }),
+          expected,
+        });
+      } catch {
+        return failed;
+      }
+      if (decoded.kind === "protocol_failure" || decoded.nextPageCursor === undefined) {
+        return failed;
+      }
+      historyItems.push(...decoded.items);
+      if (attributed()) {
+        return finishResolution({
+          category: input.category,
+          entryOrderLinkId: input.entryOrderLinkId,
+          binding: input.binding,
+          realtimeItems: decodedRealtime.items,
+          historyItems,
+        });
+      }
+      if (decoded.nextPageCursor !== "" && decoded.nextPageCursor === cursor) {
+        return failed;
+      }
+      cursor = decoded.nextPageCursor === "" ? undefined : decoded.nextPageCursor;
+    } while (cursor !== undefined);
+
+    readToCycleStart = windowStart <= scanStartMs;
+    windowEnd = windowStart;
+  }
+
+  return finishResolution({
+    category: input.category,
+    entryOrderLinkId: input.entryOrderLinkId,
+    binding: input.binding,
+    realtimeItems: decodedRealtime.items,
+    historyItems,
+    complete: realtimeComplete,
+  });
+}
+
+function toLegFromRole(candidate: BybitChildOrderCandidate): AttachedProtectionLeg {
+  return toLeg(candidate, candidate.stopOrderType === STOP_LEG_STOP_ORDER_TYPE ? "stop" : "take");
 }
 
 const FILL_STATUSES = new Set(["Filled", "PartiallyFilled"]);

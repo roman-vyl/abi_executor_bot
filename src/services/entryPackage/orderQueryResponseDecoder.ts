@@ -207,7 +207,13 @@ export type ChildOrderListProtocolFailureReason =
   | "invalid_position_idx";
 
 export type DecodedChildOrderList =
-  | { kind: "ok"; items: BybitChildOrderCandidate[] }
+  | {
+      kind: "ok";
+      items: BybitChildOrderCandidate[];
+      // "" is the last page. undefined: the response carries no cursor field,
+      // so completeness cannot be told; a scanned read treats it as failed.
+      nextPageCursor: string | undefined;
+    }
   | { kind: "protocol_failure"; reason: ChildOrderListProtocolFailureReason };
 
 export type ExpectedChildOrderListScope = {
@@ -349,7 +355,12 @@ export function decodeChildOrderListResponse(input: {
     items.push(item);
   }
 
-  return { kind: "ok", items };
+  const nextPageCursor = resultRecord.nextPageCursor;
+  if (nextPageCursor !== undefined && typeof nextPageCursor !== "string") {
+    return { kind: "protocol_failure", reason: "malformed_envelope" };
+  }
+
+  return { kind: "ok", items, nextPageCursor };
 }
 
 // A field the exchange omits entirely (not an own key on the row) is a

@@ -13,7 +13,11 @@ import {
   TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
 import { decodeExecutionListResponsePage } from "../entryPackage/executionListResponseDecoder.js";
-import type { AttachedProtectionLeg, AttachedProtectionResolution } from "../protection/nativeProtectionAttribution.js";
+import type {
+  AttachedProtectionLeg,
+  AttachedProtectionResolution,
+  HistoryScan,
+} from "../protection/nativeProtectionAttribution.js";
 
 // abi-trade-cycle-closure-confirmation-v1. Completion of a cycle is proven
 // only by full execution of an order ABI attributes to that exact pair:
@@ -49,6 +53,17 @@ const RETRY_DELAY_MS = 300;
 const EXECUTION_LIST_LIMIT = "50";
 const EXECUTION_LIST_PAGE_CAP = 10;
 
+// The lifetime window of the cycle's own orders for the bounded history read:
+// first fill when stored, else the record's creation. Undefined only for an
+// unreadable creation time, which the caller reads as the single-page query.
+export function historyScanFor(record: EntryPackageExecutionRecord): HistoryScan | undefined {
+  if (record.first_fill_at_ms !== null && record.first_fill_at_ms !== undefined) {
+    return { cycleStartMs: record.first_fill_at_ms };
+  }
+  const created = Date.parse(record.created_at);
+  return Number.isNaN(created) ? undefined : { cycleStartMs: created };
+}
+
 export async function classifyOwnProtection(input: {
   bybit: BybitAdapter;
   category: "linear";
@@ -66,6 +81,15 @@ export async function classifyOwnProtection(input: {
       : { kind: "unknown", anyLegFilled: false };
   }
   if (resolution.kind === "ambiguous") {
+    // abi-protection-history-bounded-lookup-v1 D3: one filled own leg proves
+    // completion when the whole cycle lifetime was read and no other own
+    // order is live. The cancelled opposite leg stays in Bybit history only
+    // for a limited time, so it may be gone. The aggregate position is not a
+    // condition: a sibling's position in the same scope must not hide this
+    // cycle's own exit.
+    if (resolution.reason === "partial_pair" && resolution.historyComplete === true && resolution.singleLeg !== undefined) {
+      return classifySingleFilledLeg(input.bybit, input.category, input.symbol, resolution.singleLeg, ownExposure);
+    }
     return { kind: "unknown", anyLegFilled: resolution.ownFillObserved === true };
   }
 
@@ -121,6 +145,39 @@ export async function classifyOwnProtection(input: {
     anyLegFilled: true,
     reason: filled.role === "stop" ? "stop_loss" : "take_profit",
     orderId: filled.orderId,
+  };
+}
+
+async function classifySingleFilledLeg(
+  bybit: BybitAdapter,
+  category: "linear",
+  symbol: string,
+  leg: AttachedProtectionLeg,
+  ownExposure: string,
+): Promise<ProtectionClass> {
+  const anyLegFilled = legShowsFill(leg);
+  if (
+    !anyLegFilled ||
+    !isExactDecimal(leg.cumExecQty) ||
+    compareDecimal(ownExposure, "0") <= 0 ||
+    !FILLED_STATUSES.has(leg.orderStatus) ||
+    !isZeroDecimal(leg.leavesQty) ||
+    compareDecimal(leg.cumExecQty, ownExposure) !== 0
+  ) {
+    return { kind: "unknown", anyLegFilled };
+  }
+  const executed = await sumOwnLegExecutions(bybit, category, symbol, leg);
+  if (executed === undefined) {
+    return { kind: "unknown", anyLegFilled: true };
+  }
+  if (compareDecimal(executed, ownExposure) !== 0) {
+    return { kind: "unknown", anyLegFilled: true };
+  }
+  return {
+    kind: "completed",
+    anyLegFilled: true,
+    reason: leg.role === "stop" ? "stop_loss" : "take_profit",
+    orderId: leg.orderId,
   };
 }
 

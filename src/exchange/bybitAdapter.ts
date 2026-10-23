@@ -235,14 +235,21 @@ export class RestBybitAdapter implements BybitAdapter {
   // subject to a confirmed propagation lag: an empty/incomplete result
   // shortly after a transition is not proof a terminal order does not exist.
   async getOrderHistoryForSymbol(payload: BybitGetOrderHistoryForSymbolPayload): Promise<unknown> {
-    return this.signedGet(
-      "/v5/order/history",
-      new URLSearchParams({
-        category: payload.category,
-        symbol: payload.symbol,
-        limit: payload.limit,
-      }),
-    );
+    const params = new URLSearchParams({
+      category: payload.category,
+      symbol: payload.symbol,
+      limit: payload.limit,
+    });
+    if (payload.startTime !== undefined) {
+      params.set("startTime", String(payload.startTime));
+    }
+    if (payload.endTime !== undefined) {
+      params.set("endTime", String(payload.endTime));
+    }
+    if (payload.cursor !== undefined) {
+      params.set("cursor", payload.cursor);
+    }
+    return this.signedGet("/v5/order/history", params);
   }
 
   // "Get Trade History" — the only Bybit primitive that records each
