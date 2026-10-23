@@ -12,8 +12,8 @@ The correlation record already holds `first_fill_at_ms` (nullable) and `created_
 
 - Windows of exactly 7 days or less, `endTime - startTime <= 7 days`, newest window first, so the common case (recent exit) is found on the first page.
 - Inside a window, follow `nextPageCursor` until it is empty. Page size 50.
-- Early stop: both own legs attributed after a page. Own children are matched exactly as today, by `parentOrderLinkId` equal to the entry `orderLinkId`, then by binding.
-- Caps: 200 pages and 8 windows per resolution (about 10 000 orders, roughly 8 days at the observed 50 orders an hour on BTCUSDT). A 33-hour-old cycle needs about 33 pages, so the cap must be far above that: a low cap would leave exactly the observed case unfixed. Cap reached, page failed, page undecodable, or cursor not advancing: result is `ambiguous` with reason `query_failed`. Never `none`.
+- Two stop rules, kept apart. (1) Both own legs found: the scan may end after the current page, and the existing classification and completion proof run on those two legs; the result is whatever that logic proves (completed, active, neutralized, partial or contradictory, unknown). (2) Only one own leg found, or none: the scan never ends early. It runs to the end of the cycle lifetime (start to now) and the single-leg rule of D3 may apply only after that full pass, never after a partial one. Own children are matched exactly as today, by `parentOrderLinkId` equal to the entry `orderLinkId`, then by binding.
+- Caps: 200 pages and 8 windows per resolution. The caps bound the number of requests to the exchange; they do not promise any depth of history, because the number of orders per hour is not fixed. At the observed 50 orders an hour on BTCUSDT a 33-hour-old cycle needs about 33 pages, so 200 leaves room for it, but a busier period can exhaust the cap sooner. Returning `query_failed` is the safe outcome, an unbounded read is not. Cap reached, page failed, page undecodable, or cursor not advancing: result is `ambiguous` with reason `query_failed`. Never `none`.
 - Scope of the long read: only the open-position lookup and Close continue through history. Reconciliation and replacement keep the two queries they make today.
 - Cost control, optional: `orderStatus=Filled` and, if Bybit applies it to partial-mode children, `orderFilter=tpslOrder` could shrink the scan. This is unverified (task 1.1); correctness does not depend on it, the cap above does. Without a filter a 2-day-old BTCUSDT cycle reads about 2400 orders (48 pages) per bar.
 
@@ -31,5 +31,5 @@ No storing of children `orderId`s, no schema change, no new log. Durable identit
 
 ## Risks
 
-- Request volume per lookup grows from 1 to up to 160 for old cycles; mitigated by newest-first early stop, D2 filters and caps. ABI already issues several Bybit calls per lookup.
+- Request volume per lookup grows from 1 to at most 200 page requests per resolution (never more, by the cap); mitigated by newest-first order, the early stop when both legs are found, optional filters and the cap. ABI already issues several Bybit calls per lookup.
 - Bybit history lag: unchanged rule, an empty result is never proof of absence.

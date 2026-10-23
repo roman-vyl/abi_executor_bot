@@ -9,7 +9,7 @@ Bybit contract, checked on the official page and on the demo account (read only)
 ## What Changes
 
 - Own protection resolution reads the order history of the cycle's own lifetime instead of one page: from the cycle's first-fill time (entry creation time when no fill time is stored) to now, in windows of at most 7 days, following `nextPageCursor` inside each window, newest window first.
-- The scan stops early once both own legs are attributed; it is bounded by a page cap and a window cap. Hitting a cap, a failed page or a malformed page makes the result `ambiguous` (`query_failed`), never "none".
+- The scan may stop early once both own legs are attributed, and only when the existing completion logic can prove the cycle on that pair. It is bounded by a page cap and a window cap that limit the number of exchange requests; they do not guarantee any depth of history. Hitting a cap, a failed page or a malformed page makes the result `ambiguous` (`query_failed`), never "none".
 - A cycle is never completed from a partially read history: completion needs a scan that covered every window from the cycle start to now without a failed page.
 - The opposite leg that Bybit cancels after the other one fills stays in history only for a limited time. A filled own leg whose full execution matches the cycle exposure SHALL prove completion when the scan covered the whole cycle lifetime and the other leg is not live (see design D3). Today the same evidence gives `partial_pair` and the cycle never closes.
 - No change to the correlation schema, no durable order ids, no new journal, no change to ownership or to the `closure` response contract.

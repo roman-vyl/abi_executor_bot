@@ -15,7 +15,13 @@ ABI SHALL resolve a cycle's own attached protection from the Bybit order history
 
 #### Scenario: Both own legs found early
 - **WHEN** both own legs are attributed after a page
-- **THEN** ABI stops reading further pages and windows
+- **THEN** ABI may stop reading further pages and windows
+- **AND** the existing classification and completion proof run on those two legs
+
+#### Scenario: One leg found never ends the read early
+- **WHEN** only one own leg, or none, has been attributed
+- **THEN** ABI continues to the end of the cycle's lifetime window
+- **AND** a result that relies on the history being complete is produced only after that full pass
 
 ### Requirement: An incomplete history read is never reported as an absent or partial result
 ABI SHALL report `ambiguous` with reason `query_failed` when the history read hits its page or window cap, a page fails or cannot be decoded, or the cursor does not advance. ABI SHALL NOT report `none` or a pair shape computed from a partially read history.
@@ -24,3 +30,11 @@ ABI SHALL report `ambiguous` with reason `query_failed` when the history read hi
 - **WHEN** the history read reaches its page cap before the cursor is empty
 - **THEN** the resolution is `ambiguous` with reason `query_failed`
 - **AND** no completion is proven and nothing is written
+
+### Requirement: Read caps bound requests and promise no history depth
+ABI SHALL bound one resolution's history read by a page cap and a window cap. The caps SHALL limit the number of exchange requests only and SHALL NOT be described or relied on as a guarantee that any period of history is covered. Reaching a cap SHALL yield `ambiguous` with reason `query_failed`.
+
+#### Scenario: Busier period exhausts the cap before the cycle start
+- **WHEN** the cap is reached before the window reaches the cycle start
+- **THEN** the resolution is `ambiguous` with reason `query_failed`
+- **AND** no single-leg completion is proven
