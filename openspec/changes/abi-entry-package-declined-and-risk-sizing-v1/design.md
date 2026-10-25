@@ -26,6 +26,16 @@
 
 The docs say `maxMktOrderQty` applies to Market orders. ABI's entry is a Market order with a trigger; the docs do not say explicitly that the same limit applies to the conditional form. Task 1.1 reads `instruments-info` for BTCUSDT, ETHUSDT, SOLUSDT on demo (read only) and records both limits. The check stays on `maxMktOrderQty`; if 1.1 shows `maxOrderQty < maxMktOrderQty` for a traded symbol, the owner decides whether to use the smaller one.
 
+Result of task 1.1 (Bybit demo, read only, 2026-10-25 11:20 UTC; GET instruments-info x3 and GET account/info, no orders):
+
+| symbol | minOrderQty | qtyStep | minNotionalValue | maxOrderQty | maxMktOrderQty |
+|---|---|---|---|---|---|
+| BTCUSDT | 0.001 | 0.001 | 5 | 1500.000 | 150.000 |
+| ETHUSDT | 0.01 | 0.01 | 5 | 10000.00 | 2000.00 |
+| SOLUSDT | 0.1 | 0.1 | 5 | 96000.0 | 12000.0 |
+
+Account `marginMode` = `REGULAR_MARGIN` (allowed). For every traded symbol `maxMktOrderQty` is the smaller limit, so checking against it is the stricter choice; the algorithm stays unchanged.
+
 ## Risks
 
 - `totalWalletBalance` counts every coin; if the demo account holds BTC or ETH, the bankroll moves with their price. Documented in the RUNBOOK.

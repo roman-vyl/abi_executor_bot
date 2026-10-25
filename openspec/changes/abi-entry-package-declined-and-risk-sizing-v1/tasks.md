@@ -1,6 +1,6 @@
 ## 1. abi_executor_bot
 
-- [ ] 1.1 Demo read only: `instruments-info` for BTCUSDT, ETHUSDT, SOLUSDT (`maxOrderQty`, `maxMktOrderQty`) and `account/info` (`marginMode` of our demo account). Record the values in design.md. If the result is ambiguous, do not change the algorithm: report the data to the owner.
+- [x] 1.1 Demo read only: `instruments-info` for BTCUSDT, ETHUSDT, SOLUSDT (`maxOrderQty`, `maxMktOrderQty`) and `account/info` (`marginMode` of our demo account). Record the values in design.md. If the result is ambiguous, do not change the algorithm: report the data to the owner.
 - [x] 1.2 Config `ABI_POSITION_SIZING_MODE` (default `minimum`, invalid value fails), `risk` requires keys; mode in `service_starting`; `.env.example`.
 - [x] 1.3 `exactDecimal.ts`: `floorRatioToStep`; rules decoder reads `maxMktOrderQty` (fail closed if missing or invalid in `risk` mode only).
 - [x] 1.4 Adapter `getAccountInfo` + decoder of `marginMode`; decoder of `totalWalletBalance` for sizing.
