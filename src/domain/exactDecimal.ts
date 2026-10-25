@@ -93,6 +93,24 @@ export function ceilRatioToStep(numeratorText: string, denominatorText: string, 
   return formatScaled(steps * step.unscaled, step.scale);
 }
 
+// floor((numerator / denominator) / step) * step for a non-negative ratio,
+// computed exactly with integer arithmetic — the rounding-down twin of
+// ceilRatioToStep.
+export function floorRatioToStep(numeratorText: string, denominatorText: string, stepText: string): string {
+  const numerator = parseDecimal(numeratorText);
+  const denominator = parseDecimal(denominatorText);
+  const step = parseDecimal(stepText);
+
+  const scaledNumerator = numerator.unscaled * pow10(denominator.scale + step.scale);
+  const scaledDenominator = denominator.unscaled * pow10(numerator.scale) * step.unscaled;
+  if (scaledNumerator < 0n || scaledDenominator <= 0n) {
+    throw new Error("floorRatioToStep requires a non-negative numerator and positive denominator and step");
+  }
+
+  const steps = floorDiv(scaledNumerator, scaledDenominator);
+  return formatScaled(steps * step.unscaled, step.scale);
+}
+
 // ceil(value / step) * step
 export function ceilToStep(valueText: string, stepText: string): string {
   return ceilRatioToStep(valueText, "1", stepText);

@@ -106,3 +106,13 @@ test("multiplyDecimal accepts the exponent transport grammar (e.g. 1e3), matchin
   assert.equal(multiplyDecimal("1e3", "1.5"), "1500");
   assert.equal(compareDecimal(multiplyDecimal("1e3", "1.5"), "1500"), 0);
 });
+
+test("floorRatioToStep rounds a ratio down to the step exactly", async () => {
+  const { floorRatioToStep } = await import("../../src/domain/exactDecimal.js");
+  assert.equal(floorRatioToStep("100", "3", "0.001"), "33.333");
+  assert.equal(floorRatioToStep("10000", "100", "0.001"), "100");
+  assert.equal(floorRatioToStep("1", "3000", "0.001"), "0");
+  assert.equal(floorRatioToStep("50", "0.5", "1"), "100");
+  assert.throws(() => floorRatioToStep("1", "0", "0.001"));
+  assert.throws(() => floorRatioToStep("-1", "1", "0.001"));
+});

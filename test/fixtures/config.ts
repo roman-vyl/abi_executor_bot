@@ -19,6 +19,7 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     bybitSettleCoin: "USDT",
     bybitTriggerBy: "LastPrice",
     bybitLinearPositionBindingMode: "one_way",
+    positionSizingMode: "minimum",
     ...overrides,
   };
 }

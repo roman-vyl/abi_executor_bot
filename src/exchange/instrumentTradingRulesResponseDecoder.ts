@@ -5,6 +5,11 @@ export type InstrumentTradingRules = {
   qtyStep: string;
   minNotionalValue: string;
   tickSize: string;
+  // Maximum quantity of a Market order (ABI's entry is a conditional Market
+  // order). Null when Bybit omits it or sends an unusable value: only risk
+  // sizing needs it, and it fails closed there, so minimum sizing keeps
+  // working on a response without it.
+  maxMktOrderQty: string | null;
 };
 
 export type InstrumentTradingRulesFailureReason =
@@ -115,7 +120,12 @@ export function decodeInstrumentTradingRulesResponse(input: {
     return { ok: false, reason: "invalid_tick_size" };
   }
 
-  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue, tickSize } };
+  const maxMktOrderQty =
+    typeof filter.maxMktOrderQty === "string" && isStrictlyPositive(filter.maxMktOrderQty)
+      ? filter.maxMktOrderQty
+      : null;
+
+  return { ok: true, rules: { minOrderQty, qtyStep, minNotionalValue, tickSize, maxMktOrderQty } };
 }
 
 function isStrictlyPositive(text: string): boolean {

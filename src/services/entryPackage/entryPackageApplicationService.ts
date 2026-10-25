@@ -19,6 +19,7 @@ import {
   diagnosedInternalErrorResult,
   internalErrorResult,
   serializeAbsentEntryPackage,
+  serializeDeclinedEntryPackage,
   serializeAppliedEntryPackage,
 } from "../../domain/entryPackageApi.js";
 import { emitEvent } from "../../observability/events.js";
@@ -34,7 +35,7 @@ import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.
 import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
-import type { PositionSizeCalculator } from "../../risk/positionSizeCalculator.js";
+import type { PositionSizeCalculator, PositionSizeDeclineReason } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
 import type { BybitOrderView } from "./orderQueryResponseDecoder.js";
 import {
@@ -80,7 +81,13 @@ export type EntryPackageApplicationServiceDeps = {
 
 // Set by createOrder() immediately before the provisional pending_create write
 // is awaited; from that point on a failure is never closed as absent.
-type CreateOrderProgress = { exchangeBoundaryReached: boolean };
+// `declined` is set when the size calculator refused the entry; createOrder
+// itself answers that like any quantity-calculation failure, and only
+// admitNewPair (initial admission) turns it into the declined answer.
+type CreateOrderProgress = {
+  exchangeBoundaryReached: boolean;
+  declined?: { reason: PositionSizeDeclineReason; message: string };
+};
 
 // Orchestrates APPLY / REPLACE / CANCEL / confirm-absent for a validated
 // entry-package command. Owns nothing else: the HTTP route only calls this
@@ -344,10 +351,43 @@ export class EntryPackageApplicationService {
       throw error;
     }
 
+    if (progress.declined !== undefined && !progress.exchangeBoundaryReached) {
+      return this.closeDeclinedAdmission(command, progress.declined);
+    }
     if (result.statusCode === 500 && !progress.exchangeBoundaryReached) {
       await this.closeRejectedAdmission(command, result.diagnostic?.failure_stage ?? "unexpected");
     }
     return result;
+  }
+
+  // The declined answer promises the pair is durably closed, so it is sent
+  // only after the conditional absent write; if that write cannot be made,
+  // the answer stays the quantity-calculation internal_error.
+  private async closeDeclinedAdmission(
+    command: EntryPackageCommand,
+    declined: { reason: PositionSizeDeclineReason; message: string },
+  ): Promise<EntryPackageHttpResult> {
+    const current = this.deps.correlationRepository.get(command.strategyInstanceId, command.tradeCycleId);
+    if (current === undefined || current.status !== "admission_pending") {
+      return diagnosedInternalErrorResult("quantity_calculation", `declined_${declined.reason}`);
+    }
+    try {
+      await this.persistTransitionToAbsent(current);
+    } catch (error) {
+      return diagnosedInternalErrorResult("quantity_calculation", describeErrorCause(error));
+    }
+    emitEvent("warn", "entry_package_declined", {
+      strategy_instance_id: command.strategyInstanceId,
+      trade_cycle_id: command.tradeCycleId,
+      decline_reason: declined.reason,
+      decline_message: declined.message,
+    });
+    return serializeDeclinedEntryPackage({
+      strategyInstanceId: command.strategyInstanceId,
+      tradeCycleId: command.tradeCycleId,
+      reason: declined.reason,
+      message: declined.message,
+    });
   }
 
   private async persistAdmissionIntent(command: EntryPackageCommand, desiredEntry: DesiredEntryDto): Promise<void> {
@@ -423,13 +463,19 @@ export class EntryPackageApplicationService {
 
     let calculatedQuantity: string;
     try {
-      calculatedQuantity = await this.deps.positionSizeCalculator.calculate(
+      const sized = await this.deps.positionSizeCalculator.calculate(
         command.ticker,
         desiredEntry.planned_entry_price,
         desiredEntry.initial_stop_price,
         command.riskMultiplier,
         { resolvedSymbol: identity.symbol, resolvedCategory: identity.category },
+        desiredEntry.side,
       );
+      if (sized.kind === "declined") {
+        progress.declined = { reason: sized.reason, message: sized.message };
+        return diagnosedInternalErrorResult("quantity_calculation", `declined_${sized.reason}`);
+      }
+      calculatedQuantity = sized.quantity;
     } catch (error) {
       return diagnosedInternalErrorResult("quantity_calculation", describeErrorCause(error));
     }

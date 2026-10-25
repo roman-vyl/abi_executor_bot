@@ -16,10 +16,21 @@ export type AbiConfig = {
   bybitSettleCoin: string;
   bybitTriggerBy: string;
   bybitLinearPositionBindingMode: "one_way" | "hedge";
+  positionSizingMode: PositionSizingMode;
 };
+
+export type PositionSizingMode = "minimum" | "risk";
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
   const bybitEnvironment = readBybitEnvironment(env);
+  const bybitApiKey = env.BYBIT_API_KEY?.trim() ?? "";
+  const bybitApiSecret = env.BYBIT_API_SECRET?.trim() ?? "";
+  const positionSizingMode = readPositionSizingMode(env.ABI_POSITION_SIZING_MODE);
+  // Risk sizing reads the wallet balance on every entry, so it cannot run
+  // without credentials — also in dry-run, where those reads still happen.
+  if (positionSizingMode === "risk" && (bybitApiKey === "" || bybitApiSecret === "")) {
+    throw new Error("ABI_POSITION_SIZING_MODE=risk requires BYBIT_API_KEY and BYBIT_API_SECRET");
+  }
 
   return {
     host: readString("ABI_HOST", env.ABI_HOST, "127.0.0.1"),
@@ -39,15 +50,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     bybitRequestTimeoutMs: readPositiveInt("ABI_BYBIT_REQUEST_TIMEOUT_MS", env.ABI_BYBIT_REQUEST_TIMEOUT_MS, 10_000),
     bybitEnvironment,
     bybitTestnet: bybitEnvironment === "testnet",
-    bybitApiKey: env.BYBIT_API_KEY?.trim() ?? "",
-    bybitApiSecret: env.BYBIT_API_SECRET?.trim() ?? "",
+    bybitApiKey,
+    bybitApiSecret,
     bybitAccountType: readString("BYBIT_ACCOUNT_TYPE", env.BYBIT_ACCOUNT_TYPE, "UNIFIED", (value) => value.toUpperCase()),
     bybitRecvWindow: readPositiveNumberString("BYBIT_RECV_WINDOW", env.BYBIT_RECV_WINDOW, "5000"),
     bybitCategory: readString("BYBIT_CATEGORY", env.BYBIT_CATEGORY, "linear", (value) => value.toLowerCase()),
     bybitSettleCoin: readString("BYBIT_SETTLE_COIN", env.BYBIT_SETTLE_COIN, "USDT", (value) => value.toUpperCase()),
     bybitTriggerBy: readString("BYBIT_TRIGGER_BY", env.BYBIT_TRIGGER_BY, "LastPrice"),
     bybitLinearPositionBindingMode: readLinearPositionBindingMode(env.ABI_BYBIT_LINEAR_POSITION_BINDING_MODE),
+    positionSizingMode,
   };
+}
+
+function readPositionSizingMode(value: string | undefined): PositionSizingMode {
+  if (value === undefined) {
+    return "minimum";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "minimum" || normalized === "risk") {
+    return normalized;
+  }
+
+  throw new Error("ABI_POSITION_SIZING_MODE must be one of: minimum, risk");
 }
 
 function readLinearPositionBindingMode(value: string | undefined): "one_way" | "hedge" {

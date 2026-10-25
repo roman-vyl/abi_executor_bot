@@ -64,7 +64,7 @@
         },
         "responses": {
           "200": {
-            "description": "Complete package applied or desired package absence confirmed",
+            "description": "Complete package applied, desired package absence confirmed, or the first APPLY declined before any exchange write",
             "content": {
               "application/json": {
                 "schema": {
@@ -74,6 +74,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/EntryPackageAbsentResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/EntryPackageDeclinedResponse"
                     }
                   ]
                 },
@@ -105,6 +108,15 @@
                       "strategy_instance_id": "runtime-owned-instance-id",
                       "trade_cycle_id": "runtime-owned-cycle-id",
                       "status": "entry_package_absent"
+                    }
+                  },
+                  "declined": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "entry_package_declined",
+                      "decline_reason": "insufficient_balance_for_minimum_quantity",
+                      "decline_message": "quantity 0.0004 below minOrderQty 0.001 (wallet 100, risk 1%, distance 250)"
                     }
                   }
                 }
@@ -366,6 +378,44 @@
           },
           "status": {
             "const": "entry_package_absent"
+          }
+        }
+      },
+      "EntryPackageDeclinedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "status",
+          "decline_reason",
+          "decline_message"
+        ],
+        "description": "Expected refusal of a first APPLY. ABI sent nothing to the exchange and the pair is durably closed; its recovery state is terminal_without_fill. Never returned for desired_entry: null.",
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "const": "entry_package_declined"
+          },
+          "decline_reason": {
+            "enum": [
+              "insufficient_balance_for_minimum_quantity",
+              "quantity_above_exchange_maximum",
+              "invalid_stop_distance",
+              "margin_mode_not_supported"
+            ]
+          },
+          "decline_message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable reason with the values used. Not for parsing."
           }
         }
       },

@@ -17,6 +17,7 @@ export function serviceStartingFields(config: AbiConfig): Record<string, unknown
     bybitSettleCoin: config.bybitSettleCoin,
     bybitTriggerBy: config.bybitTriggerBy,
     bybitLinearPositionBindingMode: config.bybitLinearPositionBindingMode,
+    positionSizingMode: config.positionSizingMode,
     bybitApiKeyConfigured: config.bybitApiKey !== "",
   };
 }
