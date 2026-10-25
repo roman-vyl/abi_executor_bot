@@ -14,6 +14,9 @@ type EmitLike = (level: EventLevel, event: string, fields?: Record<string, unkno
 
 export function installShutdownHandlers(input: {
   server: Pick<Server, "close">;
+  // Releases resources after the HTTP server has closed (e.g. the exchange
+  // facts store); runs before exit on both outcomes.
+  onServerClosed?: () => void;
   processLike?: ProcessLike;
   emit?: EmitLike;
 }): void {
@@ -29,6 +32,16 @@ export function installShutdownHandlers(input: {
     shuttingDown = true;
     emit("info", "shutdown_started", { signal });
     input.server.close((error?: Error) => {
+      try {
+        input.onServerClosed?.();
+      } catch (closeError) {
+        emit("error", "shutdown_failed", {
+          signal,
+          reason: closeError instanceof Error ? closeError.message : String(closeError),
+        });
+        processLike.exit(1);
+      }
+
       if (error) {
         emit("error", "shutdown_failed", { signal, reason: error.message });
         processLike.exit(1);

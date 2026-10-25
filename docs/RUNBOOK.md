@@ -211,6 +211,30 @@ Abi's only durable state is the entry-package correlation store, controlled by
 local, non-Docker runs). In the Docker Compose setup, `${BBB_DATA_ROOT}/abi` on the host is
 mounted to `/app/var` in the container, so the store survives container rebuilds and restarts.
 
+## Exchange facts store
+
+`abi-exchange-facts-sqlite-foundation-v1` adds an ABI-internal SQLite store of Bybit exchange
+facts (order records, executions) and orderId → trade cycle links. In this version nothing
+writes facts yet; the store only opens, checks and closes.
+
+- Off by default. `ABI_EXCHANGE_FACTS_ENABLED=true` turns it on (only `true`/`false` are
+  accepted). With it off ABI opens nothing and behaves as before.
+- `ABI_EXCHANGE_FACTS_DB_PATH` defaults to `./var/abi_exchange_facts_<BYBIT_ENV>.sqlite3`. In
+  Docker Compose that is `${BBB_DATA_ROOT}/abi/abi_exchange_facts_demo.sqlite3` on the Mac demo.
+- One database per Bybit environment. The environment and category are written into the file
+  when it is created and checked at every start; a mismatch stops startup with
+  `exchange_facts_store_failed` / `exchange_facts_environment_mismatch`. Any other open or check
+  failure also stops startup (no silent run without the journal).
+- One database per Bybit account. ABI does not check the account. Before switching the API keys
+  to another account, stop ABI and move the old database file aside.
+- Exactly one ABI process per data directory. SQLite runs in `locking_mode=EXCLUSIVE` only to
+  keep the WAL index in process memory (no `-shm` file); it is **not** a guard: file locks do not
+  work on the Docker Desktop for macOS bind mount, so a second ABI on the same folder would
+  corrupt the file. Deployment (one `abi` service) is what guarantees it.
+- No other process may open the file while ABI runs: not the `sqlite3` CLI on the Mac, not
+  another container, not a backup tool. Copy the file (with its `-wal`) only with ABI stopped.
+  Other services will read facts through a future read-only ABI HTTP API.
+
 ## Read-only sandbox smoke
 
 Checks connectivity and credentials without placing orders:

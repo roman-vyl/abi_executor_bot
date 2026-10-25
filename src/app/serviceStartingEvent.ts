@@ -1,4 +1,5 @@
 import type { AbiConfig } from "../config/config.js";
+import { SCHEMA_VERSION } from "../exchangeFacts/schema.js";
 
 // The service_starting event's fields — deliberately excludes
 // bybitApiKey/bybitApiSecret; only a boolean "is a key configured" fact is
@@ -19,5 +20,8 @@ export function serviceStartingFields(config: AbiConfig): Record<string, unknown
     bybitLinearPositionBindingMode: config.bybitLinearPositionBindingMode,
     positionSizingMode: config.positionSizingMode,
     bybitApiKeyConfigured: config.bybitApiKey !== "",
+    exchangeFactsStore: config.exchangeFactsEnabled ? "enabled" : "disabled",
+    // The only version this build opens; any other fails startup.
+    ...(config.exchangeFactsEnabled ? { exchangeFactsSchemaVersion: SCHEMA_VERSION } : {}),
   };
 }

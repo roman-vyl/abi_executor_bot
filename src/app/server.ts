@@ -17,6 +17,7 @@ import { EntryPackageApplicationService } from "../services/entryPackage/entryPa
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
+import { openExchangeFactsStoreOrExit } from "./exchangeFactsStartup.js";
 import { writeJson } from "./http.js";
 import { replayCorrelationStore } from "./lifecycleEvents.js";
 import { installShutdownHandlers } from "./shutdown.js";
@@ -28,6 +29,9 @@ import { handlePositionManagementRoutes } from "../routes/positionManagementRout
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 export function startServer(config: AbiConfig): void {
+  // Opened before anything listens; nothing in order execution uses it yet.
+  const exchangeFactsStore = openExchangeFactsStoreOrExit(config);
+
   const bybit = new RestBybitAdapter(config);
 
   const correlationRepository = new EntryPackageCorrelationRepository(config.entryPackageCorrelationPath);
@@ -168,5 +172,5 @@ export function startServer(config: AbiConfig): void {
     emitEvent("info", "server_listening", { host: config.host, port: config.port });
   });
 
-  installShutdownHandlers({ server });
+  installShutdownHandlers({ server, onServerClosed: () => exchangeFactsStore?.close() });
 }
