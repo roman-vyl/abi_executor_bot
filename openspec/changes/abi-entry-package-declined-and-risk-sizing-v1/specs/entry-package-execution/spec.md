@@ -163,10 +163,6 @@ conditional transition and emitting the operational event
 - **WHEN** the transition to `absent` fails
 - **THEN** ABI responds `500 internal_error` and the record stays `admission_pending`
 
-#### Scenario: Decline on a retry of an existing record
-- **WHEN** the calculator declines inside a create for a pair whose record is not `admission_pending`
-- **THEN** ABI responds `500 internal_error` as for a quantity-calculation failure
-
 #### Scenario: Minimum mode never declines
 - **WHEN** the mode is `minimum`
 - **THEN** ABI never returns `entry_package_declined`

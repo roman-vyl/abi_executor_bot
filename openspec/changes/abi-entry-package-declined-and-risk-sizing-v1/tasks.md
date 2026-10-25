@@ -1,12 +1,12 @@
 ## 1. abi_executor_bot
 
-- [ ] 1.1 Demo read only: `instruments-info` for BTCUSDT, ETHUSDT, SOLUSDT (`maxOrderQty`, `maxMktOrderQty`) and `account/info` (`marginMode` of our demo account). Record in design.md.
+- [ ] 1.1 Demo read only: `instruments-info` for BTCUSDT, ETHUSDT, SOLUSDT (`maxOrderQty`, `maxMktOrderQty`) and `account/info` (`marginMode` of our demo account). Record the values in design.md. If the result is ambiguous, do not change the algorithm: report the data to the owner.
 - [ ] 1.2 Config `ABI_POSITION_SIZING_MODE` (default `minimum`, invalid value fails), `risk` requires keys; mode in `service_starting`; `.env.example`.
 - [ ] 1.3 `exactDecimal.ts`: `floorRatioToStep`; rules decoder reads `maxMktOrderQty` (fail closed if missing or invalid in `risk` mode only).
 - [ ] 1.4 Adapter `getAccountInfo` + decoder of `marginMode`; decoder of `totalWalletBalance` for sizing.
 - [ ] 1.5 Calculator result type; `RiskPercentPositionSizeCalculator` as D3; `FixedMinimumPositionSizeCalculator` returns a quantity unchanged; `server.ts` picks by mode.
 - [ ] 1.6 Service: declined branch in `createOrder`/`admitNewPair` as D4; serializer and OpenAPI for `entry_package_declined`.
-- [ ] 1.7 Tests: config (default, risk, invalid, risk without keys); calculator (each reason, rounding down, exact formula with 0.5/1/2, PM and cross allowed, isolated and unknown refused, balance ≤ 0, read failures thrown); service (declined on first APPLY → record `absent`, event, `200` body, recovery `terminal_without_fill`, no exchange write; absent write failure → `500`; decline on a retry path → `500`; minimum mode unchanged); OpenAPI contract test.
+- [ ] 1.7 Tests: config (default, risk, invalid, risk without keys); calculator (each reason, rounding down, exact formula with 0.5/1/2, PM and cross allowed, isolated and unknown refused, balance ≤ 0, read failures thrown); service (declined on first APPLY → record `absent`, event, `200` body, recovery `terminal_without_fill`, no exchange write; absent write failure → `500`; existing repeat-call tests unchanged; minimum mode unchanged); OpenAPI contract test.
 - [ ] 1.8 `npm test`, `npm run typecheck`, `openspec validate --strict`; RUNBOOK and README (mode, formula, net of fees, multi-coin bankroll, isolated refused).
 
 ## 2. Rollout (on owner's word only)
