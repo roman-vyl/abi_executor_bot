@@ -251,6 +251,19 @@ export class ExchangeFactsStore {
             established_at_ms: link.establishedAtMs,
           };
         } else {
+          // An existing link is answered from its own orderId first, so a
+          // repeated child never depends on the current state of its parent.
+          const known = findByOrderId.get(link.orderId);
+          if (known !== undefined) {
+            if (known.role === link.role && known.parent_order_link_id === link.parentOrderLinkId) {
+              return "duplicate";
+            }
+            throw new ExchangeFactsWriteError(
+              "link_conflict",
+              `order ${link.orderId} is already linked to another cycle, role or parent`,
+            );
+          }
+
           const parents = findEntryParents.all(link.parentOrderLinkId);
           if (parents.length === 0) {
             return "parent_not_found";

@@ -403,3 +403,31 @@ test("fingerprint normalization only trims fractional zeros", () => {
   assert.equal(normalizeFingerprintValue(undefined), "");
   assert.equal(normalizeFingerprintValue("Filled"), "Filled");
 });
+
+test("a repeated child is answered from its own orderId, not from its parent", (t) => {
+  const store = openDemo(path.join(tempDir(t), "facts.sqlite3"));
+  t.after(() => store.close());
+
+  const own = {
+    kind: "own" as const,
+    strategyInstanceId: SI,
+    role: "entry" as const,
+    generation: 1,
+    orderLinkId: ENTRY_ORDER_LINK_ID,
+    evidence: "create_response" as const,
+    establishedAtMs: 1,
+  };
+  const child = { kind: "child" as const, orderId: SL_ORDER_ID, role: "stop_loss" as const, parentOrderLinkId: ENTRY_ORDER_LINK_ID, establishedAtMs: 2 };
+  store.writeLinks([{ ...own, orderId: ENTRY_ORDER_ID, tradeCycleId: TC }]);
+  assert.deepEqual(store.writeLinks([child]), ["inserted"]);
+
+  // The parent orderLinkId becomes ambiguous later; the known child stays a duplicate.
+  store.writeLinks([{ ...own, orderId: "other-entry", tradeCycleId: "other-cycle" }]);
+  assert.deepEqual(store.writeLinks([child]), ["duplicate"]);
+
+  // The same orderId as a different role is still a conflict.
+  assert.throws(
+    () => store.writeLinks([{ ...child, role: "take_profit" }]),
+    (error: unknown) => error instanceof ExchangeFactsWriteError && error.code === "link_conflict",
+  );
+});

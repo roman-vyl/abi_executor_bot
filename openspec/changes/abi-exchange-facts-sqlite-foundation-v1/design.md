@@ -112,6 +112,7 @@ Fingerprint (`dedup_key_version` 1): the values of these fields, in this order, 
   - `parent_order_link_id`: a child order whose `parentOrderLinkId` equals the `order_link_id` of an existing `entry` row; the child takes that row's instance, cycle and generation.
 - Before the `orderId` is known the intent exists only in the correlation JSONL; no partial row is written.
 - Rows are never updated or deleted. Writing a link for an `order_id` that already exists with identical fields is a duplicate. With any different instance, cycle, role or generation it is refused with `link_conflict`; the existing row stays.
+- An `orderId` that already has a link is answered from that row first (duplicate or `link_conflict`), before any parent lookup, so a repeated child never depends on the current state of its parent.
 - A child whose parent `orderLinkId` matches no `entry` row, or matches `entry` rows of different cycles, is not linked (`parent_not_found` / `parent_ambiguous`); its facts stay unattributed.
 - A retry within a generation that yields a second `orderId` for the same `orderLinkId` gives a second row of the same cycle; a new generation gives a new `orderLinkId` and new rows. Several stop/take children of one entry each get their own row.
 - Aggregated position data is never evidence.
