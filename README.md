@@ -185,17 +185,42 @@ response to Runtime
 
 ### Quantity
 
-Текущий V1 sizing — **minimum executable quantity**, а не полноценный risk-based position sizing.
+Режим задаётся `ABI_POSITION_SIZING_MODE` и не зависит от `BYBIT_ENV`.
 
-ABI получает актуальные Bybit trading rules и рассчитывает количество, удовлетворяющее как минимум:
+**`minimum`** (по умолчанию) — minimum executable quantity. ABI получает актуальные Bybit trading rules и рассчитывает количество, удовлетворяющее как минимум:
 
 - `minOrderQty`;
 - `minNotionalValue`;
 - `qtyStep`.
 
-Расчёты выполняются через exact-decimal arithmetic без float round-trip.
+`risk_multiplier` в этом режиме сохраняется в correlation state, но количество не меняет.
 
-`risk_multiplier` проходит через Runtime → ABI contract и сохраняется в correlation state, но в текущей V1 формуле sizing ещё не изменяет рассчитанное количество.
+**`risk`** — размер от риска:
+
+```text
+quantity = floor_to_qtyStep( (totalWalletBalance × risk_multiplier / 100) / |planned_entry_price − initial_stop_price| )
+```
+
+- `risk_multiplier` — это сам процент банкролла: `0.5` = 0,5 %, `1` = 1 %, `2` = 2 %. Своих настроек риска у ABI нет.
+- `totalWalletBalance` читается из `GET /v5/account/wallet-balance` при каждом расчёте, без кэша. Это сумма всех монет счёта в USD без нереализованного PnL: если на счёте лежат BTC или ETH, банкролл меняется вместе с их ценой.
+- Перед этим при каждом расчёте читается `marginMode` из `GET /v5/account/info`. Разрешены `REGULAR_MARGIN` (cross) и `PORTFOLIO_MARGIN`. Isolated и любой другой режим дают отказ: account-wide поля в Isolated не определены.
+- Риск чистый: комиссии и проскальзывание не учтены, реальный убыток может быть больше.
+- Количество округляется только вниз и никогда не поднимается до биржевого минимума.
+- ABI не читает и не меняет плечо; маржой и исполнением управляет Bybit.
+- Режим `risk` требует `BYBIT_API_KEY` и `BYBIT_API_SECRET` (старт без них падает, также в dry-run).
+
+Если вход невозможен, первый APPLY пары получает `200 entry_package_declined` с `decline_reason` и `decline_message`; пара перед ответом закрывается как `absent`, recovery для неё — `terminal_without_fill`. Причины:
+
+| `decline_reason` | Когда |
+|---|---|
+| `invalid_stop_distance` | стоп равен входу или стоит не с той стороны |
+| `margin_mode_not_supported` | счёт не в cross или portfolio margin |
+| `insufficient_balance_for_minimum_quantity` | баланс ≤ 0, количество 0, меньше `minOrderQty` или стоимость меньше `minNotionalValue` |
+| `quantity_above_exchange_maximum` | количество больше `maxMktOrderQty` |
+
+Сбой чтения (таймаут, сеть, `retCode ≠ 0`, неверный ответ) — не отказ, а обычный `500 internal_error` до границы биржи.
+
+Расчёты выполняются через exact-decimal arithmetic без float round-trip.
 
 ---
 
@@ -850,6 +875,7 @@ Configuration читается из environment.
 | `ABI_ENTRY_PACKAGE_CORRELATION_PATH` | `./var/abi_entry_package_correlation.jsonl` | durable correlation store |
 | `ABI_INSTRUMENT_RULES_CACHE_TTL_MS` | `300000` | trading-rules cache TTL |
 | `ABI_BYBIT_REQUEST_TIMEOUT_MS` | `10000` | Bybit request timeout |
+| `ABI_POSITION_SIZING_MODE` | `minimum` | `minimum` or `risk` (risk percent of `totalWalletBalance`, needs API keys) |
 | `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |
 | `BYBIT_API_KEY` | empty | Bybit API key |

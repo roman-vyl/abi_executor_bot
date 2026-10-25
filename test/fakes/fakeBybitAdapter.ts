@@ -40,6 +40,9 @@ export class FakeBybitAdapter implements BybitAdapter {
   readonly getOpenPositionsCalls: GetOpenPositionsInput[] = [];
 
   walletBalanceResponse: unknown = { retCode: 0, result: {} };
+  accountInfoResponse: unknown = { retCode: 0, result: {} };
+  readonly getWalletBalanceCalls: GetWalletBalanceInput[] = [];
+  getAccountInfoCalls = 0;
   activeOrdersResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponse: unknown = { retCode: 0, result: { list: [] } };
   openPositionsResponses: unknown[] = [];
@@ -96,8 +99,13 @@ export class FakeBybitAdapter implements BybitAdapter {
   }
 
   async getWalletBalance(input: GetWalletBalanceInput = {}): Promise<unknown> {
-    void input;
+    this.getWalletBalanceCalls.push(input);
     return this.walletBalanceResponse;
+  }
+
+  async getAccountInfo(): Promise<unknown> {
+    this.getAccountInfoCalls += 1;
+    return this.accountInfoResponse;
   }
 
   async getActiveOrders(input: GetActiveOrdersInput = {}): Promise<unknown> {

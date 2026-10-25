@@ -144,6 +144,18 @@ curl "http://127.0.0.1:8787/execution/mode"
 The response's `canExecuteLive` field is `true` only when every condition above holds;
 otherwise `blockedReasons` lists what is missing.
 
+## Position sizing mode
+
+`ABI_POSITION_SIZING_MODE` is `minimum` (default) or `risk`, independent of `BYBIT_ENV`.
+
+- `risk` sizes each entry as `totalWalletBalance × risk_multiplier / 100 / |entry − stop|`, rounded down to `qtyStep`. `risk_multiplier` from Runtime is the percent itself (`1` = 1 %).
+- `risk` needs `BYBIT_API_KEY` and `BYBIT_API_SECRET`; startup fails without them, also in dry-run.
+- The account must be in cross (`REGULAR_MARGIN`) or portfolio margin. In Isolated margin every entry is declined with `margin_mode_not_supported`.
+- `totalWalletBalance` counts every coin on the account in USD. Keep only USDT on the trading account, or accept that the bankroll moves with the price of other coins.
+- Risk is net of fees and slippage: a real loss can be larger than the percent.
+- A refusal is logged as `entry_package_declined` with its reason and returned to Runtime as `200 entry_package_declined`.
+- The mode is shown in the `service_starting` event (`positionSizingMode`).
+
 ## Linear position binding mode and Hedge Mode activation
 
 `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` is ABI's internal expected geometry for newly created

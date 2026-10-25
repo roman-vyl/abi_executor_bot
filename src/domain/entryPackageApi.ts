@@ -48,6 +48,16 @@ export type EntryPackageAbsentResponse = {
   status: "entry_package_absent";
 };
 
+// An expected refusal of a first APPLY before any exchange write; the pair
+// is already durably absent when this is sent.
+export type EntryPackageDeclinedResponse = {
+  strategy_instance_id: string;
+  trade_cycle_id: string;
+  status: "entry_package_declined";
+  decline_reason: string;
+  decline_message: string;
+};
+
 export type EntryPackageValidationDetail = {
   path: string;
   message: string;
@@ -70,6 +80,7 @@ export type EntryPackageErrorResponse = {
 export type EntryPackageResponseBody =
   | EntryPackageAppliedResponse
   | EntryPackageAbsentResponse
+  | EntryPackageDeclinedResponse
   | EntryPackageErrorResponse;
 
 export type EntryPackageFailureStage =
@@ -277,6 +288,33 @@ export function serializeAbsentEntryPackage(input: {
       strategy_instance_id: input.strategyInstanceId,
       trade_cycle_id: input.tradeCycleId,
       status: "entry_package_absent",
+    },
+  };
+}
+
+export function serializeDeclinedEntryPackage(input: {
+  strategyInstanceId: string;
+  tradeCycleId: string;
+  reason: string;
+  message: string;
+}): EntryPackageHttpResult {
+  if (
+    input.strategyInstanceId.length === 0 ||
+    input.tradeCycleId.length === 0 ||
+    input.reason.length === 0 ||
+    input.message.length === 0
+  ) {
+    return internalErrorResult();
+  }
+
+  return {
+    statusCode: 200,
+    body: {
+      strategy_instance_id: input.strategyInstanceId,
+      trade_cycle_id: input.tradeCycleId,
+      status: "entry_package_declined",
+      decline_reason: input.reason,
+      decline_message: input.message,
     },
   };
 }

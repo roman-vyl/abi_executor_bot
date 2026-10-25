@@ -25,3 +25,8 @@ test("serviceStartingFields reports bybitApiKeyConfigured false when no key is s
   const fields = serviceStartingFields(config);
   assert.equal(fields.bybitApiKeyConfigured, false);
 });
+
+test("serviceStartingFields reports the position sizing mode", () => {
+  assert.equal(serviceStartingFields(makeTestConfig()).positionSizingMode, "minimum");
+  assert.equal(serviceStartingFields(makeTestConfig({ positionSizingMode: "risk" })).positionSizingMode, "risk");
+});

@@ -7,7 +7,10 @@ import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
 import { emitEvent } from "../observability/events.js";
-import { FixedMinimumPositionSizeCalculator } from "../risk/positionSizeCalculator.js";
+import {
+  FixedMinimumPositionSizeCalculator,
+  RiskPercentPositionSizeCalculator,
+} from "../risk/positionSizeCalculator.js";
 import { CloseApplicationService } from "../services/close/closeApplicationService.js";
 import { EntryCycleRecoveryResolutionService } from "../services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
@@ -29,7 +32,10 @@ export function startServer(config: AbiConfig): void {
 
   const correlationRepository = new EntryPackageCorrelationRepository(config.entryPackageCorrelationPath);
   const rulesProvider = new BybitInstrumentTradingRulesProvider(bybit, config);
-  const positionSizeCalculator = new FixedMinimumPositionSizeCalculator(rulesProvider);
+  const positionSizeCalculator =
+    config.positionSizingMode === "risk"
+      ? new RiskPercentPositionSizeCalculator(rulesProvider, bybit)
+      : new FixedMinimumPositionSizeCalculator(rulesProvider);
   const mutex = new KeyedMutex();
   // Serializes physical-position-scope acquisition across different pairs
   // with a distinct instance from `mutex` above. It is always acquired

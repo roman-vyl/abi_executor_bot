@@ -98,3 +98,46 @@ test("linear position binding mode defaults one-way and accepts only the closed 
     /must be one of: one_way, hedge/,
   );
 });
+
+test("position sizing mode defaults to minimum and is independent of BYBIT_ENV", () => {
+  assert.equal(loadConfig({}).positionSizingMode, "minimum");
+  assert.equal(loadConfig({ BYBIT_ENV: "mainnet" }).positionSizingMode, "minimum");
+  assert.equal(loadConfig({ ABI_POSITION_SIZING_MODE: " Minimum " }).positionSizingMode, "minimum");
+  for (const env of ["demo", "testnet", "mainnet"]) {
+    const config = loadConfig({
+      BYBIT_ENV: env,
+      ABI_POSITION_SIZING_MODE: "risk",
+      BYBIT_API_KEY: "key",
+      BYBIT_API_SECRET: "secret",
+    });
+    assert.equal(config.positionSizingMode, "risk");
+    assert.equal(config.bybitEnvironment, env);
+  }
+});
+
+test("position sizing mode fails closed on an unknown value", () => {
+  assert.throws(
+    () => loadConfig({ ABI_POSITION_SIZING_MODE: "percent" }),
+    /ABI_POSITION_SIZING_MODE must be one of: minimum, risk/,
+  );
+  assert.throws(() => loadConfig({ ABI_POSITION_SIZING_MODE: "" }), /ABI_POSITION_SIZING_MODE/);
+});
+
+test("risk sizing requires API credentials, also in dry-run", () => {
+  for (const env of [
+    { ABI_POSITION_SIZING_MODE: "risk" },
+    { ABI_POSITION_SIZING_MODE: "risk", BYBIT_API_KEY: "key" },
+    { ABI_POSITION_SIZING_MODE: "risk", BYBIT_API_SECRET: "secret" },
+    { ABI_POSITION_SIZING_MODE: "risk", ABI_DRY_RUN: "true", BYBIT_API_KEY: " " , BYBIT_API_SECRET: "secret" },
+  ]) {
+    assert.throws(() => loadConfig(env), /requires BYBIT_API_KEY and BYBIT_API_SECRET/);
+  }
+  const dryRun = loadConfig({
+    ABI_POSITION_SIZING_MODE: "risk",
+    ABI_DRY_RUN: "true",
+    BYBIT_API_KEY: "key",
+    BYBIT_API_SECRET: "secret",
+  });
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(dryRun.positionSizingMode, "risk");
+});

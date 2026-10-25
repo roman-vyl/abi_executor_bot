@@ -41,7 +41,11 @@ export function emitEvent<T extends Record<string, unknown> = Record<string, nev
 // module's own success-status and error-code literals
 // (entryPackageApi.ts / openPositionApi.ts / positionManagementApi.ts) —
 // not a new, parallel taxonomy invented for observability.
-export type EntryPackageOperationOutcome = "entry_package_applied" | "entry_package_absent" | "internal_error";
+export type EntryPackageOperationOutcome =
+  | "entry_package_applied"
+  | "entry_package_absent"
+  | "entry_package_declined"
+  | "internal_error";
 
 export type OpenPositionOperationOutcome =
   | "position_open"

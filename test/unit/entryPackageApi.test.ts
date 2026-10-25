@@ -363,3 +363,27 @@ function resultHasPath(
 ): boolean {
   return details.some((detail) => detail.path === path);
 }
+
+test("declined serializer returns the exact closed 200 body", async () => {
+  const { serializeDeclinedEntryPackage } = await import("../../src/domain/entryPackageApi.js");
+  assert.deepEqual(
+    serializeDeclinedEntryPackage({
+      strategyInstanceId: "instance-1",
+      tradeCycleId: "cycle-1",
+      reason: "invalid_stop_distance",
+      message: "stop 100 is not on the loss side of long entry 100",
+    }),
+    {
+      statusCode: 200,
+      body: {
+        strategy_instance_id: "instance-1",
+        trade_cycle_id: "cycle-1",
+        status: "entry_package_declined",
+        decline_reason: "invalid_stop_distance",
+        decline_message: "stop 100 is not on the loss side of long entry 100",
+      },
+    },
+  );
+  const empty = serializeDeclinedEntryPackage({ strategyInstanceId: "i", tradeCycleId: "c", reason: "", message: "m" });
+  assert.equal(empty.statusCode, 500);
+});

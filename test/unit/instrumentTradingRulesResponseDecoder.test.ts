@@ -55,6 +55,7 @@ test("a single matching linear row decodes success", () => {
       qtyStep: "0.001",
       minNotionalValue: "5",
       tickSize: "0.5",
+      maxMktOrderQty: null,
     },
   });
 });
@@ -71,6 +72,7 @@ test("minNotionalValue of exactly 0 decodes success", () => {
       qtyStep: "0.001",
       minNotionalValue: "0",
       tickSize: "0.5",
+      maxMktOrderQty: null,
     },
   });
 });
@@ -243,3 +245,22 @@ test("a non-array list is list_not_array", () => {
 test("a null row is malformed_item", () => {
   assertFailure({ response: response([null]) }, "malformed_item");
 });
+
+test("maxMktOrderQty is decoded when Bybit sends a positive value", () => {
+  const decoded = decodeInstrumentTradingRulesResponse({
+    response: response([row({ lotSizeFilter: lotSizeFilter({ maxMktOrderQty: "119" }) })]),
+    expected,
+  });
+  assert.equal(decoded.ok && decoded.rules.maxMktOrderQty, "119");
+});
+
+for (const value of ["0", "-1", "abc", 5, undefined]) {
+  test(`an unusable maxMktOrderQty (${String(value)}) decodes as null without failing the rules`, () => {
+    const decoded = decodeInstrumentTradingRulesResponse({
+      response: response([row({ lotSizeFilter: lotSizeFilter({ maxMktOrderQty: value }) })]),
+      expected,
+    });
+    assert.equal(decoded.ok, true);
+    assert.equal(decoded.ok && decoded.rules.maxMktOrderQty, null);
+  });
+}

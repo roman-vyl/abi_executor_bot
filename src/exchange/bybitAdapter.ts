@@ -81,6 +81,7 @@ export type PlaceMarketOrderInput = {
 export interface BybitAdapter {
   getServerTime(): Promise<unknown>;
   getWalletBalance(input?: GetWalletBalanceInput): Promise<unknown>;
+  getAccountInfo(): Promise<unknown>;
   getActiveOrders(input?: GetActiveOrdersInput): Promise<unknown>;
   getOpenPositions(input?: GetOpenPositionsInput): Promise<unknown>;
   queryPositionForInstrument(input: PositionQueryInput): Promise<PositionQueryResult>;
@@ -145,6 +146,10 @@ export class RestBybitAdapter implements BybitAdapter {
     }
 
     return this.signedGet("/v5/account/wallet-balance", params);
+  }
+
+  async getAccountInfo(): Promise<unknown> {
+    return this.signedGet("/v5/account/info", new URLSearchParams());
   }
 
   async getActiveOrders(input: GetActiveOrdersInput = {}): Promise<unknown> {
@@ -397,6 +402,10 @@ export class StubBybitAdapter implements BybitAdapter {
   async getWalletBalance(input: GetWalletBalanceInput = {}): Promise<unknown> {
     void input;
     return stub("getWalletBalance");
+  }
+
+  async getAccountInfo(): Promise<unknown> {
+    return stub("getAccountInfo");
   }
 
   async getActiveOrders(input: GetActiveOrdersInput = {}): Promise<unknown> {
