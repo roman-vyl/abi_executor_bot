@@ -17,6 +17,8 @@ export type AbiConfig = {
   bybitTriggerBy: string;
   bybitLinearPositionBindingMode: "one_way" | "hedge";
   positionSizingMode: PositionSizingMode;
+  exchangeFactsEnabled: boolean;
+  exchangeFactsDbPath: string;
 };
 
 export type PositionSizingMode = "minimum" | "risk";
@@ -59,6 +61,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     bybitTriggerBy: readString("BYBIT_TRIGGER_BY", env.BYBIT_TRIGGER_BY, "LastPrice"),
     bybitLinearPositionBindingMode: readLinearPositionBindingMode(env.ABI_BYBIT_LINEAR_POSITION_BINDING_MODE),
     positionSizingMode,
+    exchangeFactsEnabled: readStrictBool("ABI_EXCHANGE_FACTS_ENABLED", env.ABI_EXCHANGE_FACTS_ENABLED, false),
+    // One database per Bybit environment (abi-exchange-facts-sqlite-foundation-v1 D6);
+    // the environment recorded inside the file is what protects it, not the name.
+    exchangeFactsDbPath: readString(
+      "ABI_EXCHANGE_FACTS_DB_PATH",
+      env.ABI_EXCHANGE_FACTS_DB_PATH,
+      `./var/abi_exchange_facts_${bybitEnvironment}.sqlite3`,
+    ),
   };
 }
 
@@ -115,6 +125,22 @@ function readBool(name: string, value: string | undefined, fallback: boolean): b
   }
 
   throw new Error(`${name} must be a boolean value`);
+}
+
+function readStrictBool(name: string, value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+
+  throw new Error(`${name} must be true or false`);
 }
 
 function readPort(value: string | undefined, fallback: number): number {

@@ -75,7 +75,7 @@ CREATE INDEX order_links_parent_link      ON order_links(parent_order_link_id);
 - Facts carry no cycle columns and no environment column (the environment is the database, D6). Attribution lives only in `order_links`; a consumer joins `exchange_facts.order_id = order_links.order_id`. Facts whose `order_id` has no link (Funding, liquidation, account-wide close, unknown orders) stay unattributed.
 - `raw_json`: the Bybit item (one row, not the whole page) as received. Bybit V5 sends numeric values as strings; ABI stores the item text without any numeric reformatting. A test asserts byte equality for recorded rows of trade 6072511f.
 - Empty strings from Bybit become `NULL` in the indexed columns only; `raw_json` keeps them.
-- `link_seq` is assigned in the same transaction from a counter kept in `schema_meta` (`next_link_seq`), so it only grows and is never reused.
+- `link_seq` is assigned in the same transaction as `MAX(link_seq) + 1`; link rows are never deleted, so it only grows and a committed value is never reused.
 
 ### D2. Driver and build
 
@@ -135,7 +135,7 @@ Fingerprint (`dedup_key_version` 1): the values of these fields, in this order, 
 
 - `ABI_EXCHANGE_FACTS_ENABLED` (`true|false`, default `false`, invalid value fails startup).
 - `ABI_EXCHANGE_FACTS_DB_PATH` (default `./var/abi_exchange_facts_<BYBIT_ENV>.sqlite3`; in the container `/app/var` = Mac `BBB_data/abi`).
-- Enabled: open in `server.ts` before listening; any open/check failure emits `exchange_facts_store_failed` with a closed reason and fails startup; close on graceful shutdown. `service_starting` gains `exchange_facts_store: "disabled" | "enabled"` and, when enabled, `exchange_facts_schema_version`.
+- Enabled: open in `server.ts` before listening; any open/check failure emits `exchange_facts_store_failed` with a closed reason and fails startup; close on graceful shutdown. `service_starting` gains `exchangeFactsStore: "disabled" | "enabled"` and, when enabled, `exchangeFactsSchemaVersion` (camelCase like the event's other fields).
 
 ## Risks / Trade-offs
 

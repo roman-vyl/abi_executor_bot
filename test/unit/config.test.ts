@@ -141,3 +141,29 @@ test("risk sizing requires API credentials, also in dry-run", () => {
   assert.equal(dryRun.dryRun, true);
   assert.equal(dryRun.positionSizingMode, "risk");
 });
+
+test("loadConfig keeps the exchange facts store off by default with a per-environment path", () => {
+  const config = loadConfig({ BYBIT_ENV: "demo" });
+  assert.equal(config.exchangeFactsEnabled, false);
+  assert.equal(config.exchangeFactsDbPath, "./var/abi_exchange_facts_demo.sqlite3");
+  assert.equal(loadConfig({ BYBIT_ENV: "mainnet" }).exchangeFactsDbPath, "./var/abi_exchange_facts_mainnet.sqlite3");
+});
+
+test("loadConfig reads ABI_EXCHANGE_FACTS_ENABLED and ABI_EXCHANGE_FACTS_DB_PATH", () => {
+  const config = loadConfig({
+    BYBIT_ENV: "demo",
+    ABI_EXCHANGE_FACTS_ENABLED: "true",
+    ABI_EXCHANGE_FACTS_DB_PATH: "/app/var/facts.sqlite3",
+  });
+  assert.equal(config.exchangeFactsEnabled, true);
+  assert.equal(config.exchangeFactsDbPath, "/app/var/facts.sqlite3");
+});
+
+test("loadConfig rejects ABI_EXCHANGE_FACTS_ENABLED other than true or false", () => {
+  for (const value of ["yes", "1", ""]) {
+    assert.throws(
+      () => loadConfig({ ABI_EXCHANGE_FACTS_ENABLED: value }),
+      /ABI_EXCHANGE_FACTS_ENABLED must be true or false/,
+    );
+  }
+});

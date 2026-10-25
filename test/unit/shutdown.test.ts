@@ -124,3 +124,32 @@ test("repeated termination signals do not close the server twice", () => {
 
   assert.equal(closeCount, 1);
 });
+
+test("the onServerClosed hook runs after the server closed and before exit", () => {
+  const signalHandlers = new Map<string, () => void>();
+  const order: string[] = [];
+
+  installShutdownHandlers({
+    server: {
+      close(callback): void {
+        order.push("server_closed");
+        callback();
+      },
+    },
+    onServerClosed: () => order.push("store_closed"),
+    processLike: {
+      once(event, listener) {
+        signalHandlers.set(event, listener);
+        return process;
+      },
+      exit(code?: number): never {
+        order.push(`exit:${code}`);
+        throw new ExitCalled(code);
+      },
+    },
+    emit(): void {},
+  });
+
+  assert.throws(() => signalHandlers.get("SIGTERM")!(), ExitCalled);
+  assert.deepEqual(order, ["server_closed", "store_closed", "exit:0"]);
+});

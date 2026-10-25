@@ -30,3 +30,13 @@ test("serviceStartingFields reports the position sizing mode", () => {
   assert.equal(serviceStartingFields(makeTestConfig()).positionSizingMode, "minimum");
   assert.equal(serviceStartingFields(makeTestConfig({ positionSizingMode: "risk" })).positionSizingMode, "risk");
 });
+
+test("serviceStartingFields reports the exchange facts store", () => {
+  const disabled = serviceStartingFields(makeTestConfig());
+  assert.equal(disabled.exchangeFactsStore, "disabled");
+  assert.equal("exchangeFactsSchemaVersion" in disabled, false);
+
+  const enabled = serviceStartingFields(makeTestConfig({ exchangeFactsEnabled: true }));
+  assert.equal(enabled.exchangeFactsStore, "enabled");
+  assert.equal(enabled.exchangeFactsSchemaVersion, 1);
+});

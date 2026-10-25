@@ -32,6 +32,20 @@ historical delivery-plan document as the canonical architecture reference.
   destructive MultiSpec cutover eliminated the shared-scope code path entirely; there is
   no remaining fallback to non-pair-scoped execution.
 
+## Exchange facts store
+
+- ABI owns an internal SQLite store of Bybit exchange facts (`src/exchangeFacts/`), one database
+  per Bybit environment, written and read only by the ABI process. Its SQL schema is internal
+  storage, versioned for ABI's own migrations; the only future inter-service contract is a
+  read-only ABI HTTP API (cursor reads by `event_seq` / `link_seq`). The Central Journal never
+  opens the file and never copies the facts.
+- Facts are raw Bybit records of two forms: `order_state` (an order record) and `execution` (an
+  execution record of any `execType`, Funding included). Attribution lives only in `order_links`:
+  one immutable row per Bybit `orderId`; Partial SL/TP children take their entry's cycle through
+  `parentOrderLinkId`. Aggregated positions are never evidence.
+- Foundation only (`abi-exchange-facts-sqlite-foundation-v1`): off by default, nothing in order
+  execution calls the store; fact collection and the read API are later changes.
+
 ## Known limitations / deferred items
 
 - `abi-entry-order-not-found-recovery-v1` Phase A (ordinary fresh reconciliation for the

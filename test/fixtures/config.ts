@@ -20,6 +20,8 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     bybitTriggerBy: "LastPrice",
     bybitLinearPositionBindingMode: "one_way",
     positionSizingMode: "minimum",
+    exchangeFactsEnabled: false,
+    exchangeFactsDbPath: "/tmp/abi-test-exchange-facts.sqlite3",
     ...overrides,
   };
 }
