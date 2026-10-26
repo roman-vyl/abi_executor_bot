@@ -2,6 +2,8 @@
 // single-line JSON object written to stdout (info/warn) or stderr (error).
 // service is fixed for this process and injected here, not caller-supplied
 // — no call site can construct an event with a different service value.
+import { withDiagnosticsOperation } from "./diagnostics.js";
+
 export type EventLevel = "info" | "warn" | "error";
 
 const SERVICE = "abi_executor_bot";
@@ -130,7 +132,7 @@ export async function withOperationEvents<TOperation extends ExecutionOperation,
 
   let result: TResult;
   try {
-    result = await run();
+    result = await withDiagnosticsOperation(fields, run, (value) => ({ outcome: classify(value).outcome }));
   } catch (error) {
     emitEvent("error", "operation_failed", {
       ...fields,

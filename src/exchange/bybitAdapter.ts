@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import type { AbiConfig } from "../config/config.js";
+import { timeBybitRequest } from "../observability/diagnostics.js";
 import { classifyExactDecimalText, isExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
 import type {
   BybitCancelOrderPayload,
@@ -132,8 +133,10 @@ export class RestBybitAdapter implements BybitAdapter {
   }
 
   async getServerTime(): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal: this.timeoutSignal() });
-    return readBybitResponse(response);
+    return timeBybitRequest("GET", "/v5/market/time", async () => {
+      const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal: this.timeoutSignal() });
+      return readBybitResponse(response);
+    });
   }
 
   async getWalletBalance(input: GetWalletBalanceInput = {}): Promise<unknown> {
@@ -289,18 +292,22 @@ export class RestBybitAdapter implements BybitAdapter {
       symbol,
     });
 
-    const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
-      signal: this.timeoutSignal(),
+    return timeBybitRequest("GET", "/v5/market/instruments-info", async () => {
+      const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
+        signal: this.timeoutSignal(),
+      });
+      return readBybitResponse(response);
     });
-    return readBybitResponse(response);
   }
 
   async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
     const params = new URLSearchParams({ category, symbol });
-    const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
-      signal: this.timeoutSignal(),
+    return timeBybitRequest("GET", "/v5/market/price-limit", async () => {
+      const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
+        signal: this.timeoutSignal(),
+      });
+      return readBybitResponse(response);
     });
-    return readBybitResponse(response);
   }
 
   async getPosition(symbol: string): Promise<BybitPosition | null> {
@@ -335,18 +342,20 @@ export class RestBybitAdapter implements BybitAdapter {
       .update(signaturePayload)
       .digest("hex");
 
-    const response = await fetch(`${this.baseUrl}${path}?${queryString}`, {
-      method: "GET",
-      headers: {
-        "X-BAPI-API-KEY": this.config.bybitApiKey,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
-        "X-BAPI-SIGN": signature,
-      },
-      signal: this.timeoutSignal(),
-    });
+    return timeBybitRequest("GET", path, async () => {
+      const response = await fetch(`${this.baseUrl}${path}?${queryString}`, {
+        method: "GET",
+        headers: {
+          "X-BAPI-API-KEY": this.config.bybitApiKey,
+          "X-BAPI-TIMESTAMP": timestamp,
+          "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
+          "X-BAPI-SIGN": signature,
+        },
+        signal: this.timeoutSignal(),
+      });
 
-    return readBybitResponse(response);
+      return readBybitResponse(response);
+    });
   }
 
   private timeoutSignal(): AbortSignal {
@@ -365,20 +374,22 @@ export class RestBybitAdapter implements BybitAdapter {
       .update(signaturePayload)
       .digest("hex");
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "X-BAPI-API-KEY": this.config.bybitApiKey,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
-        "X-BAPI-SIGN": signature,
-      },
-      body,
-      signal: this.timeoutSignal(),
-    });
+    return timeBybitRequest("POST", path, async () => {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "X-BAPI-API-KEY": this.config.bybitApiKey,
+          "X-BAPI-TIMESTAMP": timestamp,
+          "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
+          "X-BAPI-SIGN": signature,
+        },
+        body,
+        signal: this.timeoutSignal(),
+      });
 
-    return readBybitResponse(response);
+      return readBybitResponse(response);
+    });
   }
 }
 
