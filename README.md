@@ -875,6 +875,7 @@ Configuration читается из environment.
 | `ABI_ENTRY_PACKAGE_CORRELATION_PATH` | `./var/abi_entry_package_correlation.jsonl` | durable correlation store |
 | `ABI_INSTRUMENT_RULES_CACHE_TTL_MS` | `300000` | trading-rules cache TTL |
 | `ABI_BYBIT_REQUEST_TIMEOUT_MS` | `10000` | Bybit request timeout |
+| `ABI_DIAGNOSTICS_PATH` | empty (off) | временная диагностика: JSONL-файл, по строке на операцию (open-position и др.) с временем каждого запроса к Bybit и причиной internal_error; на поведение не влияет, ошибки записи игнорируются |
 | `ABI_POSITION_SIZING_MODE` | `minimum` | `minimum` or `risk` (risk percent of `totalWalletBalance`, needs API keys) |
 | `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |

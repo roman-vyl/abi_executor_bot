@@ -37,6 +37,7 @@ import {
   terminalClosedRecord,
 } from "../closure/tradeCycleClosure.js";
 import { resolveOwnAttachedProtection } from "../protection/nativeProtectionAttribution.js";
+import { noteDiagnostic } from "../../observability/diagnostics.js";
 
 export type OpenPositionQuery = {
   strategyInstanceId: string;
@@ -157,6 +158,7 @@ export class OpenPositionResolutionService {
     }
 
     if (bucket === "unresolved") {
+      noteDiagnostic("determine: record status unresolved");
       return { kind: "error" };
     }
 
@@ -165,12 +167,14 @@ export class OpenPositionResolutionService {
     }
     const physicalBinding = resolveRecordPhysicalPositionBinding(record);
     if (physicalBinding === undefined) {
+      noteDiagnostic("determine: no physical position binding");
       return { kind: "error" };
     }
     const binding = positionBindingGeometry(physicalBinding);
 
     const ownFacts = await this.resolveOwnFillFacts(record);
     if (ownFacts === undefined) {
+      noteDiagnostic("determine: own fill facts unavailable");
       return { kind: "error" };
     }
 
@@ -187,6 +191,7 @@ export class OpenPositionResolutionService {
       // Structurally impossible-to-serve state: this cycle's own evidence
       // proves a fill but carries no usable average price. Never
       // fabricated, estimated, or substituted.
+      noteDiagnostic("determine: fill without average price");
       return { kind: "error" };
     }
 
@@ -201,6 +206,7 @@ export class OpenPositionResolutionService {
 
   private nonLiveResult(record: EntryPackageExecutionRecord): OpenPositionHttpResult {
     if (classifyStatus(record.status) !== "durably_closed") {
+      noteDiagnostic(`non-live record status ${record.status}`);
       return internalErrorResult();
     }
     const closure = storedClosure(record);
@@ -221,12 +227,14 @@ export class OpenPositionResolutionService {
     }
     const physicalBinding = resolveRecordPhysicalPositionBinding(record);
     if (physicalBinding === undefined || record.order_link_id === null) {
+      noteDiagnostic("lookupLive: no physical binding or order link id");
       return { kind: "error" };
     }
     const binding = positionBindingGeometry(physicalBinding);
 
     const ownFacts = await this.resolveOwnFillFacts(record);
     if (ownFacts === undefined) {
+      noteDiagnostic("lookupLive: own fill facts unavailable");
       return { kind: "error" };
     }
     const ownExposure = ownFacts.cumulativeFilledQty;
@@ -276,11 +284,13 @@ export class OpenPositionResolutionService {
       binding,
     });
     if (proof.kind !== "completed") {
+      noteDiagnostic(`closure proof ${proof.kind}`);
       return internalErrorResult();
     }
     try {
       await this.deps.correlationRepository.save(terminalClosedRecord(record, proof.closure));
-    } catch {
+    } catch (error) {
+      noteDiagnostic("closure save failed", error);
       return internalErrorResult();
     }
     return openPositionClosedResult({
@@ -312,6 +322,7 @@ export class OpenPositionResolutionService {
     const orderLinkId = record.order_link_id;
     const category = record.exchange_category;
     if (calculatedQuantity === null || orderLinkId === null || category !== "linear") {
+      noteDiagnostic("own fill facts: record lacks quantity, order link id or linear category");
       return undefined;
     }
 
@@ -349,6 +360,7 @@ export class OpenPositionResolutionService {
     // "not_found" / "ambiguous": still treated as unresolved/error — no
     // fill evidence obtainable at all, as opposed to pending_confirmed's
     // definite zero-fill live order.
+    noteDiagnostic(`own fill facts: entry confirmation ${confirmation.kind}`);
     return undefined;
   }
 
@@ -379,6 +391,7 @@ export class OpenPositionResolutionService {
     }
 
     if (record.order_link_id === null || record.exchange_category !== "linear") {
+      noteDiagnostic("open determination without order link id or linear category");
       return internalErrorResult();
     }
 
@@ -402,6 +415,7 @@ export class OpenPositionResolutionService {
       // "no_executions_found" (own evidence already proves a fill, so this
       // is a contradiction, never proof of no fill) or "ambiguous" — never
       // fabricated or omitted.
+      noteDiagnostic(`first fill capture ${captured.kind}`);
       return internalErrorResult();
     }
 
@@ -411,7 +425,8 @@ export class OpenPositionResolutionService {
         first_fill_at_ms: captured.firstFillAtMs,
         updated_at: new Date().toISOString(),
       });
-    } catch {
+    } catch (error) {
+      noteDiagnostic("first fill save failed (answer still open)", error);
       // A durable-write failure (e.g. a disk error) does not convert an
       // otherwise-successful determination into an error response — the
       // freshly-captured value is still truthful in this moment. The next
@@ -493,6 +508,7 @@ function evaluateOpen(
   queryResult: PositionQueryResult,
 ): PositionDetermination {
   if (ownFacts.avgExecutionPrice === undefined) {
+    noteDiagnostic("evaluateOpen: fill without average price");
     return { kind: "error" };
   }
 
@@ -500,10 +516,14 @@ function evaluateOpen(
     // Own evidence proves a fill, but the aggregate sanity check
     // disagrees (query failure or no matching row) — fails closed rather
     // than reporting position_open from own evidence alone.
+    noteDiagnostic(
+      queryResult.kind === "failure" ? `position query failure ${queryResult.reason}` : "position query no_position",
+    );
     return { kind: "error" };
   }
 
   if (!sideMatches(queryResult.row.side, record.desired_entry)) {
+    noteDiagnostic("position query side mismatch");
     return { kind: "error" };
   }
 
