@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AbiConfig } from "../config/config.js";
+import type { ExchangeFactsStoreState } from "../app/exchangeFactsStartup.js";
 import { getLiveExecutionMode } from "../execution/liveGuard.js";
 import { writeJson } from "../app/http.js";
 
@@ -9,8 +10,9 @@ export async function handleSystemRoutes(input: {
   response: ServerResponse;
   config: AbiConfig;
   entryPackageReady: boolean;
+  exchangeFacts: ExchangeFactsStoreState;
 }): Promise<boolean> {
-  const { request, response, config, entryPackageReady } = input;
+  const { request, response, config, entryPackageReady, exchangeFacts } = input;
 
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, entryPackageReady ? 200 : 503, {
@@ -28,6 +30,9 @@ export async function handleSystemRoutes(input: {
       bybitTriggerBy: config.bybitTriggerBy,
       bybitApiKeyConfigured: config.bybitApiKey !== "",
       entryPackageReady,
+      // Informational only: the journal state never changes ok or the status.
+      exchangeFactsStore: exchangeFacts.status,
+      ...(exchangeFacts.status === "unavailable" ? { exchangeFactsStoreReason: exchangeFacts.reason } : {}),
     });
     return true;
   }

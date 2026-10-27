@@ -1,16 +1,21 @@
-import Database from "better-sqlite3";
+import { createRequire } from "node:module";
+
+import type Database from "better-sqlite3";
 
 import { executionDedupKey, orderStateDedupKey } from "./dedup.js";
 import { DEDUP_KEY_VERSION, SCHEMA_DDL, SCHEMA_VERSION, STORAGE_SCHEMA } from "./schema.js";
 
 // ABI-internal SQLite store of Bybit exchange facts and orderId -> trade
 // cycle links (abi-exchange-facts-sqlite-foundation-v1). Only the ABI process
-// opens the file. Nothing in order execution calls this store yet.
+// opens the file. Nothing in order execution calls this store yet. The native
+// driver is loaded only when a store is opened, so a disabled store never
+// touches it (abi-exchange-facts-trading-isolation-v1 D2).
 
 export type BybitEnvironment = "demo" | "testnet" | "mainnet";
 
 export type ExchangeFactsOpenFailureReason =
   | "open_failed"
+  | "exchange_facts_driver_unavailable"
   | "exchange_facts_environment_mismatch"
   | "exchange_facts_unknown_database"
   | "exchange_facts_schema_newer"
@@ -147,15 +152,36 @@ type LinkRow = {
   established_at_ms: number;
 };
 
+type DatabaseConstructor = new (path: string) => Database.Database;
+
+const requireFromHere = createRequire(import.meta.url);
+
+function loadBetterSqlite3(): DatabaseConstructor {
+  return requireFromHere("better-sqlite3") as DatabaseConstructor;
+}
+
 export class ExchangeFactsStore {
   private constructor(private readonly db: Database.Database) {}
 
   // Opens or creates the database of one Bybit environment (design D6, D7).
   // Any failure closes the handle and throws ExchangeFactsOpenError.
-  static open(input: { path: string; bybitEnvironment: BybitEnvironment; category: string }): ExchangeFactsStore {
+  static open(
+    input: { path: string; bybitEnvironment: BybitEnvironment; category: string },
+    deps: { loadDriver?: () => DatabaseConstructor } = {},
+  ): ExchangeFactsStore {
+    let Driver: DatabaseConstructor;
+    try {
+      Driver = (deps.loadDriver ?? loadBetterSqlite3)();
+    } catch (error) {
+      throw new ExchangeFactsOpenError(
+        "exchange_facts_driver_unavailable",
+        `cannot load the SQLite driver: ${describe(error)}`,
+      );
+    }
+
     let db: Database.Database;
     try {
-      db = new Database(input.path);
+      db = new Driver(input.path);
     } catch (error) {
       throw new ExchangeFactsOpenError("open_failed", `cannot open exchange facts database: ${describe(error)}`);
     }

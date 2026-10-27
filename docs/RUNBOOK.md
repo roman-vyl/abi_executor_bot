@@ -218,13 +218,19 @@ facts (order records, executions) and orderId → trade cycle links. In this ver
 writes facts yet; the store only opens, checks and closes.
 
 - Off by default. `ABI_EXCHANGE_FACTS_ENABLED=true` turns it on (only `true`/`false` are
-  accepted). With it off ABI opens nothing and behaves as before.
+  accepted). With it off ABI opens nothing, never loads the SQLite native driver and behaves as
+  before.
 - `ABI_EXCHANGE_FACTS_DB_PATH` defaults to `./var/abi_exchange_facts_<BYBIT_ENV>.sqlite3`. In
   Docker Compose that is `${BBB_DATA_ROOT}/abi/abi_exchange_facts_demo.sqlite3` on the Mac demo.
 - One database per Bybit environment. The environment and category are written into the file
-  when it is created and checked at every start; a mismatch stops startup with
-  `exchange_facts_store_failed` / `exchange_facts_environment_mismatch`. Any other open or check
-  failure also stops startup (no silent run without the journal).
+  when it is created and checked at every start; a mismatch leaves the store unavailable with
+  `exchange_facts_store_failed` / `exchange_facts_environment_mismatch`.
+- The store never stops trading. Any open or check failure (including
+  `exchange_facts_driver_unavailable` when the SQLite driver cannot load) emits
+  `exchange_facts_store_failed` at level `error`, and ABI starts and trades without the journal.
+  `service_starting` and `GET /health` report `exchangeFactsStore: "unavailable"` (`/health` also
+  gives `exchangeFactsStoreReason`); `/health` `ok` and status do not depend on the store. Fix the
+  cause and restart ABI to bring the journal back.
 - One database per Bybit account. ABI does not check the account. Before switching the API keys
   to another account, stop ABI and move the old database file aside.
 - Exactly one ABI process per data directory. SQLite runs in `locking_mode=EXCLUSIVE` only to

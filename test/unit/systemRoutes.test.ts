@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 
+import type { ExchangeFactsStore } from "../../src/exchangeFacts/exchangeFactsStore.js";
 import { handleSystemRoutes } from "../../src/routes/systemRoutes.js";
 import { makeTestConfig } from "../fixtures/config.js";
 
@@ -16,6 +17,7 @@ test("health is ready only when entry-package execution is ready", async () => {
       response: response.response,
       config: makeTestConfig(),
       entryPackageReady: false,
+      exchangeFacts: { status: "disabled" },
     }),
     true,
   );
@@ -35,6 +37,7 @@ test("health remains successful when entry-package execution is ready", async ()
       response: response.response,
       config: makeTestConfig(),
       entryPackageReady: true,
+      exchangeFacts: { status: "disabled" },
     }),
     true,
   );
@@ -42,6 +45,30 @@ test("health remains successful when entry-package execution is ready", async ()
   assert.equal(response.status(), 200);
   assert.equal(response.body().ok, true);
   assert.equal(response.body().entryPackageReady, true);
+});
+
+test("health reports the exchange facts store without changing ok or the status", async () => {
+  const store = {} as ExchangeFactsStore;
+  for (const [exchangeFacts, expectedReason] of [
+    [{ status: "disabled" }, undefined],
+    [{ status: "enabled", store }, undefined],
+    [{ status: "unavailable", reason: "exchange_facts_driver_unavailable" }, "exchange_facts_driver_unavailable"],
+  ] as const) {
+    const response = makeResponse();
+    await handleSystemRoutes({
+      request: makeRequest("GET", "/health"),
+      response: response.response,
+      config: makeTestConfig(),
+      entryPackageReady: true,
+      exchangeFacts,
+    });
+
+    assert.equal(response.status(), 200);
+    assert.equal(response.body().ok, true);
+    assert.equal(response.body().exchangeFactsStore, exchangeFacts.status);
+    assert.equal(response.body().exchangeFactsStoreReason, expectedReason);
+    assert.equal("exchangeFactsStoreReason" in response.body(), expectedReason !== undefined);
+  }
 });
 
 function makeRequest(method: string, url: string): IncomingMessage {
