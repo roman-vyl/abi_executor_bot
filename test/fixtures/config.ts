@@ -9,6 +9,7 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     entryPackageCorrelationPath: "/tmp/abi-test-entry-package-correlation.jsonl",
     instrumentRulesCacheTtlMs: 300_000,
     bybitRequestTimeoutMs: 10_000,
+    bybitReadTimeoutMs: 1_500,
     bybitEnvironment: "testnet",
     bybitTestnet: true,
     bybitApiKey: "",

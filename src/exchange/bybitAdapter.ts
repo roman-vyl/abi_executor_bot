@@ -133,8 +133,8 @@ export class RestBybitAdapter implements BybitAdapter {
   }
 
   async getServerTime(): Promise<unknown> {
-    return timeBybitRequest("GET", "/v5/market/time", async () => {
-      const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal: this.timeoutSignal() });
+    return this.readWithRetry("/v5/market/time", async (signal) => {
+      const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal });
       return readBybitResponse(response);
     });
   }
@@ -292,9 +292,9 @@ export class RestBybitAdapter implements BybitAdapter {
       symbol,
     });
 
-    return timeBybitRequest("GET", "/v5/market/instruments-info", async () => {
+    return this.readWithRetry("/v5/market/instruments-info", async (signal) => {
       const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
-        signal: this.timeoutSignal(),
+        signal,
       });
       return readBybitResponse(response);
     });
@@ -302,9 +302,9 @@ export class RestBybitAdapter implements BybitAdapter {
 
   async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
     const params = new URLSearchParams({ category, symbol });
-    return timeBybitRequest("GET", "/v5/market/price-limit", async () => {
+    return this.readWithRetry("/v5/market/price-limit", async (signal) => {
       const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
-        signal: this.timeoutSignal(),
+        signal,
       });
       return readBybitResponse(response);
     });
@@ -335,14 +335,15 @@ export class RestBybitAdapter implements BybitAdapter {
       throw new Error("BYBIT_API_KEY and BYBIT_API_SECRET are required");
     }
 
-    const timestamp = String(Date.now());
     const queryString = params.toString();
-    const signaturePayload = `${timestamp}${this.config.bybitApiKey}${this.config.bybitRecvWindow}${queryString}`;
-    const signature = createHmac("sha256", this.config.bybitApiSecret)
-      .update(signaturePayload)
-      .digest("hex");
 
-    return timeBybitRequest("GET", path, async () => {
+    // Each attempt is signed with its own fresh timestamp.
+    return this.readWithRetry(path, async (signal) => {
+      const timestamp = String(Date.now());
+      const signaturePayload = `${timestamp}${this.config.bybitApiKey}${this.config.bybitRecvWindow}${queryString}`;
+      const signature = createHmac("sha256", this.config.bybitApiSecret)
+        .update(signaturePayload)
+        .digest("hex");
       const response = await fetch(`${this.baseUrl}${path}?${queryString}`, {
         method: "GET",
         headers: {
@@ -351,11 +352,27 @@ export class RestBybitAdapter implements BybitAdapter {
           "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
           "X-BAPI-SIGN": signature,
         },
-        signal: this.timeoutSignal(),
+        signal,
       });
 
       return readBybitResponse(response);
     });
+  }
+
+  // Read-only GET: a request that hangs past bybitReadTimeoutMs is cut and
+  // retried once at once with the same timeout. Any other error, or a second
+  // timeout, propagates unchanged. Never used for POST (order writes).
+  private async readWithRetry(path: string, request: (signal: AbortSignal) => Promise<unknown>): Promise<unknown> {
+    const attempt = () =>
+      timeBybitRequest("GET", path, () => request(AbortSignal.timeout(this.config.bybitReadTimeoutMs)));
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!isTimeoutError(error)) {
+        throw error;
+      }
+      return attempt();
+    }
   }
 
   private timeoutSignal(): AbortSignal {
@@ -391,6 +408,10 @@ export class RestBybitAdapter implements BybitAdapter {
       return readBybitResponse(response);
     });
   }
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.name === "TimeoutError";
 }
 
 function getBybitBaseUrl(config: AbiConfig): string {
