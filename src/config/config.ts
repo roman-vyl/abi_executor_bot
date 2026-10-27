@@ -6,6 +6,7 @@ export type AbiConfig = {
   entryPackageCorrelationPath: string;
   instrumentRulesCacheTtlMs: number;
   bybitRequestTimeoutMs: number;
+  bybitReadTimeoutMs: number;
   bybitEnvironment: "demo" | "testnet" | "mainnet";
   bybitTestnet: boolean;
   bybitApiKey: string;
@@ -50,6 +51,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
       300_000,
     ),
     bybitRequestTimeoutMs: readPositiveInt("ABI_BYBIT_REQUEST_TIMEOUT_MS", env.ABI_BYBIT_REQUEST_TIMEOUT_MS, 10_000),
+    // GET (read-only) requests only: a hung read is cut here and retried once.
+    bybitReadTimeoutMs: readPositiveInt("ABI_BYBIT_READ_TIMEOUT_MS", env.ABI_BYBIT_READ_TIMEOUT_MS, 1_500),
     bybitEnvironment,
     bybitTestnet: bybitEnvironment === "testnet",
     bybitApiKey,

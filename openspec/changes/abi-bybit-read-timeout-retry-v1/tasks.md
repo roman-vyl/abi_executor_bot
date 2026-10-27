@@ -1,9 +1,9 @@
 ## 1. abi_executor_bot
 
-- [ ] 1.1 Config `ABI_BYBIT_READ_TIMEOUT_MS` (default `1500`, positive integer, invalid fails startup); test fixture; README row.
-- [ ] 1.2 `RestBybitAdapter`: all GET requests (signed and public) use the read timeout through one private helper that repeats the request once on `TimeoutError`; signed GET signs each attempt; POST keeps `bybitRequestTimeoutMs` and no retry; each attempt wrapped in `timeBybitRequest`.
-- [ ] 1.3 Tests with a scripted `fetch`: hang then answer → answer returned after two calls; hang twice → `TimeoutError` after exactly two calls; non-timeout failure → one call; each signed attempt has its own timestamp and signal; public GET retried the same way; POST failing is not retried; POST slower than the read timeout is not cut; config default and override.
-- [ ] 1.4 `npm test`, `npm run typecheck`, `openspec validate --strict`.
+- [x] 1.1 Config `ABI_BYBIT_READ_TIMEOUT_MS` (default `1500`, positive integer, invalid fails startup); test fixture; README row.
+- [x] 1.2 `RestBybitAdapter`: all GET requests (signed and public) use the read timeout through one private helper that repeats the request once on `TimeoutError`; signed GET signs each attempt; POST keeps `bybitRequestTimeoutMs` and no retry; each attempt wrapped in `timeBybitRequest`.
+- [x] 1.3 Tests with a scripted `fetch`: hang then answer → answer returned after two calls; hang twice → `TimeoutError` after exactly two calls; non-timeout failure → one call; each signed attempt has its own timestamp and signal; public GET retried the same way; POST failing is not retried; POST slower than the read timeout is not cut; config default and override.
+- [x] 1.4 `npm test`, `npm run typecheck`, `openspec validate --strict`.
 
 ## 2. Rollout (on owner's word only)
 
