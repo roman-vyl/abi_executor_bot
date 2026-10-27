@@ -15,7 +15,7 @@ Owner decision 2026-10-27 10:19: change ABI only, Runtime untouched; GET timeout
 
 - Every Bybit GET request made by `RestBybitAdapter` (signed reads such as `/v5/order/realtime`, `/v5/order/history`, `/v5/position/list`, `/v5/execution/list`, wallet/account reads, and public reads `/v5/market/time`, `/v5/market/instruments-info`, `/v5/market/price-limit`) uses a read timeout `ABI_BYBIT_READ_TIMEOUT_MS`, default `1500`.
 - When such a GET ends with a timeout, the adapter repeats it once immediately with the same timeout (a signed GET is signed again with a fresh timestamp). Any other error is not retried. If the repeat also fails, its error propagates exactly as a failed read does today.
-- POST requests (order create, cancel, amend, cancel-all, position/leverage writes) keep `ABI_BYBIT_REQUEST_TIMEOUT_MS` (default `10000`) and are never retried.
+- POST requests (order create, cancel, amend, cancel-all) keep `ABI_BYBIT_REQUEST_TIMEOUT_MS` (default `10000`) and are never retried.
 - README lists the new variable.
 
 ## Non-goals
