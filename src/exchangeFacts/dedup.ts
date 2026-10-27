@@ -58,3 +58,16 @@ export function orderStateDedupKey(record: Record<string, unknown>, orderId: str
 export function executionDedupKey(execId: string): string {
   return `exec:${execId}`;
 }
+
+// Account snapshot keys, snapshot_key_version 1
+// (abi-exchange-stream-recorder-v1, design D7). Bybit's position seq is
+// per position update; wallet records carry no id, so the frame time and the
+// raw record identify one.
+export function positionSnapshotDedupKey(symbol: string, positionIdx: string, seq: string): string {
+  return `pos:${symbol}:${positionIdx}:${seq}`;
+}
+
+export function walletSnapshotDedupKey(accountType: string, frameCreationTimeMs: number, rawJson: string): string {
+  const digest = createHash("sha256").update(rawJson, "utf8").digest("hex");
+  return `wallet:${accountType}:${frameCreationTimeMs}:${digest}`;
+}

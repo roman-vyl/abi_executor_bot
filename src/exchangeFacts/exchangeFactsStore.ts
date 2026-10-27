@@ -2,8 +2,15 @@ import { createRequire } from "node:module";
 
 import type Database from "better-sqlite3";
 
-import { executionDedupKey, orderStateDedupKey } from "./dedup.js";
-import { DEDUP_KEY_VERSION, SCHEMA_DDL, SCHEMA_VERSION, STORAGE_SCHEMA } from "./schema.js";
+import { executionDedupKey, orderStateDedupKey, positionSnapshotDedupKey, walletSnapshotDedupKey } from "./dedup.js";
+import {
+  DEDUP_KEY_VERSION,
+  SCHEMA_DDL,
+  SCHEMA_V2_ADDITIONS_DDL,
+  SCHEMA_VERSION,
+  SNAPSHOT_KEY_VERSION,
+  STORAGE_SCHEMA,
+} from "./schema.js";
 
 // ABI-internal SQLite store of Bybit exchange facts and orderId -> trade
 // cycle links (abi-exchange-facts-sqlite-foundation-v1). Only the ABI process
@@ -31,7 +38,12 @@ export class ExchangeFactsOpenError extends Error {
   }
 }
 
-export type ExchangeFactsWriteErrorCode = "invalid_fact" | "invalid_link" | "link_conflict";
+export type ExchangeFactsWriteErrorCode =
+  | "invalid_fact"
+  | "invalid_snapshot"
+  | "invalid_log"
+  | "invalid_link"
+  | "link_conflict";
 
 export class ExchangeFactsWriteError extends Error {
   constructor(
@@ -72,6 +84,76 @@ export type StoredFact = {
   receivedAtMs: number;
   dedupKey: string;
   rawJson: string;
+};
+
+export type SnapshotKind = "position" | "wallet";
+
+// One position or wallet record (abi-exchange-stream-recorder-v1, design D7).
+export type SnapshotInput = {
+  kind: SnapshotKind;
+  source: FactSource;
+  // e.g. "ws:position"
+  sourceEndpoint: string;
+  rawJson: string;
+  receivedAtMs: number;
+  // The creationTime of the frame that carried a wallet record; wallet
+  // records have no time of their own.
+  frameCreationTimeMs?: number;
+};
+
+export type StoredSnapshot = {
+  snapshotSeq: number;
+  kind: SnapshotKind;
+  source: FactSource;
+  sourceEndpoint: string;
+  symbol: string | null;
+  exchangeTimeMs: number | null;
+  receivedAtMs: number;
+  dedupKey: string;
+  rawJson: string;
+};
+
+export type ConnectionLogEvent =
+  | "connecting"
+  | "connected"
+  | "auth_ok"
+  | "auth_failed"
+  | "subscribed"
+  | "subscribe_failed"
+  | "disconnected"
+  | "buffer_overflow";
+
+export const CONNECTION_LOG_EVENTS: readonly ConnectionLogEvent[] = [
+  "connecting",
+  "connected",
+  "auth_ok",
+  "auth_failed",
+  "subscribed",
+  "subscribe_failed",
+  "disconnected",
+  "buffer_overflow",
+];
+
+export type ConnectionLogInput = {
+  atMs: number;
+  event: ConnectionLogEvent;
+  connId: string | null;
+  detail: string | null;
+};
+
+export type StoredConnectionLog = ConnectionLogInput & { logSeq: number };
+
+// Everything one recorder flush writes, in one transaction.
+export type StreamBatch = {
+  facts: readonly FactInput[];
+  snapshots: readonly SnapshotInput[];
+  logs: readonly ConnectionLogInput[];
+};
+
+export type StreamBatchResult = {
+  facts: FactWriteResult;
+  snapshots: FactWriteResult;
+  logs: number;
 };
 
 export type LinkRole = "entry" | "close" | "stop_loss" | "take_profit";
@@ -137,6 +219,26 @@ type FactRow = {
   received_at_ms: number;
   dedup_key: string;
   raw_json: string;
+};
+
+type SnapshotRow = {
+  snapshot_seq: number;
+  snapshot_kind: SnapshotKind;
+  source: FactSource;
+  source_endpoint: string;
+  symbol: string | null;
+  exchange_time_ms: number | null;
+  received_at_ms: number;
+  dedup_key: string;
+  raw_json: string;
+};
+
+type LogRow = {
+  log_seq: number;
+  at_ms: number;
+  event: ConnectionLogEvent;
+  conn_id: string | null;
+  detail: string | null;
 };
 
 type LinkRow = {
@@ -216,7 +318,13 @@ export class ExchangeFactsStore {
 
   // One call = one transaction: every fact is stored or none (design D4, D7).
   writeFacts(facts: readonly FactInput[]): FactWriteResult {
-    const insert = this.db.prepare(
+    return this.writeStreamBatch({ facts, snapshots: [], logs: [] }).facts;
+  }
+
+  // One call = one transaction: every fact, snapshot and log row of a
+  // recorder flush is stored or none (abi-exchange-stream-recorder-v1 D5).
+  writeStreamBatch(batch: StreamBatch): StreamBatchResult {
+    const insertFact = this.db.prepare(
       `INSERT INTO exchange_facts (
          fact_kind, source, source_endpoint, symbol, order_id, order_link_id, parent_order_link_id,
          exec_id, exec_type, order_status, exchange_time_ms, received_at_ms, dedup_key, raw_json
@@ -225,16 +333,37 @@ export class ExchangeFactsStore {
          @exec_id, @exec_type, @order_status, @exchange_time_ms, @received_at_ms, @dedup_key, @raw_json
        ) ON CONFLICT(dedup_key) DO NOTHING`,
     );
+    const insertSnapshot = this.db.prepare(
+      `INSERT INTO account_snapshots (
+         snapshot_kind, source, source_endpoint, symbol, exchange_time_ms, received_at_ms, dedup_key, raw_json
+       ) VALUES (
+         @snapshot_kind, @source, @source_endpoint, @symbol, @exchange_time_ms, @received_at_ms, @dedup_key, @raw_json
+       ) ON CONFLICT(dedup_key) DO NOTHING`,
+    );
+    const insertLog = this.db.prepare(
+      "INSERT INTO stream_connection_log (at_ms, event, conn_id, detail) VALUES (@at_ms, @event, @conn_id, @detail)",
+    );
 
-    const run = this.db.transaction((items: readonly FactInput[]): FactWriteResult => {
-      let inserted = 0;
-      for (const fact of items) {
-        inserted += insert.run(toFactRow(fact)).changes;
+    const run = this.db.transaction((input: StreamBatch): StreamBatchResult => {
+      let factsInserted = 0;
+      for (const fact of input.facts) {
+        factsInserted += insertFact.run(toFactRow(fact)).changes;
       }
-      return { inserted, duplicates: items.length - inserted };
+      let snapshotsInserted = 0;
+      for (const snapshot of input.snapshots) {
+        snapshotsInserted += insertSnapshot.run(toSnapshotRow(snapshot)).changes;
+      }
+      for (const log of input.logs) {
+        insertLog.run(toLogRow(log));
+      }
+      return {
+        facts: { inserted: factsInserted, duplicates: input.facts.length - factsInserted },
+        snapshots: { inserted: snapshotsInserted, duplicates: input.snapshots.length - snapshotsInserted },
+        logs: input.logs.length,
+      };
     });
 
-    return run.immediate(facts);
+    return run.immediate(batch);
   }
 
   // One call = one transaction. link_conflict and invalid input abort the
@@ -339,6 +468,30 @@ export class ExchangeFactsStore {
     return rows.map(fromFactRow);
   }
 
+  readSnapshotsAfter(afterSnapshotSeq: number, limit: number): StoredSnapshot[] {
+    const rows = this.db
+      .prepare<[number, number], SnapshotRow>(
+        "SELECT * FROM account_snapshots WHERE snapshot_seq > ? ORDER BY snapshot_seq ASC LIMIT ?",
+      )
+      .all(afterSnapshotSeq, checkedLimit(limit));
+    return rows.map(fromSnapshotRow);
+  }
+
+  readConnectionLogAfter(afterLogSeq: number, limit: number): StoredConnectionLog[] {
+    const rows = this.db
+      .prepare<[number, number], LogRow>(
+        "SELECT * FROM stream_connection_log WHERE log_seq > ? ORDER BY log_seq ASC LIMIT ?",
+      )
+      .all(afterLogSeq, checkedLimit(limit));
+    return rows.map((row) => ({
+      logSeq: row.log_seq,
+      atMs: row.at_ms,
+      event: row.event,
+      connId: row.conn_id,
+      detail: row.detail,
+    }));
+  }
+
   readLinksAfter(afterLinkSeq: number, limit: number): StoredLink[] {
     const rows = this.db
       .prepare<[number, number], LinkRow>(
@@ -358,10 +511,12 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
   if (tables.length === 0) {
     db.transaction(() => {
       db.exec(SCHEMA_DDL);
+      db.exec(SCHEMA_V2_ADDITIONS_DDL);
       const setMeta = db.prepare("INSERT INTO schema_meta (key, value) VALUES (?, ?)");
       setMeta.run("storage_schema", STORAGE_SCHEMA);
       setMeta.run("schema_version", String(SCHEMA_VERSION));
       setMeta.run("dedup_key_version", String(DEDUP_KEY_VERSION));
+      setMeta.run("snapshot_key_version", String(SNAPSHOT_KEY_VERSION));
       setMeta.run("bybit_env", bybitEnvironment);
       setMeta.run("category", category);
     }).immediate();
@@ -390,7 +545,7 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
       `database schema_version ${version} is newer than ${SCHEMA_VERSION}`,
     );
   }
-  if (version !== SCHEMA_VERSION) {
+  if (version !== 1 && version !== SCHEMA_VERSION) {
     throw new ExchangeFactsOpenError("exchange_facts_unknown_database", "database schema_version is not recognized");
   }
 
@@ -405,6 +560,26 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
     throw new ExchangeFactsOpenError(
       "exchange_facts_environment_mismatch",
       `database belongs to ${meta.get("bybit_env")}/${meta.get("category")}, ABI runs ${bybitEnvironment}/${category}`,
+    );
+  }
+
+  if (version === 1) {
+    // Additive upgrade of an accepted version 1 file (design D7): every
+    // existing row stays; only the two new tables and versions are added.
+    db.transaction(() => {
+      db.exec(SCHEMA_V2_ADDITIONS_DDL);
+      db.prepare("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
+      db.prepare("INSERT INTO schema_meta (key, value) VALUES ('snapshot_key_version', ?)").run(
+        String(SNAPSHOT_KEY_VERSION),
+      );
+    }).immediate();
+    return;
+  }
+
+  if (meta.get("snapshot_key_version") !== String(SNAPSHOT_KEY_VERSION)) {
+    throw new ExchangeFactsOpenError(
+      "exchange_facts_dedup_rule_unknown",
+      "database snapshot_key_version is not recognized",
     );
   }
 }
@@ -478,6 +653,89 @@ function toFactRow(fact: FactInput): Omit<FactRow, "event_seq"> {
     order_status: identifier(item.orderStatus),
     exchange_time_ms: epochMs(updatedTime),
     dedup_key: orderStateDedupKey(item, orderId, updatedTime),
+  };
+}
+
+function toSnapshotRow(snapshot: SnapshotInput): Omit<SnapshotRow, "snapshot_seq"> {
+  if (snapshot.kind !== "position" && snapshot.kind !== "wallet") {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot kind must be position or wallet");
+  }
+  if (snapshot.source !== "ws" && snapshot.source !== "rest") {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot source must be ws or rest");
+  }
+  if (snapshot.sourceEndpoint.trim() === "") {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot sourceEndpoint must not be empty");
+  }
+  if (!Number.isSafeInteger(snapshot.receivedAtMs) || snapshot.receivedAtMs <= 0) {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot receivedAtMs must be a positive integer");
+  }
+
+  let record: unknown;
+  try {
+    record = JSON.parse(snapshot.rawJson);
+  } catch {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot rawJson is not valid JSON");
+  }
+  if (record === null || typeof record !== "object" || Array.isArray(record)) {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "snapshot rawJson must be one JSON object");
+  }
+  const item = record as Record<string, unknown>;
+
+  const base = {
+    snapshot_kind: snapshot.kind,
+    source: snapshot.source,
+    source_endpoint: snapshot.sourceEndpoint,
+    received_at_ms: snapshot.receivedAtMs,
+    raw_json: snapshot.rawJson,
+  };
+
+  if (snapshot.kind === "position") {
+    const symbol = identifier(item.symbol);
+    const seq = identifier(item.seq);
+    if (symbol === null || seq === null) {
+      throw new ExchangeFactsWriteError("invalid_snapshot", "position snapshot needs symbol and seq");
+    }
+    return {
+      ...base,
+      symbol,
+      exchange_time_ms: epochMs(item.updatedTime),
+      dedup_key: positionSnapshotDedupKey(symbol, identifier(item.positionIdx) ?? "", seq),
+    };
+  }
+
+  const frameTime = snapshot.frameCreationTimeMs;
+  if (frameTime === undefined || !Number.isSafeInteger(frameTime) || frameTime <= 0) {
+    throw new ExchangeFactsWriteError("invalid_snapshot", "wallet snapshot needs the frame creationTime");
+  }
+  return {
+    ...base,
+    symbol: null,
+    exchange_time_ms: frameTime,
+    dedup_key: walletSnapshotDedupKey(identifier(item.accountType) ?? "", frameTime, snapshot.rawJson),
+  };
+}
+
+function toLogRow(log: ConnectionLogInput): Omit<LogRow, "log_seq"> {
+  if (!CONNECTION_LOG_EVENTS.includes(log.event)) {
+    throw new ExchangeFactsWriteError("invalid_log", "unknown connection log event");
+  }
+  if (!Number.isSafeInteger(log.atMs) || log.atMs <= 0) {
+    throw new ExchangeFactsWriteError("invalid_log", "connection log atMs must be a positive integer");
+  }
+  return { at_ms: log.atMs, event: log.event, conn_id: log.connId, detail: log.detail };
+}
+
+function fromSnapshotRow(row: SnapshotRow): StoredSnapshot {
+  return {
+    snapshotSeq: row.snapshot_seq,
+    kind: row.snapshot_kind,
+    source: row.source,
+    sourceEndpoint: row.source_endpoint,
+    symbol: row.symbol,
+    exchangeTimeMs: row.exchange_time_ms,
+    receivedAtMs: row.received_at_ms,
+    dedupKey: row.dedup_key,
+    rawJson: row.raw_json,
   };
 }
 

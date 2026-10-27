@@ -2,7 +2,7 @@
 
 ### Requirement: Health reports the exchange stream
 `GET /health` SHALL include `exchangeStream` with `state` (`disabled`,
-`connecting`, `subscribed`, `backoff`), the disabled `reason` when disabled,
+`connecting`, `subscribed`, `backoff`, `stopped` during shutdown), the disabled `reason` when disabled,
 `connectedSinceMs`, `lastMessageAtMs`, `reconnects`, `bufferedRecords`,
 `droppedRecords` and `lastWriteError` when the last flush failed. The stream
 state SHALL NOT change `ok` or the HTTP status of `/health`. Recorder events
