@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import test from "node:test";
 
 import type { ExchangeFactsStore } from "../../src/exchangeFacts/exchangeFactsStore.js";
+import { disabledStreamStatus } from "../../src/exchangeStream/exchangeStreamRecorder.js";
 import { handleSystemRoutes } from "../../src/routes/systemRoutes.js";
 import { makeTestConfig } from "../fixtures/config.js";
 
@@ -18,6 +19,7 @@ test("health is ready only when entry-package execution is ready", async () => {
       config: makeTestConfig(),
       entryPackageReady: false,
       exchangeFacts: { status: "disabled" },
+      exchangeStream: disabledStreamStatus("store_not_enabled"),
     }),
     true,
   );
@@ -38,6 +40,7 @@ test("health remains successful when entry-package execution is ready", async ()
       config: makeTestConfig(),
       entryPackageReady: true,
       exchangeFacts: { status: "disabled" },
+      exchangeStream: disabledStreamStatus("store_not_enabled"),
     }),
     true,
   );
@@ -61,6 +64,7 @@ test("health reports the exchange facts store without changing ok or the status"
       config: makeTestConfig(),
       entryPackageReady: true,
       exchangeFacts,
+      exchangeStream: disabledStreamStatus("store_not_enabled"),
     });
 
     assert.equal(response.status(), 200);
@@ -69,6 +73,27 @@ test("health reports the exchange facts store without changing ok or the status"
     assert.equal(response.body().exchangeFactsStoreReason, expectedReason);
     assert.equal("exchangeFactsStoreReason" in response.body(), expectedReason !== undefined);
   }
+});
+
+test("health reports the exchange stream without changing ok or the status", async () => {
+  const response = makeResponse();
+  await handleSystemRoutes({
+    request: makeRequest("GET", "/health"),
+    response: response.response,
+    config: makeTestConfig(),
+    entryPackageReady: true,
+    exchangeFacts: { status: "enabled", store: {} as ExchangeFactsStore },
+    exchangeStream: { state: "backoff", reconnects: 3, bufferedRecords: 0, droppedRecords: 0 },
+  });
+
+  assert.equal(response.status(), 200);
+  assert.equal(response.body().ok, true);
+  assert.deepEqual(response.body().exchangeStream, {
+    state: "backoff",
+    reconnects: 3,
+    bufferedRecords: 0,
+    droppedRecords: 0,
+  });
 });
 
 function makeRequest(method: string, url: string): IncomingMessage {

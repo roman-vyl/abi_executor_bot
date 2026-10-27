@@ -12,5 +12,5 @@
 
 ## 2. Rollout (on owner's word only)
 
-- [ ] 2.1 PR and merge only on the owner's word; deploy with the store disabled (no behavior change).
-- [ ] 2.2 Enabling the store on the Mac demo is a separate step on the owner's word (env in `bbb_stack`).
+- [x] 2.1 PR and merge only on the owner's word; deploy with the store disabled (no behavior change). Done: PR #31 e3d598e, deployed disabled 2026-10-25 (bbb_stack #74).
+- [x] 2.2 Enabling the store on the Mac demo is a separate step on the owner's word (env in `bbb_stack`). Not done here: moved out of this change to the WebSocket recorder stage; the store stays disabled.

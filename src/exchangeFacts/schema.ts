@@ -3,8 +3,10 @@
 // contract: the future read-only HTTP API is the only one.
 
 export const STORAGE_SCHEMA = "abi-exchange-facts-storage";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const DEDUP_KEY_VERSION = 1;
+// Dedup rule of account_snapshots (abi-exchange-stream-recorder-v1, design D7).
+export const SNAPSHOT_KEY_VERSION = 1;
 
 export const SCHEMA_DDL = `
 CREATE TABLE schema_meta (
@@ -52,4 +54,30 @@ CREATE TABLE order_links (
 CREATE INDEX order_links_cycle         ON order_links(strategy_instance_id, trade_cycle_id);
 CREATE INDEX order_links_order_link_id ON order_links(order_link_id);
 CREATE INDEX order_links_parent_link   ON order_links(parent_order_link_id);
+`;
+
+// Added in schema_version 2 (abi-exchange-stream-recorder-v1, design D7).
+// A version 1 database gets exactly these statements when it is opened.
+export const SCHEMA_V2_ADDITIONS_DDL = `
+CREATE TABLE account_snapshots (
+  snapshot_seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_kind     TEXT NOT NULL CHECK (snapshot_kind IN ('position','wallet')),
+  source            TEXT NOT NULL CHECK (source IN ('ws','rest')),
+  source_endpoint   TEXT NOT NULL,
+  symbol            TEXT,
+  exchange_time_ms  INTEGER,
+  received_at_ms    INTEGER NOT NULL,
+  dedup_key         TEXT NOT NULL UNIQUE,
+  raw_json          TEXT NOT NULL
+);
+CREATE INDEX account_snapshots_symbol ON account_snapshots(symbol);
+
+CREATE TABLE stream_connection_log (
+  log_seq   INTEGER PRIMARY KEY AUTOINCREMENT,
+  at_ms     INTEGER NOT NULL,
+  event     TEXT NOT NULL CHECK (event IN ('connecting','connected','auth_ok','auth_failed',
+              'subscribed','subscribe_failed','disconnected','buffer_overflow')),
+  conn_id   TEXT,
+  detail    TEXT
+);
 `;

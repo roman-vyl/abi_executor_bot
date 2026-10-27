@@ -73,14 +73,15 @@ test("new database gets the schema and environment meta, and no -shm file while 
   db.close();
   assert.deepEqual(meta, {
     storage_schema: "abi-exchange-facts-storage",
-    schema_version: "1",
+    schema_version: "2",
     dedup_key_version: "1",
+    snapshot_key_version: "1",
     bybit_env: "demo",
     category: "linear",
   });
 });
 
-test("reopening a v1 database of the same environment keeps every row", (t) => {
+test("reopening a v2 database of the same environment keeps every row", (t) => {
   const dbPath = path.join(tempDir(t), "facts.sqlite3");
   const first = openDemo(dbPath);
   first.writeFacts([fact("order_state", ENTRY_ORDER_RECORD)]);
@@ -89,6 +90,57 @@ test("reopening a v1 database of the same environment keeps every row", (t) => {
   const second = openDemo(dbPath);
   assert.equal(second.readFactsAfter(0, 10).length, 1);
   second.close();
+});
+
+// Turns a fresh v2 file into the exact v1 layout (v1 tables, v1 meta).
+function downgradeToV1(dbPath: string): void {
+  const db = new Database(dbPath);
+  db.exec("DROP TABLE account_snapshots; DROP TABLE stream_connection_log;");
+  db.prepare("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'").run();
+  db.prepare("DELETE FROM schema_meta WHERE key = 'snapshot_key_version'").run();
+  db.close();
+}
+
+test("a v1 database is upgraded to v2 in place and keeps every row", (t) => {
+  const dbPath = path.join(tempDir(t), "facts.sqlite3");
+  const first = openDemo(dbPath);
+  first.writeFacts([fact("order_state", ENTRY_ORDER_RECORD), fact("execution", ENTRY_EXECUTION_RECORD)]);
+  first.close();
+  downgradeToV1(dbPath);
+
+  const upgraded = openDemo(dbPath);
+  assert.equal(upgraded.readFactsAfter(0, 10).length, 2);
+  upgraded.writeStreamBatch({
+    facts: [],
+    snapshots: [],
+    logs: [{ atMs: 1_793_100_000_000, event: "connecting", connId: null, detail: null }],
+  });
+  assert.equal(upgraded.readConnectionLogAfter(0, 10).length, 1);
+  upgraded.close();
+
+  const db = new Database(dbPath, { readonly: true });
+  const meta = Object.fromEntries(
+    db.prepare<[], { key: string; value: string }>("SELECT key, value FROM schema_meta").all().map((r) => [r.key, r.value]),
+  );
+  db.close();
+  assert.equal(meta.schema_version, "2");
+  assert.equal(meta.snapshot_key_version, "1");
+});
+
+test("a v1 database of another environment is refused and not upgraded", (t) => {
+  const dbPath = path.join(tempDir(t), "facts.sqlite3");
+  openDemo(dbPath).close();
+  downgradeToV1(dbPath);
+  assertOpenFails(dbPath, "mainnet", "exchange_facts_environment_mismatch");
+
+  const db = new Database(dbPath, { readonly: true });
+  const version = db.prepare<[], { value: string }>("SELECT value FROM schema_meta WHERE key = 'schema_version'").get();
+  const tables = db
+    .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'account_snapshots'")
+    .all();
+  db.close();
+  assert.equal(version?.value, "1");
+  assert.equal(tables.length, 0);
 });
 
 test("a database of another environment is refused and left unchanged", (t) => {
@@ -119,8 +171,9 @@ test("a file with tables but no schema_meta is refused", (t) => {
 test("a newer schema version and an unknown dedup rule are refused", (t) => {
   const dir = tempDir(t);
   for (const [key, value, reason] of [
-    ["schema_version", "2", "exchange_facts_schema_newer"],
+    ["schema_version", "3", "exchange_facts_schema_newer"],
     ["dedup_key_version", "2", "exchange_facts_dedup_rule_unknown"],
+    ["snapshot_key_version", "2", "exchange_facts_dedup_rule_unknown"],
   ] as const) {
     const dbPath = path.join(dir, `${key}.sqlite3`);
     openDemo(dbPath).close();
@@ -430,4 +483,70 @@ test("a repeated child is answered from its own orderId, not from its parent", (
     () => store.writeLinks([{ ...child, role: "take_profit" }]),
     (error: unknown) => error instanceof ExchangeFactsWriteError && error.code === "link_conflict",
   );
+});
+
+test("position and wallet snapshots are stored raw and deduplicated by their keys", (t) => {
+  const store = openDemo(path.join(tempDir(t), "facts.sqlite3"));
+  t.after(() => store.close());
+
+  const position = JSON.stringify({ symbol: "XRPUSDT", positionIdx: 0, seq: 140698842507866, size: "0", updatedTime: "1793105274204" });
+  const wallet = JSON.stringify({ accountType: "UNIFIED", totalEquity: "99876.5" });
+  const batch = {
+    facts: [],
+    snapshots: [
+      { kind: "position" as const, source: "ws" as const, sourceEndpoint: "ws:position", rawJson: position, receivedAtMs: 1_793_105_274_300 },
+      {
+        kind: "wallet" as const,
+        source: "ws" as const,
+        sourceEndpoint: "ws:wallet",
+        rawJson: wallet,
+        receivedAtMs: 1_793_105_274_300,
+        frameCreationTimeMs: 1_793_105_274_205,
+      },
+    ],
+    logs: [],
+  };
+  assert.deepEqual(store.writeStreamBatch(batch).snapshots, { inserted: 2, duplicates: 0 });
+  assert.deepEqual(store.writeStreamBatch(batch).snapshots, { inserted: 0, duplicates: 2 });
+
+  const stored = store.readSnapshotsAfter(0, 10);
+  assert.equal(stored[0].dedupKey, "pos:XRPUSDT:0:140698842507866");
+  assert.equal(stored[0].exchangeTimeMs, 1_793_105_274_204);
+  assert.equal(stored[0].rawJson, position);
+  assert.equal(stored[1].symbol, null);
+  assert.equal(stored[1].exchangeTimeMs, 1_793_105_274_205);
+  assert.match(stored[1].dedupKey, /^wallet:UNIFIED:1793105274205:[0-9a-f]{64}$/);
+
+  // The same balance in a later frame is a new snapshot.
+  store.writeStreamBatch({ ...batch, snapshots: [{ ...batch.snapshots[1], frameCreationTimeMs: 1_793_105_280_000 }] });
+  assert.equal(store.readSnapshotsAfter(0, 10).length, 3);
+});
+
+test("a stream batch with one invalid row stores nothing", (t) => {
+  const store = openDemo(path.join(tempDir(t), "facts.sqlite3"));
+  t.after(() => store.close());
+
+  assert.throws(
+    () =>
+      store.writeStreamBatch({
+        facts: [fact("execution", ENTRY_EXECUTION_RECORD, "ws")],
+        snapshots: [
+          { kind: "position", source: "ws", sourceEndpoint: "ws:position", rawJson: JSON.stringify({ symbol: "XRPUSDT" }), receivedAtMs: 1 },
+        ],
+        logs: [{ atMs: 1_793_100_000_000, event: "disconnected", connId: "c1", detail: "code=1006" }],
+      }),
+    (error: unknown) => error instanceof ExchangeFactsWriteError && error.code === "invalid_snapshot",
+  );
+  assert.equal(store.readFactsAfter(0, 10).length, 0);
+  assert.equal(store.readConnectionLogAfter(0, 10).length, 0);
+
+  const result = store.writeStreamBatch({
+    facts: [fact("execution", ENTRY_EXECUTION_RECORD, "ws")],
+    snapshots: [],
+    logs: [{ atMs: 1_793_100_000_000, event: "disconnected", connId: "c1", detail: "code=1006" }],
+  });
+  assert.deepEqual(result, { facts: { inserted: 1, duplicates: 0 }, snapshots: { inserted: 0, duplicates: 0 }, logs: 1 });
+  assert.deepEqual(store.readConnectionLogAfter(0, 10), [
+    { logSeq: 1, atMs: 1_793_100_000_000, event: "disconnected", connId: "c1", detail: "code=1006" },
+  ]);
 });

@@ -214,8 +214,8 @@ mounted to `/app/var` in the container, so the store survives container rebuilds
 ## Exchange facts store
 
 `abi-exchange-facts-sqlite-foundation-v1` adds an ABI-internal SQLite store of Bybit exchange
-facts (order records, executions) and orderId → trade cycle links. In this version nothing
-writes facts yet; the store only opens, checks and closes.
+facts (order records, executions) and orderId → trade cycle links. The exchange stream recorder
+(below) writes into it; nothing writes links yet.
 
 - Off by default. `ABI_EXCHANGE_FACTS_ENABLED=true` turns it on (only `true`/`false` are
   accepted). With it off ABI opens nothing, never loads the SQLite native driver and behaves as
@@ -240,6 +240,38 @@ writes facts yet; the store only opens, checks and closes.
 - No other process may open the file while ABI runs: not the `sqlite3` CLI on the Mac, not
   another container, not a backup tool. Copy the file (with its `-wal`) only with ABI stopped.
   Other services will read facts through a future read-only ABI HTTP API.
+
+## Exchange stream recorder
+
+`abi-exchange-stream-recorder-v1` records ABI's private Bybit WebSocket stream into the exchange
+facts store. It is read-only: it authenticates with ABI's key, subscribes to `order`,
+`execution`, `position` and `wallet`, and pings; it never sends an order request.
+
+- Runs only when the store is `enabled` and `BYBIT_API_KEY`/`BYBIT_API_SECRET` are set. URL by
+  `BYBIT_ENV`: demo `wss://stream-demo.bybit.com/v5/private`, testnet
+  `wss://stream-testnet.bybit.com/v5/private`, mainnet `wss://stream.bybit.com/v5/private`.
+- Every record is stored as received: `order` → `order_state` fact, `execution` → `execution`
+  fact, `position`/`wallet` → `account_snapshots`. Writes happen once per second (or per 500
+  records) in one transaction; duplicates after reconnects are dropped by the store's keys.
+- Coverage: `stream_connection_log` holds `connecting`, `connected`, `auth_ok`/`auth_failed`,
+  `subscribed`/`subscribe_failed`, `disconnected` (with `code=…` or `stale`) and
+  `buffer_overflow` rows. The stream is covered only between a `subscribed` row and the next
+  `disconnected` row; Bybit does not replay what was sent while disconnected (later REST
+  recovery fills those gaps).
+- Reconnects forever after 1, 2, 5, 10, 30 s, then every 30 s; a connection with no frame for
+  60 s is closed as `stale`.
+- Never stops trading. Failures are emitted (`exchange_stream_disconnected`,
+  `exchange_stream_auth_failed`, `exchange_stream_subscribe_failed`,
+  `exchange_stream_write_failed`, `exchange_stream_record_rejected`,
+  `exchange_stream_frame_invalid`; no secrets, no payloads) and shown in `GET /health`
+  `exchangeStream` (`state`, `connectedSinceMs`, `lastMessageAtMs`, `reconnects`,
+  `bufferedRecords`, `droppedRecords`, `lastWriteError`). At most 10 000 records wait in memory
+  while the store fails; more are dropped and counted.
+- On Bybit Demo, funding settlements are booked but were not pushed on the WS `execution`
+  topic (stage 0, 2026-10-27); funding comes only from REST.
+- Schema version 2 adds `account_snapshots` and `stream_connection_log`; a version 1 file is
+  upgraded in place at the first start. An older ABI image refuses a version 2 file
+  (`exchange_facts_schema_newer`) and runs without the journal.
 
 ## Read-only sandbox smoke
 

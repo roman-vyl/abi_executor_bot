@@ -4,6 +4,7 @@ import { KeyedMutex } from "../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../config/config.js";
 import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCorrelationRepository.js";
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
+import { createExchangeStreamRecorder } from "../exchangeStream/exchangeStreamStartup.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
 import { emitEvent } from "../observability/events.js";
@@ -31,6 +32,9 @@ import { handleSystemRoutes } from "../routes/systemRoutes.js";
 // The exchange facts store is opened by the caller before anything listens;
 // nothing in order execution uses it.
 export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState): void {
+  // Read-only private stream recorder; runs only with an enabled store and a
+  // key, and never touches order execution (abi-exchange-stream-recorder-v1).
+  const exchangeStream = createExchangeStreamRecorder(config, exchangeFacts);
 
   const bybit = new RestBybitAdapter(config);
 
@@ -116,6 +120,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         config,
         entryPackageReady: readiness.isReady,
         exchangeFacts,
+        exchangeStream: exchangeStream.status(),
       })) {
       return;
     }
@@ -178,9 +183,13 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     emitEvent("info", "server_listening", { host: config.host, port: config.port });
   });
 
+  exchangeStream.start();
+
   installShutdownHandlers({
     server,
     onServerClosed: () => {
+      // The recorder writes its last buffered records before the store closes.
+      exchangeStream.stop();
       if (exchangeFacts.status === "enabled") {
         exchangeFacts.store.close();
       }
