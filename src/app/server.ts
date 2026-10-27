@@ -17,7 +17,7 @@ import { EntryPackageApplicationService } from "../services/entryPackage/entryPa
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
-import { openExchangeFactsStoreOrExit } from "./exchangeFactsStartup.js";
+import type { ExchangeFactsStoreState } from "./exchangeFactsStartup.js";
 import { writeJson } from "./http.js";
 import { replayCorrelationStore } from "./lifecycleEvents.js";
 import { installShutdownHandlers } from "./shutdown.js";
@@ -28,9 +28,9 @@ import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
 import { handlePositionManagementRoutes } from "../routes/positionManagementRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
-export function startServer(config: AbiConfig): void {
-  // Opened before anything listens; nothing in order execution uses it yet.
-  const exchangeFactsStore = openExchangeFactsStoreOrExit(config);
+// The exchange facts store is opened by the caller before anything listens;
+// nothing in order execution uses it.
+export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState): void {
 
   const bybit = new RestBybitAdapter(config);
 
@@ -110,7 +110,13 @@ export function startServer(config: AbiConfig): void {
   });
 
   const server = createServer(async (request, response) => {
-    if (await handleSystemRoutes({ request, response, config, entryPackageReady: readiness.isReady })) {
+    if (await handleSystemRoutes({
+        request,
+        response,
+        config,
+        entryPackageReady: readiness.isReady,
+        exchangeFacts,
+      })) {
       return;
     }
 
@@ -172,5 +178,12 @@ export function startServer(config: AbiConfig): void {
     emitEvent("info", "server_listening", { host: config.host, port: config.port });
   });
 
-  installShutdownHandlers({ server, onServerClosed: () => exchangeFactsStore?.close() });
+  installShutdownHandlers({
+    server,
+    onServerClosed: () => {
+      if (exchangeFacts.status === "enabled") {
+        exchangeFacts.store.close();
+      }
+    },
+  });
 }
