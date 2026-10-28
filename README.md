@@ -895,8 +895,11 @@ Configuration читается из environment.
 ключ, неверное значение, `touch_trigger` без типа или другая ошибка чтения — ABI не стартует. Вход на Bybit:
 `ema_anchor` — условный Market (`triggerPrice`, `triggerDirection`, `triggerBy`), как раньше; `touch_trigger` +
 `market` — обычный Market без этих трёх полей, остальное (SL/TP Partial Market, `orderLinkId`) то же самое;
-`touch_trigger` + `limit` — ABI не стартует до ABI-2. Перед включением `touch_trigger` в торговлю обязательна проверка
-на Bybit Demo (дочерние SL/TP, скорость исполнения, частичное исполнение).
+`touch_trigger` + `limit` — обычный GTC Limit по `planned_entry_price`, выровненной по `tickSize` (цена на сетке не
+меняется; иначе long вверх, short вниз), без полей триггера, остальное как у `market`. Ограничения V1: остаток
+частично исполненного Limit остаётся активным (ABI его не снимает); предполагается одна пара SL/TP на вход. Перед
+включением `touch_trigger` в торговлю обязательна проверка на Bybit Demo (дочерние SL/TP, скорость исполнения,
+частичное исполнение).
 
 `BYBIT_ENV` — preferred explicit environment selector.
 

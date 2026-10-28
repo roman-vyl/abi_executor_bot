@@ -1,5 +1,6 @@
 import type { AbiConfig } from "../config/config.js";
 import { mapEntryOrderSemantics } from "../domain/entryOrderSemantics.js";
+import { ceilToStep, floorToStep } from "../domain/exactDecimal.js";
 import type { PositionBindingGeometry, PositionDirection } from "../domain/positionScope.js";
 export type { PositionBindingGeometry } from "../domain/positionScope.js";
 
@@ -22,10 +23,13 @@ export type BybitCreateOrderPayload = {
   category: string;
   symbol: string;
   side: BybitOrderSide;
-  orderType: "Market";
+  orderType: "Market" | "Limit";
   qty: string;
-  // Present only on the conditional ema_anchor entry; a touch_trigger market
-  // entry omits all three (abi-touch-trigger-market-entry-v1).
+  // Only on the touch_trigger limit entry (abi-touch-trigger-limit-entry-v1).
+  price?: string;
+  timeInForce?: "GTC";
+  // Present only on the conditional ema_anchor entry; touch_trigger market and
+  // limit entries omit all three (abi-touch-trigger-market-entry-v1).
   triggerPrice?: string;
   triggerDirection?: BybitTriggerDirection;
   triggerBy?: string;
@@ -136,6 +140,9 @@ export type EntryPackageOrderInput = {
   qty: string;
   orderLinkId: string;
   binding?: PositionBindingGeometry;
+  // touch_trigger limit only: planned_entry_price already aligned to the
+  // instrument tickSize by the caller (alignEntryLimitPrice).
+  entryLimitPrice?: string;
 };
 
 export type EntryPackageOrderPayloads = {
@@ -155,15 +162,19 @@ export function mapEntryPackageToBybit(
   input: EntryPackageOrderInput,
 ): EntryPackageOrderPayloads {
   const semantics = mapEntryOrderSemantics(input.side);
-  const conditional = isConditionalEntry(config);
+  const shape = entryOrderShape(config);
+  if (shape === "limit" && input.entryLimitPrice === undefined) {
+    throw new Error("touch_trigger limit entry requires an aligned entry limit price");
+  }
 
   const createEntryOrder: BybitCreateOrderPayload = {
     category: input.category,
     symbol: input.symbol,
     side: semantics.exchangeSide,
-    orderType: "Market",
+    orderType: shape === "limit" ? "Limit" : "Market",
     qty: input.qty,
-    ...(conditional
+    ...(shape === "limit" ? { price: input.entryLimitPrice, timeInForce: "GTC" as const } : {}),
+    ...(shape === "conditional"
       ? {
           triggerPrice: input.plannedEntryPrice,
           triggerDirection: mapTriggerDirection(semantics.triggerDirection),
@@ -186,8 +197,18 @@ export function mapEntryPackageToBybit(
     createEntryOrder.positionIdx = encodeBybitPositionIdx(input.binding);
   }
 
+  return { createEntryOrder, ...mapEntryPackageQueryPayloads(input) };
+}
+
+// The cancel/query half of mapEntryPackageToBybit, for paths that never send
+// a create (repeat-PUT revalidation, metadata-only update) and so need no
+// entry limit price.
+export function mapEntryPackageQueryPayloads(input: {
+  symbol: string;
+  category: "linear" | "spot";
+  orderLinkId: string;
+}): Omit<EntryPackageOrderPayloads, "createEntryOrder"> {
   return {
-    createEntryOrder,
     cancelEntryOrder: {
       category: input.category,
       symbol: input.symbol,
@@ -206,6 +227,13 @@ export function mapEntryPackageToBybit(
       limit: "1",
     },
   };
+}
+
+// Aligns planned_entry_price to the tickSize grid for a touch_trigger limit
+// entry: an on-grid price is kept, otherwise a long rounds up and a short
+// rounds down (a slightly worse price for a better fill chance), no offset.
+export function alignEntryLimitPrice(plannedEntryPrice: string, tickSize: string, side: "long" | "short"): string {
+  return side === "long" ? ceilToStep(plannedEntryPrice, tickSize) : floorToStep(plannedEntryPrice, tickSize);
 }
 
 export function mapPositionSideToCloseSide(side: string): BybitOrderSide {
@@ -249,16 +277,15 @@ export function readBybitOrderId(response: unknown): string | null {
   return typeof orderId === "string" && orderId !== "" ? orderId : null;
 }
 
-// ema_anchor keeps the conditional Market entry. touch_trigger + market is a
-// plain Market entry: Engine already confirmed the signal at the touch-bar
-// close, so no exchange trigger is sent. Any other touch_trigger order type is
-// refused at startup by loadConfig; this throw guards configs built elsewhere.
-function isConditionalEntry(config: AbiConfig): boolean {
+// ema_anchor keeps the conditional Market entry. touch_trigger sends no
+// exchange trigger (Engine already confirmed the signal at the touch-bar
+// close): a plain Market, or a GTC Limit at the aligned planned price.
+export function entryOrderShape(config: AbiConfig): "conditional" | "market" | "limit" {
   if (config.liveEntryMode === "ema_anchor") {
-    return true;
+    return "conditional";
   }
-  if (config.touchTriggerEntryOrderType === "market") {
-    return false;
+  if (config.touchTriggerEntryOrderType === "market" || config.touchTriggerEntryOrderType === "limit") {
+    return config.touchTriggerEntryOrderType;
   }
   throw new Error(`touch_trigger entry order type ${String(config.touchTriggerEntryOrderType)} is not supported`);
 }

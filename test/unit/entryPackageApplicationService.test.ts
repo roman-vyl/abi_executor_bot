@@ -189,6 +189,84 @@ test("touch_trigger market APPLY with the remainder cancelled after a partial fi
   }, TOUCH_TRIGGER_MARKET);
 });
 
+const TOUCH_TRIGGER_LIMIT: Partial<AbiConfig> = { liveEntryMode: "touch_trigger", touchTriggerEntryOrderType: "limit" };
+
+test("touch_trigger limit APPLY sends a GTC Limit at the tick-aligned planned price", async () => {
+  await withService(async ({ service, bybit, repo, rulesProvider }) => {
+    rulesProvider.defaultRules = { ...rulesProvider.defaultRules, tickSize: "0.1" };
+    bybit.orderByLinkIdResponse = orderList([liveOrder({ triggerPrice: "0" })]);
+
+    const result = await service.apply(
+      makeCommand({ desiredEntry: makeDesiredEntry({ side: "long", planned_entry_price: "100000.03" }) }),
+    );
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    const payload = bybit.createOrderCalls[0]! as Record<string, unknown>;
+    assert.equal(payload.orderType, "Limit");
+    assert.equal(payload.price, "100000.1");
+    assert.equal(payload.timeInForce, "GTC");
+    for (const key of ["triggerPrice", "triggerDirection", "triggerBy"]) {
+      assert.equal(key in payload, false, key);
+    }
+    assert.equal(payload.tpslMode, "Partial");
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "applied");
+    assert.equal(repo.get("instance-1", "cycle-1")?.desired_entry?.planned_entry_price, "100000.03");
+  }, TOUCH_TRIGGER_LIMIT);
+});
+
+test("touch_trigger limit APPLY that is PartiallyFilled at confirmation is applied with the filled quantity and no cancel", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      { ...liveOrder({ orderStatus: "PartiallyFilled", triggerPrice: "0" }), cumExecQty: "0.0004", avgPrice: "100000" },
+    ]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.cancelOrderCalls.length, 0);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied");
+    assert.equal(record?.early_execution_observation?.order_status, "PartiallyFilled");
+    assert.equal(record?.early_execution_observation?.cumulative_filled_qty, "0.0004");
+  }, TOUCH_TRIGGER_LIMIT);
+});
+
+test("touch_trigger limit APPLY with an immediate full fill is applied", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      { ...liveOrder({ orderStatus: "Filled", triggerPrice: "0" }), cumExecQty: "0.001", avgPrice: "99999.5" },
+    ]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    assert.equal(repo.get("instance-1", "cycle-1")?.early_execution_observation?.cumulative_filled_qty, "0.001");
+  }, TOUCH_TRIGGER_LIMIT);
+});
+
+test("touch_trigger limit APPLY fails before the exchange when the limit-price rules lookup fails", async () => {
+  await withService(async ({ service, bybit, repo, rulesProvider }) => {
+    const original = rulesProvider.getRules.bind(rulesProvider);
+    let calls = 0;
+    rulesProvider.getRules = async (symbol, category) => {
+      calls += 1;
+      if (calls > 1) {
+        throw new Error("instruments-info down");
+      }
+      return original(symbol, category);
+    };
+
+    const result = await service.apply(makeCommand());
+
+    assert.equal(result.statusCode, 500);
+    assert.equal(result.diagnostic?.failure_stage, "quantity_calculation");
+    assert.match(result.diagnostic?.error_cause ?? "", /^entry_limit_price: /);
+    assert.equal(bybit.createOrderCalls.length, 0);
+    assert.equal(repo.get("instance-1", "cycle-1")?.status, "absent");
+  }, TOUCH_TRIGGER_LIMIT);
+});
+
 test("a repeat PUT returns the order values from its own fresh read", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);
@@ -1989,6 +2067,7 @@ async function withService(
       mutex,
       scopeMutex,
       exchangeInstrumentResolver,
+      tradingRules: rulesProvider,
     });
 
     await fn({ service, bybit, repo, rulesProvider });

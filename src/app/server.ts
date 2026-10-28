@@ -62,6 +62,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     mutex,
     scopeMutex,
     exchangeInstrumentResolver,
+    tradingRules: rulesProvider,
   });
 
   const openPositionResolutionService = new OpenPositionResolutionService({

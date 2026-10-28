@@ -32,8 +32,15 @@ import {
 import { effectivePositionBindingMode } from "../../domain/positionBindingPolicy.js";
 import type { BybitAdapter } from "../../exchange/bybitAdapter.js";
 import type { EntryPackageOrderPayloads } from "../../exchange/bybitOrderMapper.js";
-import { mapEntryPackageToBybit, readBybitOrderId } from "../../exchange/bybitOrderMapper.js";
+import {
+  alignEntryLimitPrice,
+  entryOrderShape,
+  mapEntryPackageQueryPayloads,
+  mapEntryPackageToBybit,
+  readBybitOrderId,
+} from "../../exchange/bybitOrderMapper.js";
 import type { ExchangeInstrumentCategory, ExchangeInstrumentResolver } from "../../exchange/exchangeInstrumentResolver.js";
+import type { InstrumentTradingRulesProvider } from "../../exchange/instrumentTradingRulesProvider.js";
 import { cancelEntryOrder, executeEntryOrder } from "../../execution/execution.js";
 import type { PositionSizeCalculator, PositionSizeDeclineReason } from "../../risk/positionSizeCalculator.js";
 import type { PackageConfirmationOutcome } from "./packageConfirmation.js";
@@ -77,6 +84,11 @@ export type EntryPackageApplicationServiceDeps = {
   // (createOrder) — every other branch reuses the identity already stored
   // on the correlation record instead of re-resolving.
   exchangeInstrumentResolver: ExchangeInstrumentResolver;
+  // The same trading-rules instance position sizing uses; read only for the
+  // touch_trigger limit entry price (abi-touch-trigger-limit-entry-v1).
+  // Production always wires it; without it a limit entry fails before the
+  // exchange boundary.
+  tradingRules?: InstrumentTradingRulesProvider;
 };
 
 // Set by createOrder() immediately before the provisional pending_create write
@@ -480,6 +492,21 @@ export class EntryPackageApplicationService {
       return diagnosedInternalErrorResult("quantity_calculation", describeErrorCause(error));
     }
 
+    let entryLimitPrice: string | undefined;
+    if (entryOrderShape(this.deps.config) === "limit") {
+      try {
+        if (this.deps.tradingRules === undefined) {
+          throw new Error("trading rules provider is not configured");
+        }
+        const rules = await this.deps.tradingRules.getRules(identity.symbol, identity.category);
+        entryLimitPrice = alignEntryLimitPrice(desiredEntry.planned_entry_price, rules.tickSize, desiredEntry.side);
+      } catch (error) {
+        // Same pre-boundary stage as sizing, which reads the same trading
+        // rules; the cause names the limit-price step.
+        return diagnosedInternalErrorResult("quantity_calculation", `entry_limit_price: ${describeErrorCause(error)}`);
+      }
+    }
+
     const now = new Date().toISOString();
     // If this is a retry of the same not-yet-confirmed binding (same
     // generation as priorRecord), preserve the binding's real start time
@@ -610,6 +637,7 @@ export class EntryPackageApplicationService {
       qty: calculatedQuantity,
       orderLinkId,
       binding: requirePositionBindingGeometry(provisional),
+      entryLimitPrice,
     });
 
     let executionResult;
@@ -659,16 +687,10 @@ export class EntryPackageApplicationService {
       return this.createOrder(command, desiredEntry, record, record.generation > 0 ? record.generation : 1);
     }
 
-    const payloads = mapEntryPackageToBybit(this.deps.config, {
+    const payloads = mapEntryPackageQueryPayloads({
       symbol: record.exchange_symbol,
       category: requireCategory(record.exchange_category),
-      side: desiredEntry.side,
-      plannedEntryPrice: desiredEntry.planned_entry_price,
-      initialStopPrice: desiredEntry.initial_stop_price,
-      initialTakePrice: desiredEntry.initial_take_price,
-      qty: record.calculated_quantity ?? "0",
       orderLinkId: record.order_link_id,
-      binding: requirePositionBindingGeometry(record),
     });
 
     const confirmation = await confirmEntryPackage({
@@ -746,16 +768,10 @@ export class EntryPackageApplicationService {
       return this.createOrder(command, desiredEntry, updated, updated.generation > 0 ? updated.generation : 1);
     }
 
-    const payloads = mapEntryPackageToBybit(this.deps.config, {
+    const payloads = mapEntryPackageQueryPayloads({
       symbol: updated.exchange_symbol,
       category: requireCategory(updated.exchange_category),
-      side: desiredEntry.side,
-      plannedEntryPrice: desiredEntry.planned_entry_price,
-      initialStopPrice: desiredEntry.initial_stop_price,
-      initialTakePrice: desiredEntry.initial_take_price,
-      qty: updated.calculated_quantity ?? "0",
       orderLinkId: updated.order_link_id,
-      binding: requirePositionBindingGeometry(updated),
     });
 
     const confirmation = await confirmEntryPackage({
