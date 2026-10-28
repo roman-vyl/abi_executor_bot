@@ -878,6 +878,7 @@ Configuration читается из environment.
 | `ABI_BYBIT_READ_TIMEOUT_MS` | `1500` | таймаут GET-запросов (только чтение); при таймауте один немедленный повтор с тем же таймаутом |
 | `ABI_DIAGNOSTICS_PATH` | empty (off) | временная диагностика: JSONL-файл, по строке на операцию (open-position и др.) с временем каждого запроса к Bybit и причиной internal_error; на поведение не влияет, ошибки записи игнорируются |
 | `ABI_POSITION_SIZING_MODE` | `minimum` | `minimum` or `risk` (risk percent of `totalWalletBalance`, needs API keys) |
+| `ABI_CONFIG_PATH` | empty (no file) | JSON-файл режима входа, читается один раз при старте (см. ниже) |
 | `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |
 | `BYBIT_API_KEY` | empty | Bybit API key |
@@ -887,6 +888,12 @@ Configuration читается из environment.
 | `BYBIT_CATEGORY` | `linear` | default category for paths that use global config |
 | `BYBIT_SETTLE_COIN` | `USDT` | settle coin |
 | `BYBIT_TRIGGER_BY` | `LastPrice` | trigger source |
+
+Файл `ABI_CONFIG_PATH` ([`config/abi.example.json`](config/abi.example.json)) — JSON-объект с ключами
+`live_entry_mode` (`ema_anchor` по умолчанию или `touch_trigger`) и `touch_trigger_entry_order_type` (`market` или
+`limit`, обязателен в `touch_trigger`). Нет переменной или файла — `ema_anchor`. Битый JSON, не объект, неизвестный
+ключ, неверное значение, `touch_trigger` без типа или другая ошибка чтения — ABI не стартует. Значения пока ничего не
+меняют в исполнении ордеров; до ABI-1 `touch_trigger` на торговом стеке не включать.
 
 `BYBIT_ENV` — preferred explicit environment selector.
 

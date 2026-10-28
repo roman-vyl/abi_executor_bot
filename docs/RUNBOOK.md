@@ -156,6 +156,27 @@ otherwise `blockedReasons` lists what is missing.
 - A refusal is logged as `entry_package_declined` with its reason and returned to Runtime as `200 entry_package_declined`.
 - The mode is shown in the `service_starting` event (`positionSizingMode`).
 
+## Live-entry configuration file
+
+`ABI_CONFIG_PATH` names an optional JSON file read once at start (stack:
+`BBB_data/abi/config/abi.json`). Example: [`config/abi.example.json`](../config/abi.example.json).
+
+```json
+{
+  "live_entry_mode": "touch_trigger",
+  "touch_trigger_entry_order_type": "market"
+}
+```
+
+- `live_entry_mode`: `ema_anchor` (default) or `touch_trigger`.
+- `touch_trigger_entry_order_type`: `market` or `limit`; required with `touch_trigger`, optional (validated) with
+  `ema_anchor`.
+- Unset variable or missing file = `ema_anchor`. Invalid JSON, a root that is not an object (`[]`, `null`), an unknown
+  key, a value outside the list, `touch_trigger` without an order type, or any other read error stops startup.
+- To switch, edit the file and restart ABI.
+- The values change no order placement yet (abi-live-entry-mode-config-v1). Do not enable `touch_trigger` on a
+  trading stack before ABI-1.
+
 ## Linear position binding mode and Hedge Mode activation
 
 `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` is ABI's internal expected geometry for newly created

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 export type AbiConfig = {
   host: string;
   port: number;
@@ -20,15 +22,31 @@ export type AbiConfig = {
   positionSizingMode: PositionSizingMode;
   exchangeFactsEnabled: boolean;
   exchangeFactsDbPath: string;
+  // Read once at start from the optional ABI_CONFIG_PATH JSON file
+  // (abi-live-entry-mode-config-v1); nothing depends on them yet.
+  liveEntryMode: LiveEntryMode;
+  touchTriggerEntryOrderType: TouchTriggerEntryOrderType | null;
 };
 
 export type PositionSizingMode = "minimum" | "risk";
+export type LiveEntryMode = "ema_anchor" | "touch_trigger";
+export type TouchTriggerEntryOrderType = "market" | "limit";
+
+type LiveEntryConfig = {
+  liveEntryMode: LiveEntryMode;
+  touchTriggerEntryOrderType: TouchTriggerEntryOrderType | null;
+};
+
+const LIVE_ENTRY_MODES: readonly LiveEntryMode[] = ["ema_anchor", "touch_trigger"];
+const TOUCH_TRIGGER_ENTRY_ORDER_TYPES: readonly TouchTriggerEntryOrderType[] = ["market", "limit"];
+const CONFIG_FILE_KEYS = new Set(["live_entry_mode", "touch_trigger_entry_order_type"]);
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
   const bybitEnvironment = readBybitEnvironment(env);
   const bybitApiKey = env.BYBIT_API_KEY?.trim() ?? "";
   const bybitApiSecret = env.BYBIT_API_SECRET?.trim() ?? "";
   const positionSizingMode = readPositionSizingMode(env.ABI_POSITION_SIZING_MODE);
+  const liveEntryConfig = readLiveEntryConfigFile(env.ABI_CONFIG_PATH);
   // Risk sizing reads the wallet balance on every entry, so it cannot run
   // without credentials — also in dry-run, where those reads still happen.
   if (positionSizingMode === "risk" && (bybitApiKey === "" || bybitApiSecret === "")) {
@@ -72,7 +90,67 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
       env.ABI_EXCHANGE_FACTS_DB_PATH,
       `./var/abi_exchange_facts_${bybitEnvironment}.sqlite3`,
     ),
+    liveEntryMode: liveEntryConfig.liveEntryMode,
+    touchTriggerEntryOrderType: liveEntryConfig.touchTriggerEntryOrderType,
   };
+}
+
+function readLiveEntryConfigFile(pathValue: string | undefined): LiveEntryConfig {
+  const defaults: LiveEntryConfig = { liveEntryMode: "ema_anchor", touchTriggerEntryOrderType: null };
+  const path = pathValue?.trim() ?? "";
+  if (path === "") {
+    return defaults;
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    // Only a missing file means "no configuration"; any other read failure stops startup.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return defaults;
+    }
+    throw new Error(`ABI_CONFIG_PATH file ${path} cannot be read: ${(error as Error).message}`);
+  }
+
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`ABI_CONFIG_PATH file ${path} is not valid JSON: ${(error as Error).message}`);
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error(`ABI_CONFIG_PATH file ${path} must contain a JSON object`);
+  }
+
+  const values = data as Record<string, unknown>;
+  const unknown = Object.keys(values).filter((key) => !CONFIG_FILE_KEYS.has(key)).sort();
+  if (unknown.length > 0) {
+    throw new Error(`ABI_CONFIG_PATH file ${path} has unknown keys: ${unknown.join(", ")}`);
+  }
+
+  const liveEntryMode = readAllowed("live_entry_mode", values.live_entry_mode, LIVE_ENTRY_MODES) ?? "ema_anchor";
+  const touchTriggerEntryOrderType = readAllowed(
+    "touch_trigger_entry_order_type",
+    values.touch_trigger_entry_order_type,
+    TOUCH_TRIGGER_ENTRY_ORDER_TYPES,
+  );
+  if (liveEntryMode === "touch_trigger" && touchTriggerEntryOrderType === null) {
+    throw new Error("touch_trigger_entry_order_type is required when live_entry_mode is touch_trigger");
+  }
+
+  return { liveEntryMode, touchTriggerEntryOrderType };
+}
+
+function readAllowed<T extends string>(name: string, value: unknown, allowed: readonly T[]): T | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
+  }
+
+  return value as T;
 }
 
 function readPositionSizingMode(value: string | undefined): PositionSizingMode {
