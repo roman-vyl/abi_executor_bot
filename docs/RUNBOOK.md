@@ -178,7 +178,13 @@ otherwise `blockedReasons` lists what is missing.
   - `ema_anchor`: conditional Market with `triggerPrice`, `triggerDirection`, `triggerBy` (unchanged).
   - `touch_trigger` + `market`: plain Market, the same request without those three fields; Partial Market SL/TP,
     `orderLinkId`, correlation, confirmation and recovery are unchanged.
-  - `touch_trigger` + `limit`: startup fails until limit entry exists (ABI-2).
+  - `touch_trigger` + `limit` (abi-touch-trigger-limit-entry-v1): `orderType: Limit`, `timeInForce: GTC`, `price` =
+    `planned_entry_price` aligned to the instrument `tickSize` (on-grid kept; otherwise long up, short down; no
+    offset), no trigger fields; everything else as `market`.
+  - Limit V1 limitations: the remainder of a partially filled Limit stays live (ABI never cancels it; it ends by
+    filling, a Runtime CANCEL/REPLACE, or close execution); exactly one native SL/TP pair per entry is assumed (more
+    = ambiguous attribution, protection changes fail closed). Count children per parent in the exchange-facts store
+    (`order_links`, roles `stop_loss` / `take_profit` by `parent_order_link_id`).
 - Do not enable `touch_trigger` on a trading stack before the Bybit Demo check (Partial SL/TP children linked by
   `parentOrderLinkId`, fill and child timing, partial Market fill reporting).
 

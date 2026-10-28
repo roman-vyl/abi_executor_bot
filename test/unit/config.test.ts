@@ -209,6 +209,15 @@ test("live entry config reads touch_trigger with market", () => {
   assert.equal(config.touchTriggerEntryOrderType, "market");
 });
 
+test("live entry config reads touch_trigger with limit", () => {
+  const config = loadConfig({
+    ABI_CONFIG_PATH: withConfigFile('{"live_entry_mode": "touch_trigger", "touch_trigger_entry_order_type": "limit"}'),
+  });
+
+  assert.equal(config.liveEntryMode, "touch_trigger");
+  assert.equal(config.touchTriggerEntryOrderType, "limit");
+});
+
 test("live entry config accepts ema_anchor with or without a valid order type", () => {
   const without = loadConfig({ ABI_CONFIG_PATH: withConfigFile('{"live_entry_mode": "ema_anchor"}') });
   assert.equal(without.liveEntryMode, "ema_anchor");
@@ -223,11 +232,6 @@ test("live entry config accepts ema_anchor with or without a valid order type", 
 
 for (const [label, content, message] of [
   ["touch_trigger without an order type", '{"live_entry_mode": "touch_trigger"}', /touch_trigger_entry_order_type is required/],
-  [
-    "touch_trigger with limit before limit entry exists",
-    '{"live_entry_mode": "touch_trigger", "touch_trigger_entry_order_type": "limit"}',
-    /touch_trigger_entry_order_type limit is not implemented yet/,
-  ],
   ["an array root", "[]", /must contain a JSON object/],
   ["a null root", "null", /must contain a JSON object/],
   ["a string root", '"touch_trigger"', /must contain a JSON object/],
