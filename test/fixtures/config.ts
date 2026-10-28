@@ -23,6 +23,8 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     positionSizingMode: "minimum",
     exchangeFactsEnabled: false,
     exchangeFactsDbPath: "/tmp/abi-test-exchange-facts.sqlite3",
+    liveEntryMode: "ema_anchor",
+    touchTriggerEntryOrderType: null,
     ...overrides,
   };
 }

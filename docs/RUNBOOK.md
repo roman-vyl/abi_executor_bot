@@ -174,8 +174,13 @@ otherwise `blockedReasons` lists what is missing.
 - Unset variable or missing file = `ema_anchor`. Invalid JSON, a root that is not an object (`[]`, `null`), an unknown
   key, a value outside the list, `touch_trigger` without an order type, or any other read error stops startup.
 - To switch, edit the file and restart ABI.
-- The values change no order placement yet (abi-live-entry-mode-config-v1). Do not enable `touch_trigger` on a
-  trading stack before ABI-1.
+- Entry order on Bybit (abi-touch-trigger-market-entry-v1):
+  - `ema_anchor`: conditional Market with `triggerPrice`, `triggerDirection`, `triggerBy` (unchanged).
+  - `touch_trigger` + `market`: plain Market, the same request without those three fields; Partial Market SL/TP,
+    `orderLinkId`, correlation, confirmation and recovery are unchanged.
+  - `touch_trigger` + `limit`: startup fails until limit entry exists (ABI-2).
+- Do not enable `touch_trigger` on a trading stack before the Bybit Demo check (Partial SL/TP children linked by
+  `parentOrderLinkId`, fill and child timing, partial Market fill reporting).
 
 ## Linear position binding mode and Hedge Mode activation
 
