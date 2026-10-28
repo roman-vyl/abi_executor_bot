@@ -87,7 +87,17 @@ test("health reports the exchange stream without changing ok or the status", asy
     config: makeTestConfig(),
     entryPackageReady: true,
     exchangeFacts: { status: "enabled", store: {} as ExchangeFactsStore },
-    exchangeStream: { state: "backoff", reconnects: 3, bufferedRecords: 0, droppedRecords: 0 },
+    exchangeStream: {
+      state: "backoff",
+      reconnects: 3,
+      bufferedRecords: 0,
+      droppedRecords: 0,
+      receivedRecords: 7,
+      writtenFacts: 5,
+      writtenSnapshots: 1,
+      duplicateRecords: 1,
+      lastWriteAtMs: 1_793_105_274_202,
+    },
     exchangeLinker: disabledLinkerStatus("store_not_enabled"),
   });
 
@@ -98,6 +108,11 @@ test("health reports the exchange stream without changing ok or the status", asy
     reconnects: 3,
     bufferedRecords: 0,
     droppedRecords: 0,
+    receivedRecords: 7,
+    writtenFacts: 5,
+    writtenSnapshots: 1,
+    duplicateRecords: 1,
+    lastWriteAtMs: 1_793_105_274_202,
   });
 });
 

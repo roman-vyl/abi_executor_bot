@@ -50,7 +50,7 @@ CREATE TABLE stream_connection_log (
 Dedup keys (new `snapshot_key_version` 1 in `schema_meta`): position `pos:{symbol}:{positionIdx}:{seq}` (Bybit position `seq`); wallet `wallet:{accountType}:{creationTime}:{sha256(raw)}` using the frame `creationTime`. Opening a v1 database runs both `CREATE TABLE`s and sets `schema_version` 2 and `snapshot_key_version` 1 in one immediate transaction; a new database is created at v2. A v2 database opened by the previous ABI image is refused as `exchange_facts_schema_newer`, which leaves the store `unavailable` and trading unaffected.
 
 ### D8. Health
-`/health.exchangeStream`: `{ state: "disabled" | "connecting" | "subscribed" | "backoff" | "stopped", reason?, connectedSinceMs?, lastMessageAtMs?, reconnects, bufferedRecords, droppedRecords, lastWriteError? }`. Additive; `ok` and status unchanged. Events: `exchange_stream_connected`, `exchange_stream_disconnected` (code, reason, `stale`), `exchange_stream_auth_failed`, plus D6 events; no secrets, no payloads.
+`/health.exchangeStream`: `{ state: "disabled" | "connecting" | "subscribed" | "backoff" | "stopped", reason?, connectedSinceMs?, lastMessageAtMs?, reconnects, bufferedRecords, droppedRecords, receivedRecords, writtenFacts, writtenSnapshots, duplicateRecords, lastWriteAtMs?, lastWriteError? }`. Additive; `ok` and status unchanged. Events: `exchange_stream_connected`, `exchange_stream_disconnected` (code, reason, `stale`), `exchange_stream_auth_failed`, plus D6 events; no secrets, no payloads.
 
 ### D9. Dependency
 `ws` 8.x pinned exactly in `dependencies`; `@types/ws` in `devDependencies`. Pure JavaScript (no native build), so the Docker build is unchanged.

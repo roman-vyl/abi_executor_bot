@@ -297,7 +297,11 @@ facts store. It is read-only: it authenticates with ABI's key, subscribes to `or
   `exchange_stream_write_failed`, `exchange_stream_record_rejected`,
   `exchange_stream_frame_invalid`; no secrets, no payloads) and shown in `GET /health`
   `exchangeStream` (`state`, `connectedSinceMs`, `lastMessageAtMs`, `reconnects`,
-  `bufferedRecords`, `droppedRecords`, `lastWriteError`). At most 10 000 records wait in memory
+  `bufferedRecords`, `droppedRecords`, `receivedRecords`, `writtenFacts`, `writtenSnapshots`,
+  `duplicateRecords`, `lastWriteAtMs`, `lastWriteError`). The counters run since start: with no
+  account activity they stay 0 and `lastMessageAtMs` is absent; `receivedRecords` growing while
+  `writtenFacts` and `writtenSnapshots` do not, with `lastWriteError` set, means the store
+  fails. At most 10 000 records wait in memory
   while the store fails; more are dropped and counted.
 - On Bybit Demo, funding settlements are booked but were not pushed on the WS `execution`
   topic (stage 0, 2026-10-27); funding comes only from REST.
