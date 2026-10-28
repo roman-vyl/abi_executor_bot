@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { loadConfig } from "../../src/config/config.js";
@@ -166,4 +169,89 @@ test("loadConfig rejects ABI_EXCHANGE_FACTS_ENABLED other than true or false", (
       /ABI_EXCHANGE_FACTS_ENABLED must be true or false/,
     );
   }
+});
+
+function withConfigFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "abi-config-"));
+  const path = join(dir, "abi.json");
+  writeFileSync(path, content, "utf8");
+  return path;
+}
+
+test("live entry config defaults to ema_anchor without ABI_CONFIG_PATH", () => {
+  const config = loadConfig({});
+
+  assert.equal(config.liveEntryMode, "ema_anchor");
+  assert.equal(config.touchTriggerEntryOrderType, null);
+});
+
+test("live entry config defaults to ema_anchor when the file is missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "abi-config-"));
+  const config = loadConfig({ ABI_CONFIG_PATH: join(dir, "absent.json") });
+
+  assert.equal(config.liveEntryMode, "ema_anchor");
+  assert.equal(config.touchTriggerEntryOrderType, null);
+});
+
+test("live entry config accepts an empty object as defaults", () => {
+  const config = loadConfig({ ABI_CONFIG_PATH: withConfigFile("{}") });
+
+  assert.equal(config.liveEntryMode, "ema_anchor");
+  assert.equal(config.touchTriggerEntryOrderType, null);
+});
+
+for (const orderType of ["market", "limit"] as const) {
+  test(`live entry config reads touch_trigger with ${orderType}`, () => {
+    const config = loadConfig({
+      ABI_CONFIG_PATH: withConfigFile(
+        JSON.stringify({ live_entry_mode: "touch_trigger", touch_trigger_entry_order_type: orderType }),
+      ),
+    });
+
+    assert.equal(config.liveEntryMode, "touch_trigger");
+    assert.equal(config.touchTriggerEntryOrderType, orderType);
+  });
+}
+
+test("live entry config accepts ema_anchor with or without a valid order type", () => {
+  const without = loadConfig({ ABI_CONFIG_PATH: withConfigFile('{"live_entry_mode": "ema_anchor"}') });
+  assert.equal(without.liveEntryMode, "ema_anchor");
+  assert.equal(without.touchTriggerEntryOrderType, null);
+
+  const withType = loadConfig({
+    ABI_CONFIG_PATH: withConfigFile('{"live_entry_mode": "ema_anchor", "touch_trigger_entry_order_type": "limit"}'),
+  });
+  assert.equal(withType.liveEntryMode, "ema_anchor");
+  assert.equal(withType.touchTriggerEntryOrderType, "limit");
+});
+
+for (const [label, content, message] of [
+  ["touch_trigger without an order type", '{"live_entry_mode": "touch_trigger"}', /touch_trigger_entry_order_type is required/],
+  ["an array root", "[]", /must contain a JSON object/],
+  ["a null root", "null", /must contain a JSON object/],
+  ["a string root", '"touch_trigger"', /must contain a JSON object/],
+  ["invalid JSON", '{"live_entry_mode": ', /is not valid JSON/],
+  ["an unknown key", '{"live_entry_mode": "ema_anchor", "order_lifetime_bars": 3}', /unknown keys: order_lifetime_bars/],
+  ["an unknown mode", '{"live_entry_mode": "close"}', /live_entry_mode must be one of: ema_anchor, touch_trigger/],
+  ["a non-string mode", '{"live_entry_mode": 1}', /live_entry_mode must be one of/],
+  [
+    "an unknown order type",
+    '{"live_entry_mode": "touch_trigger", "touch_trigger_entry_order_type": "stop_market"}',
+    /touch_trigger_entry_order_type must be one of: market, limit/,
+  ],
+  [
+    "an invalid order type in ema_anchor",
+    '{"live_entry_mode": "ema_anchor", "touch_trigger_entry_order_type": "Market"}',
+    /touch_trigger_entry_order_type must be one of: market, limit/,
+  ],
+] as const) {
+  test(`live entry config refuses to start with ${label}`, () => {
+    assert.throws(() => loadConfig({ ABI_CONFIG_PATH: withConfigFile(content) }), message);
+  });
+}
+
+test("live entry config refuses to start when the path cannot be read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "abi-config-"));
+
+  assert.throws(() => loadConfig({ ABI_CONFIG_PATH: dir }), /cannot be read/);
 });
