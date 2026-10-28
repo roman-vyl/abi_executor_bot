@@ -8,9 +8,11 @@ built in.
 ## Decisions
 
 - **File and path.** `ABI_CONFIG_PATH` (empty or unset = no file). `loadConfig(env)` reads it synchronously with
-  `node:fs` (`existsSync` / `readFileSync`, UTF-8) so the loader stays synchronous and testable with an env object.
-- **Missing file = defaults.** Unset/blank path or a path to a non-existent file → `liveEntryMode = "ema_anchor"`,
-  `touchTriggerEntryOrderType = null`.
+  `node:fs` `readFileSync` (UTF-8) so the loader stays synchronous and testable with an env object.
+- **Missing file = defaults, any other read error = start failure** (owner review 15:46). Unset/blank path, or
+  `readFileSync` failing with `ENOENT` → `liveEntryMode = "ema_anchor"`, `touchTriggerEntryOrderType = null`. Any other
+  read error (e.g. `EACCES`, `EISDIR`) is rethrown and stops startup; it is never treated as "no configuration". Plain
+  `node:fs` error handling, no `existsSync` pre-check.
 - **Fail closed** (throw `Error` from `loadConfig`, which stops startup before the server listens) when the file
   exists and:
   - `JSON.parse` fails;
