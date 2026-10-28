@@ -41,7 +41,7 @@ one write, entry links SHALL be written before child links.
 
 #### Scenario: Child before its entry
 - **WHEN** a child record is stored and its entry's record is stored three seconds later
-- **THEN** the child is pending first and linked in the tick after the entry is linked
+- **THEN** the child is waiting first and linked in the tick after the entry is linked
 
 #### Scenario: Unknown child type
 - **WHEN** a child record has a `stopOrderType` other than the four above
@@ -56,36 +56,43 @@ Facts SHALL NOT be changed by linking.
 - **WHEN** a linked stop loss is amended twice and then filled
 - **THEN** its three `order_state` facts and its execution are attributed to the cycle through `order_id`, and `order_links` still has one row for it
 
-### Requirement: Records that are not ABI trading orders stay unattributed
+### Requirement: Records that are not ABI trading orders are not linked
 The linker SHALL NOT link an order whose `orderLinkId` is non-empty without the
 `abi-ep-` prefix (`foreign_label`), or whose `orderLinkId` and
 `parentOrderLinkId` are both empty (`no_label`). Executions without
-`orderId` and account snapshots SHALL NOT be linked. Unattributed orders SHALL
-be counted by reason.
+`orderId` and account snapshots SHALL NOT be linked. Such orders SHALL
+be counted by reason as not linkable.
 
 #### Scenario: Account-wide close-all
 - **WHEN** the account close-all action creates a market order without `orderLinkId`
-- **THEN** it is not linked and `unattributedOrders.no_label` grows by one
+- **THEN** it is not linked and `notLinkableOrders.no_label` grows by one
 
 #### Scenario: Funding
 - **WHEN** an execution with `execType` `Funding` and no `orderId` is stored
 - **THEN** no link is written
 
-### Requirement: Pending links are retried, then given up
-An order that cannot be linked yet (`own_label_unknown`, `parent_not_found`)
-SHALL be retried every second for 10 minutes and then counted as
-unattributed with that reason. At startup the linker SHALL read all facts from
-the beginning and skip orders that already have a link, so every unlinked
-order is retried after a restart. `parent_ambiguous` and `link_conflict` SHALL
-be final within a run.
+### Requirement: Linking converges without deadlines
+An order with an ABI label or an ABI parent label that cannot be linked yet
+(`own_label_unknown`, `parent_not_found`) SHALL be retried on every tick for
+as long as it stays unlinked, with no time limit and no give-up state.
+Linking SHALL depend only on the facts in the database and the correlation
+records, not on the order, time or source of the records. At startup the
+linker SHALL read all facts from the beginning and skip orders that already
+have a link. Orders that are not linkable (`foreign_label`, `no_label`,
+`child_type_unknown`, `parent_ambiguous`, `own_label_ambiguous`,
+`link_conflict`) SHALL NOT be retried.
+
+#### Scenario: Entry record arrives hours later
+- **WHEN** a child is stored at 10:00 and its entry's record is stored at 14:00 (for example after a reconnect)
+- **THEN** the child is counted in `waitingOrders.parent_not_found` until 14:00 and both are linked within two ticks after the entry record is stored
 
 #### Scenario: Restart
-- **WHEN** ABI restarts with 50 linked and 3 unattributed orders in the database
-- **THEN** no linked order is written again, the 3 orders are classified again, and no error is raised
+- **WHEN** ABI restarts with 50 linked, 2 waiting and 3 not linkable orders in the database
+- **THEN** no linked order is written again, the same 2 orders are waiting and the same 3 are not linkable, and no error is raised
 
-#### Scenario: Give up
-- **WHEN** a child's entry never appears for 10 minutes
-- **THEN** the child is counted as `parent_not_found` and no longer retried in this run
+#### Scenario: Order of records does not matter
+- **WHEN** the same entry, stop loss and take profit records are stored once in the order entry, stop, take and once in the order take, stop, entry
+- **THEN** both runs end with the same three links
 
 ### Requirement: Linker isolated from trading
 The linker SHALL NOT be called or awaited by any trading route or service. It

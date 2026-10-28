@@ -26,26 +26,28 @@ Only `order_state` facts are classified, read in `event_seq` order (at most 1000
 | Record | Result |
 |---|---|
 | `orderLinkId` starts with `abi-ep-` and is in the index | `own` link: role and generation from the index, `orderLinkId` = label, evidence `own_order_link_id_lookup` |
-| `orderLinkId` starts with `abi-ep-`, not in the index | pending (`own_label_unknown`) |
+| `orderLinkId` starts with `abi-ep-`, not in the index | waiting (`own_label_unknown`) |
 | `orderLinkId` empty, `parentOrderLinkId` non-empty, `stopOrderType` `PartialStopLoss` or `StopLoss` | `child` link, role `stop_loss`, evidence `parent_order_link_id` |
 | same, `stopOrderType` `PartialTakeProfit` or `TakeProfit` | `child` link, role `take_profit` |
-| same, other `stopOrderType` | unattributed `child_type_unknown` |
-| `orderLinkId` non-empty without the prefix | unattributed `foreign_label` (manual or other tool) |
-| both empty | unattributed `no_label` (account-wide close-all, liquidation, ADL, manual) |
+| same, other `stopOrderType` | not linkable `child_type_unknown` |
+| `orderLinkId` non-empty without the prefix | not linkable `foreign_label` (manual or other tool) |
+| both empty | not linkable `no_label` (account-wide close-all, liquidation, ADL, manual) |
 
 - `stopOrderType` is read from `raw_json`; the indexed columns give `orderLinkId` and `parentOrderLinkId`.
-- A child link is written through the store's existing child rule: the parent must be an existing `entry` link. `parent_not_found` keeps the order pending (its entry may be linked later in the same or a next tick); `parent_ambiguous` is final.
-- Links are written per tick in one `writeLinks` call, entries before children, so a child whose entry arrived in the same tick is linked in that tick. If the call fails as a whole (`link_conflict` or invalid input aborts the transaction), the linker repeats the tick's links one by one so one bad order cannot block the others; the conflicting order is unattributed `link_conflict` and an event is emitted.
+- A child link is written through the store's existing child rule: the parent must be an existing `entry` link. `parent_not_found` keeps the order waiting (its entry may be linked in a later tick); `parent_ambiguous` is not linkable, because links never change.
+- Links are written per tick in one `writeLinks` call, entries before children, so a child whose entry arrived in the same tick is linked in that tick. If the call fails as a whole (`link_conflict` or invalid input aborts the transaction), the linker repeats the tick's links one by one so one bad order cannot block the others; the conflicting order is not linkable `link_conflict` and an event is emitted.
 
-### D4. Pending and give-up
+### D4. Convergence without deadlines
 
-- Pending orders are kept in memory with the time first seen and retried every tick.
-- After 10 minutes a pending order becomes unattributed with its last reason (`own_label_unknown`, `parent_not_found`).
-- Unattributed orders are counted by reason and not retried until the next ABI start. At start the linker scans all facts from `event_seq` 0, so a restart gives every unlinked order a new chance; already linked orders are skipped by the link set.
+- Two sets in memory: **waiting** (ABI label or ABI parent label, not linked yet: `own_label_unknown`, `parent_not_found`) and **not linkable** (`foreign_label`, `no_label`, `child_type_unknown`, `parent_ambiguous`, `own_label_ambiguous`, `link_conflict`). Both are derived only from database contents and correlation records, so they are the same whenever they are rebuilt.
+- Every tick: classify the new facts, then retry every waiting order. No time limit, no give-up, no special trigger. Whatever adds the missing record (the live stream, a reconnect, later the stage 4 REST fill), the next tick links the order.
+- Not linkable orders are not retried: the reasons cannot change while links are immutable and the order's label is fixed by Bybit.
+- At start the linker reads all facts from `event_seq` 0 (1000 per tick) and the link set from `order_links`, which rebuilds both sets; already linked orders are skipped.
+- A waiting order that stays waiting is a visible signal (health count per reason), not a state change. Expected cause: the entry record was lost in a WS drop; stage 4 fills it.
 
 ### D5. Facts covered by a link
 
-A link is per `orderId`. All `order_state` facts of that order (create, amend, trigger, fill, cancel) and all `execution` facts with that `orderId` belong to the link's instance and cycle by `order_id`. No extra rows; executions are never classified. Executions without `orderId` (funding) and records of unlinked orders stay unattributed, as do `account_snapshots`.
+A link is per `orderId`. All `order_state` facts of that order (create, amend, trigger, fill, cancel) and all `execution` facts with that `orderId` belong to the link's instance and cycle by `order_id`. No extra rows; executions are never classified. Executions without `orderId` (funding), records of unlinked orders and `account_snapshots` belong to no cycle.
 
 ### D6. Failures
 
@@ -55,12 +57,12 @@ A link is per `orderId`. All `order_state` facts of that order (create, amend, t
 
 ### D7. Health and events
 
-`/health.exchangeLinker`: `state` (`disabled`, `waiting_for_correlation`, `running`, `stopped`), `reason` when disabled, `lastTickAtMs`, `linksWritten` (since start), `pendingOrders`, `unattributedOrders` (object: reason → count), `lastError`. `ok` and the status code do not depend on it.
+`/health.exchangeLinker`: `state` (`disabled`, `waiting_for_correlation`, `running`, `stopped`), `reason` when disabled, `lastTickAtMs`, `linksWritten` (since start), `waitingOrders` (object: reason → count), `notLinkableOrders` (object: reason → count), `lastError`. `ok` and the status code do not depend on it.
 
 Events: `exchange_order_linker_started`, `exchange_order_linker_tick_failed` (`errorCode`), `exchange_order_linker_link_conflict` (`orderId`, `role`). No record payloads.
 
 ## Risks
 
-- A label format change in trading without the linker would leave orders unattributed (`own_label_unknown`), never mislinked; the linker uses the same function, and a test pins that.
-- A child that arrives while its entry's facts are missing from the stream (WS drop) stays `parent_not_found` until stage 4 fills the entry from REST.
+- A label format change in trading without the linker would leave orders waiting (`own_label_unknown`), never mislinked; the linker uses the same function, and a test pins that.
+- A child that arrives while its entry's facts are missing from the stream (WS drop) stays waiting (`parent_not_found`) until the entry record exists; stage 4 fills it from REST and the same pass links both.
 - The startup rescan reads the whole facts table at 1000 facts per second; with today's volume (hundreds of orders per day) this is seconds.

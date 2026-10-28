@@ -22,9 +22,10 @@ What already exists:
   - child order: empty `orderLinkId`, `parentOrderLinkId` = entry label, `stopOrderType` `PartialStopLoss` / `StopLoss` → `stop_loss`, `PartialTakeProfit` / `TakeProfit` → `take_profit` (evidence `parent_order_link_id`);
   - anything else: not linked, counted by reason.
 - Executions, all later order states and amendments are attributed through their `order_id`; no extra rows.
-- A link that cannot be written yet (child seen before its entry, label not yet known) is retried every second for 10 minutes, then counted as unattributed. At startup the linker rescans all facts once, so a restart retries everything still unlinked.
+- Linking converges by itself, whatever the order and source of the records: every tick the linker retries all orders in the database that carry an ABI label (own or parent) and are still unlinked, without deadline. A child seen before its entry is linked in the tick after its entry. At startup the linker reads all facts once to rebuild this set. Owner 2026-10-28 04:39: no waiting periods or special retry paths ("одна проблема — одно решение").
+- Completeness of the records is not this change: the source stays the WS stream with its reconnects (stage 2). REST gap filling and a completeness check are stage 4; whatever they add will be linked by the same pass.
 - The only read from trading data: a new read-only method of the correlation repository listing every record (open and closed) in memory. The linker never takes the per-pair lock, never saves a correlation record and never calls Bybit.
-- `/health` gets an additive `exchangeLinker` object (state, linked orders, pending, unattributed by reason, last error); `ok` and the HTTP status do not depend on it.
+- `/health` gets an additive `exchangeLinker` object (state, links written, unlinked ABI orders by reason, not linkable orders by reason, last error); `ok` and the HTTP status do not depend on it.
 
 ## Non-goals
 
