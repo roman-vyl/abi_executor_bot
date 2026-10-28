@@ -80,7 +80,7 @@ records, not on the order, time or source of the records. At startup the
 linker SHALL read all facts from the beginning and skip orders that already
 have a link. Orders that are not linkable (`foreign_label`, `no_label`,
 `child_type_unknown`, `parent_ambiguous`, `own_label_ambiguous`,
-`link_conflict`) SHALL NOT be retried.
+`link_conflict`, `invalid_link`) SHALL NOT be retried.
 
 #### Scenario: Entry record arrives hours later
 - **WHEN** a child is stored at 10:00 and its entry's record is stored at 14:00 (for example after a reconnect)

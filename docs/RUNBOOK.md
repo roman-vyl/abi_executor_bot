@@ -273,6 +273,34 @@ facts store. It is read-only: it authenticates with ABI's key, subscribes to `or
   upgraded in place at the first start. An older ABI image refuses a version 2 file
   (`exchange_facts_schema_newer`) and runs without the journal.
 
+### Exchange order linker
+
+Links stored orders to strategy instances and trade cycles (OpenSpec
+`abi-exchange-order-linker-v1`). Runs only with the store enabled, after the correlation store
+has been replayed, every second on its own; no trading route calls it, and it never calls Bybit.
+
+- An order whose `orderLinkId` is an ABI label (`abi-ep-…`) is linked as `entry` or `close`
+  with the instance, cycle and generation that produced the label. The labels are recomputed
+  from the correlation records for every generation, open and closed cycles alike.
+- A Partial stop loss / take profit child (empty `orderLinkId`, `parentOrderLinkId` = an entry
+  label) is linked through its entry as `stop_loss` / `take_profit`.
+- Every later state, amendment and fill of a linked order belongs to the same cycle through its
+  `orderId`; executions get no own link.
+- Not linked, by design (`notLinkableOrders`): `foreign_label` (manual or other tool),
+  `no_label` (account-wide cancel-all / close-all, liquidation, ADL), `child_type_unknown`,
+  `parent_ambiguous`, `own_label_ambiguous`, `link_conflict`, `invalid_link`. Funding
+  executions and position / wallet snapshots belong to no cycle.
+- Waiting (`waitingOrders`): an ABI order whose label owner is not known yet
+  (`own_label_unknown`) or a child whose entry has no link yet (`parent_not_found`). They are
+  retried every second without deadline and linked as soon as the missing record is stored. A
+  child that keeps waiting usually means the entry's record was lost in a stream drop.
+- At every start the linker reads all facts again; already linked orders are skipped, so a
+  restart is safe.
+- `GET /health` `exchangeLinker`: `state` (`disabled`, `waiting_for_correlation`, `running`,
+  `stopped`), `lastTickAtMs`, `linksWritten`, `waitingOrders`, `notLinkableOrders`,
+  `lastError`. Events: `exchange_order_linker_started`, `exchange_order_linker_tick_failed`
+  (`errorCode`), `exchange_order_linker_link_conflict` (`orderId`, `role`).
+
 ## Read-only sandbox smoke
 
 Checks connectivity and credentials without placing orders:

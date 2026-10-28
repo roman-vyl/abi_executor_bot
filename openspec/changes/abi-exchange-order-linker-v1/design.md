@@ -39,7 +39,7 @@ Only `order_state` facts are classified, read in `event_seq` order (at most 1000
 
 ### D4. Convergence without deadlines
 
-- Two sets in memory: **waiting** (ABI label or ABI parent label, not linked yet: `own_label_unknown`, `parent_not_found`) and **not linkable** (`foreign_label`, `no_label`, `child_type_unknown`, `parent_ambiguous`, `own_label_ambiguous`, `link_conflict`). Both are derived only from database contents and correlation records, so they are the same whenever they are rebuilt.
+- Two sets in memory: **waiting** (ABI label or ABI parent label, not linked yet: `own_label_unknown`, `parent_not_found`) and **not linkable** (`foreign_label`, `no_label`, `child_type_unknown`, `parent_ambiguous`, `own_label_ambiguous`, `link_conflict`, `invalid_link` for a link the store refuses as invalid input). Both are derived only from database contents and correlation records, so they are the same whenever they are rebuilt.
 - Every tick: classify the new facts, then retry every waiting order. No time limit, no give-up, no special trigger. Whatever adds the missing record (the live stream, a reconnect, later the stage 4 REST fill), the next tick links the order.
 - Not linkable orders are not retried: the reasons cannot change while links are immutable and the order's label is fixed by Bybit.
 - At start the linker reads all facts from `event_seq` 0 (1000 per tick) and the link set from `order_links`, which rebuilds both sets; already linked orders are skipped.
