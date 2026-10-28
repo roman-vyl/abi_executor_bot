@@ -4,6 +4,7 @@ import { KeyedMutex } from "../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../config/config.js";
 import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCorrelationRepository.js";
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
+import { createExchangeOrderLinker } from "../exchangeFacts/exchangeOrderLinker.js";
 import { createExchangeStreamRecorder } from "../exchangeStream/exchangeStreamStartup.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
@@ -107,6 +108,14 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   // Correlation-store replay runs asynchronously so account/system routes can
   // come up before entry-package state is ready; entry-package and position
   // management routes fail closed until readiness flips true.
+  // Links stored orders to trade cycles from ABI's own labels; reads the
+  // correlation records only, never called by trading
+  // (abi-exchange-order-linker-v1).
+  const exchangeLinker = createExchangeOrderLinker(exchangeFacts, {
+    listRecords: () => correlationRepository.listAllRecords(),
+    isCorrelationReady: () => readiness.isReady,
+  });
+
   void replayCorrelationStore(correlationRepository, readiness, {
     bybit,
     linearPolicy: config.bybitLinearPositionBindingMode,
@@ -121,6 +130,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         entryPackageReady: readiness.isReady,
         exchangeFacts,
         exchangeStream: exchangeStream.status(),
+        exchangeLinker: exchangeLinker.status(),
       })) {
       return;
     }
@@ -184,12 +194,14 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   });
 
   exchangeStream.start();
+  exchangeLinker.start();
 
   installShutdownHandlers({
     server,
     onServerClosed: () => {
       // The recorder writes its last buffered records before the store closes.
       exchangeStream.stop();
+      exchangeLinker.stop();
       if (exchangeFacts.status === "enabled") {
         exchangeFacts.store.close();
       }

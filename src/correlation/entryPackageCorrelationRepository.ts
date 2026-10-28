@@ -165,6 +165,13 @@ export class EntryPackageCorrelationRepository {
     return this.byOrderId.get(orderId);
   }
 
+  // Latest record of every pair, open and closed. Read-only listing for the
+  // exchange order linker, which recomputes each pair's order labels from it
+  // (abi-exchange-order-linker-v1 D2); it takes no lock and writes nothing.
+  listAllRecords(): EntryPackageExecutionRecord[] {
+    return [...this.byCompositeKey.values()];
+  }
+
   // Canonical active view across all instruments. This is derived from the
   // latest record per pair and deliberately does not introduce a second
   // durable ownership store. Startup activation gates use it after replay.
