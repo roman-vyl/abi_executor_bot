@@ -21,7 +21,7 @@ them.
 - **THEN** the configuration carries `live_entry_mode = ema_anchor` and no
   entry order type
 
-#### Scenario: touch_trigger with market
+#### Scenario: touch_trigger with an order type
 - **WHEN** the file is `{"live_entry_mode": "touch_trigger", "touch_trigger_entry_order_type": "market"}`
 - **THEN** the configuration carries `touch_trigger` and `market`
 
@@ -38,3 +38,9 @@ them.
 - **WHEN** the file is `[]`, `null`, not valid JSON, has an unknown key, or
   has a value outside the allowed strings
 - **THEN** ABI startup fails with an error
+
+#### Scenario: Orders unchanged
+- **WHEN** the same entry package is applied with no file and with
+  `{"live_entry_mode": "ema_anchor"}`
+- **THEN** ABI sends the same conditional Bybit requests as before
+  `touch_trigger` existed
