@@ -24,9 +24,11 @@ export type BybitCreateOrderPayload = {
   side: BybitOrderSide;
   orderType: "Market";
   qty: string;
-  triggerPrice: string;
-  triggerDirection: BybitTriggerDirection;
-  triggerBy: string;
+  // Present only on the conditional ema_anchor entry; a touch_trigger market
+  // entry omits all three (abi-touch-trigger-market-entry-v1).
+  triggerPrice?: string;
+  triggerDirection?: BybitTriggerDirection;
+  triggerBy?: string;
   orderLinkId: string;
   takeProfit?: string;
   stopLoss?: string;
@@ -153,7 +155,7 @@ export function mapEntryPackageToBybit(
   input: EntryPackageOrderInput,
 ): EntryPackageOrderPayloads {
   const semantics = mapEntryOrderSemantics(input.side);
-  const triggerDirection = mapTriggerDirection(semantics.triggerDirection);
+  const conditional = isConditionalEntry(config);
 
   const createEntryOrder: BybitCreateOrderPayload = {
     category: input.category,
@@ -161,9 +163,13 @@ export function mapEntryPackageToBybit(
     side: semantics.exchangeSide,
     orderType: "Market",
     qty: input.qty,
-    triggerPrice: input.plannedEntryPrice,
-    triggerDirection,
-    triggerBy: config.bybitTriggerBy,
+    ...(conditional
+      ? {
+          triggerPrice: input.plannedEntryPrice,
+          triggerDirection: mapTriggerDirection(semantics.triggerDirection),
+          triggerBy: config.bybitTriggerBy,
+        }
+      : {}),
     orderLinkId: input.orderLinkId,
     tpslMode: "Partial",
     stopLoss: input.initialStopPrice,
@@ -241,6 +247,20 @@ export function readBybitOrderId(response: unknown): string | null {
 
   const orderId = (result as Record<string, unknown>).orderId;
   return typeof orderId === "string" && orderId !== "" ? orderId : null;
+}
+
+// ema_anchor keeps the conditional Market entry. touch_trigger + market is a
+// plain Market entry: Engine already confirmed the signal at the touch-bar
+// close, so no exchange trigger is sent. Any other touch_trigger order type is
+// refused at startup by loadConfig; this throw guards configs built elsewhere.
+function isConditionalEntry(config: AbiConfig): boolean {
+  if (config.liveEntryMode === "ema_anchor") {
+    return true;
+  }
+  if (config.touchTriggerEntryOrderType === "market") {
+    return false;
+  }
+  throw new Error(`touch_trigger entry order type ${String(config.touchTriggerEntryOrderType)} is not supported`);
 }
 
 function mapTriggerDirection(direction: "rises_to" | "falls_to"): BybitTriggerDirection {

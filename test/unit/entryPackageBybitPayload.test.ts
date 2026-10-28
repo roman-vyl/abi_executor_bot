@@ -77,3 +77,102 @@ test("canonical production mapper contains no Full mode, alternate Partial build
   assert.equal(source.includes("buildPartialProtectionEntryOrderPayload"), false);
   assert.equal(/ownerCount|activeRecords\.length/.test(source), false);
 });
+
+const TRIGGER_KEYS = ["triggerPrice", "triggerDirection", "triggerBy"] as const;
+
+function mapBoth(input: Parameters<typeof mapEntryPackageToBybit>[1]) {
+  return {
+    anchor: mapEntryPackageToBybit(makeTestConfig(), input),
+    market: mapEntryPackageToBybit(
+      makeTestConfig({ liveEntryMode: "touch_trigger", touchTriggerEntryOrderType: "market" }),
+      input,
+    ),
+  };
+}
+
+const longInput = {
+  symbol: "BTCUSDT",
+  category: "linear" as const,
+  side: "long" as const,
+  plannedEntryPrice: "100000",
+  initialStopPrice: "99000",
+  initialTakePrice: "103000",
+  qty: "0.001",
+  orderLinkId: "abi-ep-0000000000000000abcd",
+};
+
+test("ema_anchor create payload is the exact conditional Market request", () => {
+  const { anchor } = mapBoth(longInput);
+
+  assert.equal(
+    JSON.stringify(anchor.createEntryOrder),
+    JSON.stringify({
+      category: "linear",
+      symbol: "BTCUSDT",
+      side: "Buy",
+      orderType: "Market",
+      qty: "0.001",
+      triggerPrice: "100000",
+      triggerDirection: 2,
+      triggerBy: "LastPrice",
+      orderLinkId: "abi-ep-0000000000000000abcd",
+      tpslMode: "Partial",
+      stopLoss: "99000",
+      slTriggerBy: "LastPrice",
+      slOrderType: "Market",
+      takeProfit: "103000",
+      tpTriggerBy: "LastPrice",
+      tpOrderType: "Market",
+    }),
+  );
+});
+
+for (const [label, input] of [
+  ["long one-way", longInput],
+  [
+    "short one-way",
+    { ...longInput, side: "short" as const, initialStopPrice: "101000", initialTakePrice: "97000" },
+  ],
+  ["long hedge", { ...longInput, binding: { mode: "hedge" as const, direction: "long" as const } }],
+  [
+    "short hedge",
+    {
+      ...longInput,
+      side: "short" as const,
+      initialStopPrice: "101000",
+      initialTakePrice: "97000",
+      binding: { mode: "hedge" as const, direction: "short" as const },
+    },
+  ],
+] as const) {
+  test(`touch_trigger market create payload drops only the trigger fields (${label})`, () => {
+    const { anchor, market } = mapBoth(input);
+
+    for (const key of TRIGGER_KEYS) {
+      assert.equal(key in market.createEntryOrder, false, key);
+      assert.equal(key in anchor.createEntryOrder, true, key);
+    }
+    const expected: Record<string, unknown> = { ...anchor.createEntryOrder };
+    for (const key of TRIGGER_KEYS) {
+      delete expected[key];
+    }
+    assert.deepEqual(market.createEntryOrder, expected);
+    assert.equal(market.createEntryOrder.orderType, "Market");
+    assert.deepEqual(market.cancelEntryOrder, anchor.cancelEntryOrder);
+    assert.deepEqual(market.getEntryOrder, anchor.getEntryOrder);
+    assert.deepEqual(market.getEntryOrderHistory, anchor.getEntryOrderHistory);
+  });
+}
+
+for (const orderType of ["limit", null] as const) {
+  test(`touch_trigger with order type ${String(orderType)} throws instead of building a request`, () => {
+    assert.throws(
+      () =>
+        mapEntryPackageToBybit(
+          makeTestConfig({ liveEntryMode: "touch_trigger", touchTriggerEntryOrderType: orderType }),
+          longInput,
+        ),
+      /touch_trigger entry order type .* is not supported/,
+    );
+  });
+}

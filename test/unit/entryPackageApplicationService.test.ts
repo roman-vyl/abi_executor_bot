@@ -142,6 +142,53 @@ test("an already filled own entry order is applied with the order values", async
   });
 });
 
+const TOUCH_TRIGGER_MARKET: Partial<AbiConfig> = { liveEntryMode: "touch_trigger", touchTriggerEntryOrderType: "market" };
+
+test("touch_trigger market APPLY sends a plain Market create and applies an immediate fill", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    bybit.orderByLinkIdResponse = orderList([
+      { ...liveOrder({ orderStatus: "Filled", triggerPrice: "0" }), cumExecQty: "0.001", avgPrice: "100003" },
+    ]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    const payload = bybit.createOrderCalls[0]! as Record<string, unknown>;
+    for (const key of ["triggerPrice", "triggerDirection", "triggerBy"]) {
+      assert.equal(key in payload, false, key);
+    }
+    assert.equal(payload.orderType, "Market");
+    assert.equal(payload.tpslMode, "Partial");
+    assert.equal(payload.stopLoss, "99000");
+    assert.equal(payload.takeProfit, "103000");
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied");
+    assert.equal(record?.early_execution_observation?.cumulative_filled_qty, "0.001");
+  }, TOUCH_TRIGGER_MARKET);
+});
+
+test("touch_trigger market APPLY with the remainder cancelled after a partial fill is applied as a partial fill", async () => {
+  await withService(async ({ service, bybit, repo }) => {
+    const partlyFilled = {
+      ...liveOrder({ orderStatus: "Cancelled", triggerPrice: "0" }),
+      cumExecQty: "0.0005",
+      avgPrice: "100003",
+    };
+    bybit.orderByLinkIdResponse = orderList([partlyFilled]);
+    bybit.orderHistoryResponse = orderList([partlyFilled]);
+
+    const result = await service.apply(makeCommand());
+
+    assertApplied(result, "0.001");
+    assert.equal(bybit.createOrderCalls.length, 1);
+    const record = repo.get("instance-1", "cycle-1");
+    assert.equal(record?.status, "applied");
+    assert.equal(record?.early_execution_observation?.cumulative_filled_qty, "0.0005");
+    assert.equal(record?.early_execution_observation?.remaining_qty, "0.0005");
+  }, TOUCH_TRIGGER_MARKET);
+});
+
 test("a repeat PUT returns the order values from its own fresh read", async () => {
   await withService(async ({ service, bybit }) => {
     bybit.orderByLinkIdResponse = orderList([liveOrder()]);

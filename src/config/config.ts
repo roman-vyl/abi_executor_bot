@@ -138,6 +138,11 @@ function readLiveEntryConfigFile(pathValue: string | undefined): LiveEntryConfig
   if (liveEntryMode === "touch_trigger" && touchTriggerEntryOrderType === null) {
     throw new Error("touch_trigger_entry_order_type is required when live_entry_mode is touch_trigger");
   }
+  // Temporary until limit entry exists (abi-touch-trigger-market-entry-v1);
+  // removed by ABI-2.
+  if (liveEntryMode === "touch_trigger" && touchTriggerEntryOrderType === "limit") {
+    throw new Error("touch_trigger_entry_order_type limit is not implemented yet; use market");
+  }
 
   return { liveEntryMode, touchTriggerEntryOrderType };
 }

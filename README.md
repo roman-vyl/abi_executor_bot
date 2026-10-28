@@ -892,8 +892,11 @@ Configuration читается из environment.
 Файл `ABI_CONFIG_PATH` ([`config/abi.example.json`](config/abi.example.json)) — JSON-объект с ключами
 `live_entry_mode` (`ema_anchor` по умолчанию или `touch_trigger`) и `touch_trigger_entry_order_type` (`market` или
 `limit`, обязателен в `touch_trigger`). Нет переменной или файла — `ema_anchor`. Битый JSON, не объект, неизвестный
-ключ, неверное значение, `touch_trigger` без типа или другая ошибка чтения — ABI не стартует. Значения пока ничего не
-меняют в исполнении ордеров; до ABI-1 `touch_trigger` на торговом стеке не включать.
+ключ, неверное значение, `touch_trigger` без типа или другая ошибка чтения — ABI не стартует. Вход на Bybit:
+`ema_anchor` — условный Market (`triggerPrice`, `triggerDirection`, `triggerBy`), как раньше; `touch_trigger` +
+`market` — обычный Market без этих трёх полей, остальное (SL/TP Partial Market, `orderLinkId`) то же самое;
+`touch_trigger` + `limit` — ABI не стартует до ABI-2. Перед включением `touch_trigger` в торговлю обязательна проверка
+на Bybit Demo (дочерние SL/TP, скорость исполнения, частичное исполнение).
 
 `BYBIT_ENV` — preferred explicit environment selector.
 
