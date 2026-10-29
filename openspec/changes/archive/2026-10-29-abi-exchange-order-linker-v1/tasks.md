@@ -23,4 +23,4 @@
 ## 4. Docs and rollout
 
 - [x] 4.1 RUNBOOK: what is linked, what is waiting or not linkable and why, how to read `exchangeLinker` in health.
-- [ ] 4.2 PR and merge only on the owner's word. Deploy and enabling the store on the Mac demo are separate steps on the owner's word.
+- [x] 4.2 PR and merge only on the owner's word. Deploy and enabling the store on the Mac demo are separate steps on the owner's word. (Merged #36, deployed on the Mac demo 2026-10-28 19:03 UTC.)

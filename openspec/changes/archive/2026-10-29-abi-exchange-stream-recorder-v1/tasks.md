@@ -24,4 +24,4 @@
 ## 4. Docs and rollout
 
 - [x] 4.1 RUNBOOK: what the recorder records, how to read coverage gaps from the connection log, that funding is not pushed on Demo WS.
-- [ ] 4.2 PR and merge only on the owner's word. Deploy and enabling the store on the Mac demo (`bbb_stack` env) are separate steps on the owner's word; after enabling, compare one day of stored records with Runtime's journal.
+- [x] 4.2 PR and merge only on the owner's word. Deploy and enabling the store on the Mac demo (`bbb_stack` env) are separate steps on the owner's word; after enabling, compare one day of stored records with Runtime's journal. (Merged #35, deployed on the Mac demo 2026-10-28 19:03 UTC; the one-day comparison waits for the first trades and is not done at archive time.)
