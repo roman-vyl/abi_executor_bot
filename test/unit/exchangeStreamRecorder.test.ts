@@ -212,6 +212,13 @@ test("the stage 0 stop loss, position and wallet frames are stored as received",
   );
   assert.equal(snapshots[1].exchangeTimeMs, WALLET_FRAME.creationTime);
   assert.ok(rec.status().lastMessageAtMs !== undefined);
+  const status = rec.status();
+  assert.equal(status.receivedRecords, 6);
+  assert.equal(status.writtenFacts, 4);
+  assert.equal(status.writtenSnapshots, 2);
+  assert.equal(status.duplicateRecords, 0);
+  assert.ok(status.lastWriteAtMs !== undefined);
+  assert.equal(status.lastWriteError, undefined);
 });
 
 test("the stage 0 entry placement, cancel and replacement are stored as three order states", async (t) => {
@@ -270,6 +277,9 @@ test("a network drop is logged, the recorder reconnects and a replayed execId is
   assert.match(disconnected.detail ?? "", /^code=1006/);
   assert.equal(disconnected.connId, "conn-1");
   assert.equal(rec.status().reconnects, 1);
+  assert.equal(rec.status().receivedRecords, 2);
+  assert.equal(rec.status().writtenFacts, 1);
+  assert.equal(rec.status().duplicateRecords, 1);
 });
 
 test("a silent connection is closed as stale and reopened", async (t) => {
@@ -442,6 +452,10 @@ test("the recorder is not created without an enabled store or without a key", ()
     reconnects: 0,
     bufferedRecords: 0,
     droppedRecords: 0,
+    receivedRecords: 0,
+    writtenFacts: 0,
+    writtenSnapshots: 0,
+    duplicateRecords: 0,
   });
 
   const unavailable = createExchangeStreamRecorder(makeTestConfig({ bybitApiKey: "k", bybitApiSecret: "s" }), {
