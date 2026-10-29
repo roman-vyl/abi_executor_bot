@@ -19,7 +19,7 @@ Stages 1-3 are merged and deployed on the Mac demo: the store (`exchange-facts-s
 
 - One queue, one worker, FIFO with merge of overlapping windows.
 - Startup: enqueue the backfill once the store is open and correlation is replayed.
-- Reconnect: the recorder emits `subscribed` after a `disconnected`; the reconciler enqueues `[disconnected_at − 120 s, now]`.
+- Reconnect: the reconciler reads new rows of `stream_connection_log` from the store every second (no call from the recorder); for each `subscribed` after a `disconnected` it enqueues `[disconnected_at − 120 s, now]`.
 - Sweep: timer every 600 s, window `[now − 3600 s, now]`.
 - Pace: 500 ms minimum between requests; before each request, if the time within the 5-minute UTC boundary is < 30 s, wait until 30 s.
 - A failed request: event `exchange_rest_request_failed {endpoint, errorCode}` (only when the code changes), backoff 5 s, 30 s, 60 s, then 60 s, window stays in the queue. No deadline.
@@ -56,3 +56,9 @@ History 730 days, window 7 days, sweep 600 s over 3600 s, reconnect margin 120 s
 
 - Demo may keep less than 2 years; empty windows cost one request each (about 210 at the first start).
 - If Bybit needs `symbol` (D1), backfill costs about 210 × symbols requests at 2 req/s; with 10 symbols about 18 minutes once.
+
+## D9. Place in the architecture
+
+- Inside ABI, module `src/exchangeFacts/`, next to the recorder and the linker. ABI is the only service with Bybit keys and the only owner of the facts database (one process per data directory), so REST reading cannot live in Runtime, Journal or a separate service.
+- Three independent loops started by `startServer` after the store is open and correlation is replayed: recorder (WS → store), linker (store → links), reconciler (REST → store, then completeness check). None calls another; they meet only in the store. The reconciler learns about reconnects from `stream_connection_log`, not from the recorder.
+- Shared with trading only: the Bybit adapter's signed GET and the account's rate limits. Trading never calls the reconciler and never waits for it.
