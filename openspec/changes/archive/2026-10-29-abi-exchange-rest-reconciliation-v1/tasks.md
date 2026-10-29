@@ -1,6 +1,6 @@
 ## 0. Demo facts
 
-- [ ] 0.1 On Bybit Demo (Mac, read-only GET): does `/v5/order/history` and `/v5/execution/list` with `category=linear` and no `symbol` answer? How far back does history go? Does REST order history of a Partial SL/TP child carry `parentOrderLinkId`? Record in design D1.
+- [x] 0.1 On Bybit Demo (Mac, read-only GET): does `/v5/order/history` and `/v5/execution/list` with `category=linear` and no `symbol` answer? How far back does history go? Does REST order history of a Partial SL/TP child carry `parentOrderLinkId`? Record in design D1. Result (first deploy, 2026-10-29 11:41Z): both endpoints answer without `symbol` (no `exchange_rest_symbol_required`); the 30-day backfill took 23 requests, 352 records. History depth beyond 30 days and `parentOrderLinkId` on REST children were not probed (the linker rule does not depend on them).
 
 ## 1. Store
 
@@ -34,4 +34,4 @@
 ## 5. Docs and rollout
 
 - [x] 5.1 RUNBOOK: what REST fetches and when, load, coverage, how to read `exchangeRest` and `exchangeCompleteness`.
-- [ ] 5.2 PR, merge and deploy only on the owner's word.
+- [x] 5.2 PR, merge and deploy only on the owner's word. Done: ABI #43 (958a2d9), bbb_stack #95 (7e1525f), ABI-only deploy 2026-10-29 11:41Z.

@@ -5,7 +5,7 @@ Stages 1-3 are merged and deployed on the Mac demo: the store (`exchange-facts-s
 ## D1. Endpoints and requests
 
 - `/v5/order/history` and `/v5/execution/list`, `category=linear`, `startTime`/`endTime` window of at most 7 days, `limit` 50 / 100, `nextPageCursor` until empty.
-- Without `symbol`; order history is scoped by `settleCoin` (the configured settle coin), which Bybit accepts for `linear` on every account type. If Bybit still refuses a request without symbol (`retCode 10001`), the reconciler switches that endpoint to per-symbol requests for the rest of the run: every symbol in correlation records plus every symbol already in the store (event `exchange_rest_symbol_required`). Task 0.1 checks which case Demo is.
+- Without `symbol`; order history is scoped by `settleCoin` (the configured settle coin), which Bybit accepts for `linear` on every account type. If Bybit still refuses a request without symbol (`retCode 10001`), the reconciler switches that endpoint to per-symbol requests for the rest of the run: every symbol in correlation records plus every symbol already in the store (event `exchange_rest_symbol_required`). Demo (2026-10-29): requests without symbol are accepted.
 - New adapter methods `getOrderHistoryWindow` and `getExecutionWindow` reuse `signedGet`, so the existing GET timeout and retry apply. No new HTTP client.
 - REST order history returns the latest state of each order only. Intermediate states during a gap are not recoverable; executions are complete.
 
