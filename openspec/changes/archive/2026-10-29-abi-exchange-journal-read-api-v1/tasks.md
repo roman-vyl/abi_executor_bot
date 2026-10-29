@@ -24,4 +24,4 @@
 ## 5. Docs and rollout
 
 - [x] 5.1 RUNBOOK: the journal API, how to follow the feeds, example requests.
-- [ ] 5.2 PR, merge and deploy only on the owner's word.
+- [x] 5.2 PR, merge and deploy only on the owner's word. Done: ABI #46 (31abdb7), bbb_stack #96 (2debbb1), ABI-only deploy 2026-10-29 13:0xZ.
