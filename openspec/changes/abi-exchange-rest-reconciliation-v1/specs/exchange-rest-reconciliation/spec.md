@@ -15,14 +15,14 @@ read; it SHALL NOT create, amend or cancel orders.
 - **WHEN** an execution already stored from WS is fetched again by REST
 - **THEN** no new row is written and it is counted as a duplicate
 
-### Requirement: Startup backfill covers the whole history once
-At start the reconciler SHALL fetch every interval of the last 730 days not
+### Requirement: Startup backfill covers the last 30 days once
+At start the reconciler SHALL fetch every interval of the last 30 days not
 yet covered by completed windows of the endpoint, newest first. A restart
 SHALL fetch only uncovered intervals.
 
 #### Scenario: First start
 - **WHEN** ABI starts with no completed windows
-- **THEN** about 105 windows per endpoint are fetched and recorded, and `exchangeRest.backfillDone` becomes true
+- **THEN** 5 windows per endpoint are fetched and recorded, and `exchangeRest.backfillDone` becomes true
 
 #### Scenario: Restart
 - **WHEN** ABI restarts after a completed backfill

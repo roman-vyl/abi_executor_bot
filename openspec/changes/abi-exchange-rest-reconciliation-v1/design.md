@@ -13,7 +13,7 @@ Stages 1-3 are merged and deployed on the Mac demo: the store (`exchange-facts-s
 
 - Schema version 3 adds `rest_sync_windows(window_seq, endpoint, start_ms, end_ms, completed_at_ms, records, new_records)`.
 - A window row is written in the same transaction as its last page of facts. A window that failed half way keeps its stored facts (dedup makes a refetch harmless) and has no row.
-- Covered time = union of rows per endpoint. Backfill fills `[now − 730 d, now]` minus the union, newest window first, so recent cycles link early.
+- Covered time = union of rows per endpoint. Backfill fills `[now − 30 d, now]` minus the union, newest window first, so recent cycles link early.
 
 ## D3. Triggers and queue
 
@@ -50,12 +50,12 @@ Each count with up to 20 ids in the event `exchange_completeness_checked`; no se
 
 ## D8. Fixed numbers
 
-History 730 days, window 7 days, sweep 600 s over 3600 s, reconnect margin 120 s, pace 500 ms, quiet 30 s after each 5-minute boundary. Constants in code, not config: the owner tunes them through a change, not a file.
+History 30 days (owner 2026-10-29 10:04), window 7 days, sweep 600 s over 3600 s, reconnect margin 120 s, pace 500 ms, quiet 30 s after each 5-minute boundary. Constants in code, not config: the owner tunes them through a change, not a file.
 
 ## Risks
 
-- Demo may keep less than 2 years; empty windows cost one request each (about 210 at the first start).
-- If Bybit needs `symbol` (D1), backfill costs about 210 × symbols requests at 2 req/s; with 10 symbols about 18 minutes once.
+- Older trades (more than 30 days before the first start) stay outside the journal; their late children wait as `parent_not_found`. First start costs about 10 requests (5 windows per endpoint).
+- If Bybit needs `symbol` (D1), backfill costs about 10 × symbols requests at 2 req/s; with 10 symbols under a minute once.
 
 ## D9. Place in the architecture
 
