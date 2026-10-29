@@ -23,13 +23,18 @@ A signed GET SHALL be signed again with a fresh timestamp for the repeat.
 - **THEN** ABI uses the repeat's answer
 - **AND** exactly two requests were sent
 
-#### Scenario: A read that fails twice fails as before
+#### Scenario: A read that hangs twice fails as before
+- **WHEN** a Bybit GET request and its repeat both time out
+- **THEN** ABI sends no third request
+- **AND** the caller receives the timeout failure through the existing error path
+
+#### Scenario: A read that fails twice on a timeout or a connection break fails as before
 - **WHEN** a Bybit GET request and its repeat both fail with a timeout or a connection break, in any combination
 - **THEN** ABI sends no third request
 - **AND** the caller receives the second failure through the existing error path
 
-#### Scenario: Other read failures are not repeated
-- **WHEN** a Bybit GET request fails with an HTTP error status (403 included), a Bybit error code, a DNS error, a refused connection or any other fetch error
+#### Scenario: A non-timeout read failure is not repeated
+- **WHEN** a Bybit GET request fails with an HTTP error status (403 included), a Bybit error code, a DNS error, a refused connection or any other fetch error that is neither a timeout nor a connection break
 - **THEN** ABI sends no repeat
 
 #### Scenario: Read timeout is configurable
