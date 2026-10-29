@@ -18,4 +18,4 @@
 
 ## 3. Demo acceptance (after deploy, owner word)
 
-- [ ] 3.1 Partially filled touch_trigger Limit: remainder cancelled, position and its one stop + one take (qty = filled) intact
+- [ ] 3.1 Partially filled touch_trigger Limit: remainder cancelled, position and its one stop + one take (qty = filled) intact (not observed on Demo yet; archived on the owner's word 2026-10-29)
