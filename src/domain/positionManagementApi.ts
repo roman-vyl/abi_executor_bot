@@ -65,6 +65,22 @@ export type TradeCycleClosedResponse = {
   closure: TradeCycleClosure | null;
 };
 
+// abi-entry-remainder-cancel-v1: the pair is addressed only by its path; the
+// body is a closed empty object.
+export type EntryRemainderCancelCommand = {
+  strategyInstanceId: string;
+  tradeCycleId: string;
+};
+
+export type EntryRemainderCancelStatus = "entry_remainder_cancelled" | "entry_order_already_terminal";
+
+export type EntryRemainderCancelResponse = {
+  strategy_instance_id: string;
+  trade_cycle_id: string;
+  status: EntryRemainderCancelStatus;
+  executed_quantity: string | null;
+};
+
 export type PositionManagementErrorCode =
   | "malformed_json"
   | "unsupported_media_type"
@@ -73,6 +89,7 @@ export type PositionManagementErrorCode =
   | "unsupported_exchange_scope"
   | "position_not_open"
   | "close_execution_incomplete"
+  | "entry_not_filled"
   | "internal_error";
 
 export type PositionManagementErrorResponse = {
@@ -86,6 +103,7 @@ export type PositionManagementErrorResponse = {
 export type PositionManagementResponseBody =
   | ProtectionAppliedResponse
   | TradeCycleClosedResponse
+  | EntryRemainderCancelResponse
   | PositionManagementErrorResponse;
 
 export type PositionManagementHttpResult = {
@@ -244,6 +262,81 @@ export function validateCloseCommand(
       strategyInstanceId: path.strategyInstanceId as string,
       tradeCycleId: path.tradeCycleId as string,
       exposureFraction,
+    },
+  };
+}
+
+export type EntryRemainderCancelValidationResult =
+  | {
+      ok: true;
+      command: EntryRemainderCancelCommand;
+    }
+  | {
+      ok: false;
+      details: EntryPackageValidationDetail[];
+    };
+
+export function validateEntryRemainderCancelCommand(
+  path: {
+    strategyInstanceId: unknown;
+    tradeCycleId: unknown;
+  },
+  payload: unknown,
+): EntryRemainderCancelValidationResult {
+  const details: EntryPackageValidationDetail[] = [];
+
+  validateOpaqueNonEmptyString(
+    path.strategyInstanceId,
+    "/path/strategy_instance_id",
+    "strategy_instance_id",
+    details,
+  );
+  validateOpaqueNonEmptyString(path.tradeCycleId, "/path/trade_cycle_id", "trade_cycle_id", details);
+
+  if (!isRecord(payload)) {
+    details.push({
+      path: "/",
+      message: "request body must be a JSON object",
+    });
+    return { ok: false, details };
+  }
+
+  validateClosedObject(payload, [], "/", details);
+
+  if (details.length > 0) {
+    return { ok: false, details };
+  }
+
+  return {
+    ok: true,
+    command: {
+      strategyInstanceId: path.strategyInstanceId as string,
+      tradeCycleId: path.tradeCycleId as string,
+    },
+  };
+}
+
+export function serializeEntryRemainderCancel(input: {
+  strategyInstanceId: string;
+  tradeCycleId: string;
+  status: EntryRemainderCancelStatus;
+  executedQuantity: string | null;
+}): PositionManagementHttpResult {
+  if (
+    input.strategyInstanceId.length === 0 ||
+    input.tradeCycleId.length === 0 ||
+    (input.executedQuantity !== null && !isExactDecimalText(input.executedQuantity))
+  ) {
+    return internalErrorResult();
+  }
+
+  return {
+    statusCode: 200,
+    body: {
+      strategy_instance_id: input.strategyInstanceId,
+      trade_cycle_id: input.tradeCycleId,
+      status: input.status,
+      executed_quantity: input.executedQuantity,
     },
   };
 }
@@ -429,6 +522,12 @@ export function closeExecutionIncompleteResult(): PositionManagementHttpResult {
     "close_execution_incomplete",
     "the requested cycle's own close order did not fully execute the resolved exposure",
   );
+}
+
+// Entry-remainder cancel only: the pair has no captured first fill, so its
+// entry order is still the entry-package CANCEL's to end.
+export function entryNotFilledResult(): PositionManagementHttpResult {
+  return errorResult(422, "entry_not_filled", "the requested pair's entry order has no captured fill");
 }
 
 export function internalErrorResult(): PositionManagementHttpResult {

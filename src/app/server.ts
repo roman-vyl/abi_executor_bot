@@ -14,6 +14,7 @@ import {
   RiskPercentPositionSizeCalculator,
 } from "../risk/positionSizeCalculator.js";
 import { CloseApplicationService } from "../services/close/closeApplicationService.js";
+import { EntryRemainderCancelService } from "../services/entryRemainder/entryRemainderCancelService.js";
 import { EntryCycleRecoveryResolutionService } from "../services/entryCycleRecovery/entryCycleRecoveryResolutionService.js";
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
@@ -106,6 +107,15 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     mutex,
   });
 
+  // Ends the unfilled remainder of a filled entry order under the same
+  // pair-level `mutex`; never writes the record (abi-entry-remainder-cancel-v1).
+  const entryRemainderCancelService = new EntryRemainderCancelService({
+    config,
+    bybit,
+    correlationRepository,
+    mutex,
+  });
+
   // Correlation-store replay runs asynchronously so account/system routes can
   // come up before entry-package state is ready; entry-package and position
   // management routes fail closed until readiness flips true.
@@ -179,6 +189,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         response,
         protectionApplicationService,
         closeApplicationService,
+        entryRemainderCancelService,
         isReady: () => readiness.isReady,
       })
     ) {

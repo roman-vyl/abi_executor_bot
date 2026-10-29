@@ -5,17 +5,20 @@ import test from "node:test";
 
 import type {
   CloseCommand,
+  EntryRemainderCancelCommand,
   PositionManagementHttpResult,
   ProtectionCommand,
 } from "../../src/domain/positionManagementApi.js";
 import { internalErrorResult } from "../../src/domain/positionManagementApi.js";
 import type {
   CloseApplicationServicePort,
+  EntryRemainderCancelServicePort,
   ProtectionApplicationServicePort,
 } from "../../src/routes/positionManagementRoutes.js";
 import {
   handlePositionManagementRoutes,
   matchCloseRoute,
+  matchEntryRemainderCancelRoute,
   matchProtectionRoute,
 } from "../../src/routes/positionManagementRoutes.js";
 import { captureWrites, parseEvents } from "../fakes/captureProcessWrites.js";
@@ -60,18 +63,40 @@ class FakeCloseApplicationService implements CloseApplicationServicePort {
   }
 }
 
+// Same shape again, for the entry-remainder cancel port.
+class FakeEntryRemainderCancelService implements EntryRemainderCancelServicePort {
+  readonly calls: EntryRemainderCancelCommand[] = [];
+  result: PositionManagementHttpResult = internalErrorResult();
+  private readonly shouldBeCalled: boolean;
+
+  constructor(shouldBeCalled = true) {
+    this.shouldBeCalled = shouldBeCalled;
+  }
+
+  async apply(command: EntryRemainderCancelCommand): Promise<PositionManagementHttpResult> {
+    if (!this.shouldBeCalled) {
+      throw new Error("entryRemainderCancelService.apply must not be called for this test");
+    }
+    this.calls.push(command);
+    return this.result;
+  }
+}
+
 function routeDeps(overrides: {
   protectionApplicationService?: ProtectionApplicationServicePort;
   closeApplicationService?: CloseApplicationServicePort;
+  entryRemainderCancelService?: EntryRemainderCancelServicePort;
   isReady?: () => boolean;
 } = {}): {
   protectionApplicationService: ProtectionApplicationServicePort;
   closeApplicationService: CloseApplicationServicePort;
+  entryRemainderCancelService: EntryRemainderCancelServicePort;
   isReady: () => boolean;
 } {
   return {
     protectionApplicationService: overrides.protectionApplicationService ?? new FakeProtectionApplicationService(false),
     closeApplicationService: overrides.closeApplicationService ?? new FakeCloseApplicationService(false),
+    entryRemainderCancelService: overrides.entryRemainderCancelService ?? new FakeEntryRemainderCancelService(false),
     isReady: overrides.isReady ?? (() => true),
   };
 }
@@ -555,3 +580,96 @@ function makeResponse(): {
     body: () => JSON.parse(responseBody) as Record<string, any>,
   };
 }
+
+function entryRemainderRoute(): string {
+  return "/v1/strategy-instances/instance/trade-cycles/cycle/entry-remainder/cancel";
+}
+
+test("entry-remainder cancel route matches only POST on its exact path", () => {
+  assert.deepEqual(matchEntryRemainderCancelRoute("POST", entryRemainderRoute()), {
+    matched: true,
+    strategyInstanceId: "instance",
+    tradeCycleId: "cycle",
+  });
+  assert.deepEqual(matchEntryRemainderCancelRoute("PUT", entryRemainderRoute()), { matched: false });
+  assert.deepEqual(matchEntryRemainderCancelRoute("POST", closeRoute()), { matched: false });
+  assert.deepEqual(
+    matchEntryRemainderCancelRoute("POST", "/v1/strategy-instances/instance/trade-cycles/cycle/entry-remainder"),
+    { matched: false },
+  );
+});
+
+test("entry-remainder cancel with {} is dispatched once ready", async () => {
+  const request = makeRequest("POST", entryRemainderRoute(), "{}", { "content-type": "application/json" });
+  const response = makeResponse();
+  const service = new FakeEntryRemainderCancelService();
+  service.result = {
+    statusCode: 200,
+    body: {
+      strategy_instance_id: "instance",
+      trade_cycle_id: "cycle",
+      status: "entry_remainder_cancelled",
+      executed_quantity: "0.004",
+    },
+  };
+
+  const stdout = captureWrites(process.stdout);
+  try {
+    assert.equal(
+      await handlePositionManagementRoutes({
+        request,
+        response: response.response,
+        ...routeDeps({ entryRemainderCancelService: service }),
+      }),
+      true,
+    );
+  } finally {
+    stdout.restore();
+  }
+  assert.equal(response.status(), 200);
+  assert.deepEqual(response.body(), service.result.body);
+  assert.deepEqual(service.calls, [{ strategyInstanceId: "instance", tradeCycleId: "cycle" }]);
+  const finished = parseEvents(stdout.lines).find((event) => event.event === "operation_completed");
+  assert.equal(finished?.operation, "entry_remainder_cancel");
+  assert.equal(finished?.outcome, "entry_remainder_cancelled");
+});
+
+test("entry-remainder cancel rejects any body other than {} before dispatch", async () => {
+  for (const body of ['{"x":1}', "[]", '"text"', "null"]) {
+    const request = makeRequest("POST", entryRemainderRoute(), body, { "content-type": "application/json" });
+    const response = makeResponse();
+    assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+    assert.equal(response.status(), 422, body);
+    assert.equal(response.body().error.code, "validation_failed");
+  }
+});
+
+test("entry-remainder cancel maps malformed JSON to 400 and wrong content type to 415", async () => {
+  for (const body of ["", "{"]) {
+    const request = makeRequest("POST", entryRemainderRoute(), body, { "content-type": "application/json" });
+    const response = makeResponse();
+    assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+    assert.equal(response.status(), 400);
+    assert.equal(response.body().error.code, "malformed_json");
+  }
+  const request = makeRequest("POST", entryRemainderRoute(), "{}", { "content-type": "text/plain" });
+  const response = makeResponse();
+  assert.equal(await handlePositionManagementRoutes({ request, response: response.response, ...routeDeps() }), true);
+  assert.equal(response.status(), 415);
+  assert.equal(response.body().error.code, "unsupported_media_type");
+});
+
+test("entry-remainder cancel fails safe without dispatching when not ready", async () => {
+  const request = makeRequest("POST", entryRemainderRoute(), "{}", { "content-type": "application/json" });
+  const response = makeResponse();
+  assert.equal(
+    await handlePositionManagementRoutes({
+      request,
+      response: response.response,
+      ...routeDeps({ isReady: () => false }),
+    }),
+    true,
+  );
+  assert.equal(response.status(), 500);
+  assert.deepEqual(response.body(), internalErrorResult().body);
+});

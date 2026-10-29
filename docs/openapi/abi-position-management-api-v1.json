@@ -271,6 +271,154 @@
           }
         }
       }
+    },
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/entry-remainder/cancel": {
+      "post": {
+        "operationId": "cancelEntryRemainder",
+        "summary": "End the unfilled remainder of an already filled entry order of the trade cycle",
+        "description": "Applies only after the cycle's entry order has a captured first fill. ABI finds the order through the pair's own correlation; the request carries no exchange identifier. A live remainder is cancelled and confirmed terminal; an already terminal order is left alone. The position and its protection are never touched.",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntryRemainderCancelRequest"
+              },
+              "examples": {
+                "empty": {
+                  "value": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry order is confirmed terminal: its remainder was cancelled now, or it was already terminal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryRemainderCancelResponse"
+                },
+                "examples": {
+                  "cancelled": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "entry_remainder_cancelled",
+                      "executed_quantity": "0.004"
+                    }
+                  },
+                  "alreadyTerminal": {
+                    "value": {
+                      "strategy_instance_id": "runtime-owned-instance-id",
+                      "trade_cycle_id": "runtime-owned-cycle-id",
+                      "status": "entry_order_already_terminal",
+                      "executed_quantity": "0.01"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MalformedJsonError"
+                },
+                "example": {
+                  "error": {
+                    "code": "malformed_json",
+                    "message": "request body must be valid JSON"
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported media type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedMediaTypeError"
+                },
+                "example": {
+                  "error": {
+                    "code": "unsupported_media_type",
+                    "message": "content-type must be application/json"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Transport validation failed, no correlation record exists for the pair, or the pair's entry order has no captured fill",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryRemainderCancelBusinessError"
+                },
+                "examples": {
+                  "unknown_trade_cycle_binding": {
+                    "value": {
+                      "error": {
+                        "code": "unknown_trade_cycle_binding",
+                        "message": "no correlation record exists for the requested pair"
+                      }
+                    }
+                  },
+                  "entry_not_filled": {
+                    "value": {
+                      "error": {
+                        "code": "entry_not_filled",
+                        "message": "the requested pair's entry order has no captured fill"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Contradictory pair correlation, or the entry order could not be confirmed terminal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                },
+                "example": {
+                  "error": {
+                    "code": "internal_error",
+                    "message": "internal error"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -602,6 +750,89 @@
             }
           }
         }
+      },
+      "EntryRemainderCancelRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "description": "Always the empty object."
+      },
+      "EntryRemainderCancelResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "status",
+          "executed_quantity"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trade_cycle_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "entry_remainder_cancelled",
+              "entry_order_already_terminal"
+            ]
+          },
+          "executed_quantity": {
+            "description": "Exact-decimal text of the entry order's confirmed executed quantity; null when the cycle is already closed or the terminal order is no longer returned at all.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "format": "positive-exact-decimal"
+              }
+            ]
+          }
+        }
+      },
+      "EntryNotFilledError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "entry_not_filled"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "EntryRemainderCancelBusinessError": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ValidationFailedError"
+          },
+          {
+            "$ref": "#/components/schemas/UnknownTradeCycleBindingError"
+          },
+          {
+            "$ref": "#/components/schemas/EntryNotFilledError"
+          }
+        ]
       }
     }
   }

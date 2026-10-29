@@ -69,6 +69,13 @@ export type CloseOperationOutcome =
   | "unsupported_exchange_scope"
   | "internal_error";
 
+export type EntryRemainderCancelOperationOutcome =
+  | "entry_remainder_cancelled"
+  | "entry_order_already_terminal"
+  | "unknown_trade_cycle_binding"
+  | "entry_not_filled"
+  | "internal_error";
+
 export type RecoveryStateOperationOutcome =
   | "entry_order_live"
   | "entry_order_not_found"
@@ -86,6 +93,7 @@ export type OperationOutcomeMap = {
   open_position: OpenPositionOperationOutcome;
   protection: ProtectionOperationOutcome;
   close_position: CloseOperationOutcome;
+  entry_remainder_cancel: EntryRemainderCancelOperationOutcome;
   recovery_state: RecoveryStateOperationOutcome;
 };
 
@@ -218,6 +226,25 @@ export function classifyCloseResult(body: {
   switch (body.error?.code) {
     case "unknown_trade_cycle_binding":
     case "unsupported_exchange_scope":
+      return { outcome: body.error.code, failed: false };
+    case "internal_error":
+      return { outcome: "internal_error", failed: true };
+    default:
+      return { outcome: "internal_error", failed: true };
+  }
+}
+
+export function classifyEntryRemainderCancelResult(body: {
+  status?: string;
+  error?: { code: string };
+}): OperationClassification<"entry_remainder_cancel"> {
+  if (body.status === "entry_remainder_cancelled" || body.status === "entry_order_already_terminal") {
+    return { outcome: body.status, failed: false };
+  }
+
+  switch (body.error?.code) {
+    case "unknown_trade_cycle_binding":
+    case "entry_not_filled":
       return { outcome: body.error.code, failed: false };
     case "internal_error":
       return { outcome: "internal_error", failed: true };

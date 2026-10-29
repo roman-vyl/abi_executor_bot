@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  serializeEntryRemainderCancel,
   serializeProtectionApplied,
   serializeTradeCycleClosed,
   validateCloseCommand,
+  validateEntryRemainderCancelCommand,
   validateProtectionCommand,
 } from "../../src/domain/positionManagementApi.js";
 
@@ -123,6 +125,43 @@ test("close operation requires exposure_fraction and owns the documented error c
 
   const serializedCloseErrors = JSON.stringify(schemas.CloseBusinessError);
   assert.equal(serializedCloseErrors.includes("PositionNotOpenError"), false);
+});
+
+test("entry-remainder cancel OpenAPI examples and error codes conform to the runtime contract", async () => {
+  const document = await readDocument();
+  const operation =
+    document.paths["/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/entry-remainder/cancel"]
+      .post;
+  const schemas = document.components.schemas;
+
+  const request = validateEntryRemainderCancelCommand(
+    { strategyInstanceId: "runtime-owned-instance-id", tradeCycleId: "runtime-owned-cycle-id" },
+    operation.requestBody.content["application/json"].examples.empty.value,
+  );
+  assert.equal(request.ok, true);
+
+  for (const name of ["cancelled", "alreadyTerminal"]) {
+    const value = operation.responses["200"].content["application/json"].examples[name].value;
+    assert.deepEqual(
+      serializeEntryRemainderCancel({
+        strategyInstanceId: value.strategy_instance_id,
+        tradeCycleId: value.trade_cycle_id,
+        status: value.status,
+        executedQuantity: value.executed_quantity,
+      }).body,
+      value,
+    );
+  }
+
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500"]);
+  assert.deepEqual(
+    schemas.EntryRemainderCancelBusinessError.oneOf.map((entry: { $ref: string }) => entry.$ref),
+    [
+      "#/components/schemas/ValidationFailedError",
+      "#/components/schemas/UnknownTradeCycleBindingError",
+      "#/components/schemas/EntryNotFilledError",
+    ],
+  );
 });
 
 test("the retired DELETE .../open-position path is not documented", async () => {

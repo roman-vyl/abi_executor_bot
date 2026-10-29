@@ -74,7 +74,7 @@ ABI SHALL NOT read or close the position, place any order, or cancel, amend, or 
 - **THEN** the pair's correlation record is byte-for-byte the same as before the request
 
 ### Requirement: Success is a closed object
-A success SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status` (`entry_remainder_cancelled` | `entry_order_already_terminal`) and `executed_quantity` (exact-decimal text of the entry order's confirmed executed quantity, or `null` only for a `terminal_closed` record).
+A success SHALL be HTTP `200` with a closed JSON object containing exactly `strategy_instance_id`, `trade_cycle_id`, `status` (`entry_remainder_cancelled` | `entry_order_already_terminal`) and `executed_quantity` (exact-decimal text of the entry order's confirmed executed quantity, or `null` for a `terminal_closed` record or when the confirmed terminal order is no longer returned by the exchange at all).
 
 #### Scenario: Cancelled answer carries the executed quantity
 - **WHEN** ABI cancels a remainder after `0.004` of `0.010` was executed
