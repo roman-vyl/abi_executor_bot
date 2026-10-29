@@ -313,8 +313,9 @@ facts store. It is read-only: it authenticates with ABI's key, subscribes to `or
 - On Bybit Demo, funding settlements are booked but were not pushed on the WS `execution`
   topic (stage 0, 2026-10-27); funding comes only from REST.
 - Schema version 2 adds `account_snapshots` and `stream_connection_log`; a version 1 file is
-  upgraded in place at the first start. An older ABI image refuses a version 2 file
-  (`exchange_facts_schema_newer`) and runs without the journal.
+  upgraded in place at the first start. Schema version 3 adds `rest_sync_windows` (REST
+  reconciliation); a version 1 or 2 file is upgraded in place the same way. An older ABI image
+  refuses a newer file (`exchange_facts_schema_newer`) and runs without the journal.
 
 ### Exchange order linker
 
@@ -333,6 +334,10 @@ has been replayed, every second on its own; no trading route calls it, and it ne
   `no_label` (account-wide cancel-all / close-all, liquidation, ADL), `child_type_unknown`,
   `parent_ambiguous`, `own_label_ambiguous`, `link_conflict`, `invalid_link`. Funding
   executions and position / wallet snapshots belong to no cycle.
+- An order state read from REST without `orderLinkId` and `parentOrderLinkId` decides nothing
+  (Bybit REST order history has no `parentOrderLinkId`): the order is classified by its first WS
+  or labelled fact, and while it has none it is counted in
+  `exchangeCompleteness.unlabeledRestOrders`, not as `no_label`.
 - Waiting (`waitingOrders`): an ABI order whose label owner is not known yet
   (`own_label_unknown`) or a child whose entry has no link yet (`parent_not_found`). They are
   retried every second without deadline and linked as soon as the missing record is stored. A
@@ -343,6 +348,48 @@ has been replayed, every second on its own; no trading route calls it, and it ne
   `stopped`), `lastTickAtMs`, `linksWritten`, `waitingOrders`, `notLinkableOrders`,
   `lastError`. Events: `exchange_order_linker_started`, `exchange_order_linker_tick_failed`
   (`errorCode`), `exchange_order_linker_link_conflict` (`orderId`, `role`).
+
+### Exchange REST reconciliation
+
+Fills gaps of the private stream from Bybit REST history and checks completeness (OpenSpec
+`abi-exchange-rest-reconciliation-v1`). Runs only with the store enabled and a key, after the
+correlation store has been replayed. Read only: `GET /v5/order/history` and
+`GET /v5/execution/list` (`category=linear`, no symbol; order history scoped by the settle coin),
+windows of at most 7 days, cursor pages. It never creates, amends or cancels an order, no
+trading route calls it, and it calls nothing in trading.
+
+- When: at start every part of the last 30 days not yet covered (first start: 5 windows per
+  endpoint, about 10 requests; later starts only the time since the last covered window); after
+  every reconnect of the stream, from the disconnect minus 2 minutes to now (read from
+  `stream_connection_log`); every 10 minutes the last hour.
+- Load: one request at a time, at least 500 ms apart, none in the first 30 s after each 5-minute
+  UTC boundary. A sweep is 2 requests when the hour has few records.
+- Records are stored as facts with `source` `rest`; a record already stored from WS gives no
+  second row (`recordsNew` counts only new ones).
+- Coverage: each completed window is a row in `rest_sync_windows`, written with its last page.
+  A window that fails half way keeps its stored pages, gets no row and is fetched again after
+  5 s, 30 s, then every 60 s, without deadline.
+- If Bybit refuses a request without symbol (`retCode 10001`, event
+  `exchange_rest_symbol_required`), that endpoint is asked per symbol: every symbol in the store
+  and in the correlation records.
+- `GET /health` `exchangeRest`: `state` (`disabled`, `backfilling`, `idle`, `fetching`,
+  `stopped`), `reason`, `coveredFromMs` (covered continuously from this time to the last window
+  on both endpoints), `backfillDone`, `queueWindows`, `requests`, `recordsFetched`, `recordsNew`,
+  `lastSweepAtMs`, `lastError`. Events: `exchange_rest_reconciler_started`,
+  `exchange_rest_backfill_done`, `exchange_rest_request_failed` (`endpoint`, `errorCode`, only
+  when the code changes).
+- Completeness check, after the backfill and after every sweep, read only. `GET /health`
+  `exchangeCompleteness` and event `exchange_completeness_checked` (counts and up to 20 ids each;
+  `warn` when any count is not 0):
+  - `execMismatchOrders`: orders created since `coveredFromMs` whose latest stored state is
+    terminal and whose stored `Trade` executions do not add up to `cumExecQty`.
+  - `uncoveredGaps`: stream gaps of the last 30 days not inside completed windows of both
+    endpoints.
+  - `closedCyclesWithoutCloseFill`: `terminal_closed` cycles with their first fill since
+    `coveredFromMs` that have no linked `close` / `stop_loss` / `take_profit` order with a
+    `Trade` execution (also a manual close-all without label shows here).
+  - `unlabeledRestOrders`: orders seen only by REST, without any label.
+  All four 0 means the journal is complete for the covered time.
 
 ## Read-only sandbox smoke
 

@@ -108,6 +108,21 @@ export interface BybitAdapter {
   placeMarketOrder(input: PlaceMarketOrderInput): Promise<unknown>;
 }
 
+export type BybitHistoryWindowInput = {
+  category: string;
+  symbol?: string;
+  startTime: number;
+  endTime: number;
+  cursor?: string;
+};
+
+// The read-only history pages the exchange facts reconciler uses; only the
+// REST adapter has them, trading never calls them.
+export interface BybitHistoryWindowReader {
+  getOrderHistoryWindow(input: BybitHistoryWindowInput): Promise<unknown>;
+  getExecutionWindow(input: BybitHistoryWindowInput): Promise<unknown>;
+}
+
 export type GetWalletBalanceInput = {
   coin?: string;
 };
@@ -123,7 +138,7 @@ export type GetOpenPositionsInput = {
   settleCoin?: string;
 };
 
-export class RestBybitAdapter implements BybitAdapter {
+export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader {
   private readonly baseUrl: string;
   private readonly config: AbiConfig;
 
@@ -282,6 +297,34 @@ export class RestBybitAdapter implements BybitAdapter {
     }
 
     return this.signedGet("/v5/execution/list", params);
+  }
+
+  // One page of order history in a window of at most 7 days, for the exchange
+  // facts REST reconciliation (abi-exchange-rest-reconciliation-v1 D1). Read
+  // only. Without a symbol the settle coin scopes the request.
+  async getOrderHistoryWindow(input: BybitHistoryWindowInput): Promise<unknown> {
+    return this.signedGet("/v5/order/history", this.historyWindowParams(input, "50", true));
+  }
+
+  // One page of executions in a window of at most 7 days (D1). Read only.
+  async getExecutionWindow(input: BybitHistoryWindowInput): Promise<unknown> {
+    return this.signedGet("/v5/execution/list", this.historyWindowParams(input, "100", false));
+  }
+
+  private historyWindowParams(input: BybitHistoryWindowInput, limit: string, settleCoinScope: boolean): URLSearchParams {
+    const params = new URLSearchParams({ category: input.category });
+    if (input.symbol !== undefined) {
+      params.set("symbol", input.symbol);
+    } else if (settleCoinScope) {
+      params.set("settleCoin", this.config.bybitSettleCoin);
+    }
+    params.set("startTime", String(input.startTime));
+    params.set("endTime", String(input.endTime));
+    params.set("limit", limit);
+    if (input.cursor !== undefined) {
+      params.set("cursor", input.cursor);
+    }
+    return params;
   }
 
   // Public, unauthenticated — unlike every other bybitAdapter.ts method, this

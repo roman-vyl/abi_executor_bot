@@ -4,6 +4,7 @@ import type { AbiConfig } from "../config/config.js";
 import type { ExchangeFactsStoreState } from "../app/exchangeFactsStartup.js";
 import { getLiveExecutionMode } from "../execution/liveGuard.js";
 import type { ExchangeLinkerStatus } from "../exchangeFacts/exchangeOrderLinker.js";
+import type { ExchangeCompletenessStatus, ExchangeRestStatus } from "../exchangeFacts/exchangeRestReconciler.js";
 import type { ExchangeStreamStatus } from "../exchangeStream/exchangeStreamRecorder.js";
 import { writeJson } from "../app/http.js";
 
@@ -15,8 +16,11 @@ export async function handleSystemRoutes(input: {
   exchangeFacts: ExchangeFactsStoreState;
   exchangeStream: ExchangeStreamStatus;
   exchangeLinker: ExchangeLinkerStatus;
+  exchangeRest: ExchangeRestStatus;
+  exchangeCompleteness: ExchangeCompletenessStatus;
 }): Promise<boolean> {
-  const { request, response, config, entryPackageReady, exchangeFacts, exchangeStream, exchangeLinker } = input;
+  const { request, response, config, entryPackageReady, exchangeFacts, exchangeStream, exchangeLinker, exchangeRest, exchangeCompleteness } =
+    input;
 
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, entryPackageReady ? 200 : 503, {
@@ -40,6 +44,8 @@ export async function handleSystemRoutes(input: {
       // Informational only, like exchangeFactsStore.
       exchangeStream,
       exchangeLinker,
+      exchangeRest,
+      exchangeCompleteness,
     });
     return true;
   }

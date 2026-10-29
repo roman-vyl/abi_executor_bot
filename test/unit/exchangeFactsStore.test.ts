@@ -73,7 +73,7 @@ test("new database gets the schema and environment meta, and no -shm file while 
   db.close();
   assert.deepEqual(meta, {
     storage_schema: "abi-exchange-facts-storage",
-    schema_version: "2",
+    schema_version: "3",
     dedup_key_version: "1",
     snapshot_key_version: "1",
     bybit_env: "demo",
@@ -81,7 +81,7 @@ test("new database gets the schema and environment meta, and no -shm file while 
   });
 });
 
-test("reopening a v2 database of the same environment keeps every row", (t) => {
+test("reopening a v3 database of the same environment keeps every row", (t) => {
   const dbPath = path.join(tempDir(t), "facts.sqlite3");
   const first = openDemo(dbPath);
   first.writeFacts([fact("order_state", ENTRY_ORDER_RECORD)]);
@@ -92,8 +92,17 @@ test("reopening a v2 database of the same environment keeps every row", (t) => {
   second.close();
 });
 
-// Turns a fresh v2 file into the exact v1 layout (v1 tables, v1 meta).
+// Turns a fresh v3 file into the exact v2 layout (v2 tables, v2 meta).
+function downgradeToV2(dbPath: string): void {
+  const db = new Database(dbPath);
+  db.exec("DROP TABLE rest_sync_windows;");
+  db.prepare("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'").run();
+  db.close();
+}
+
+// Turns a fresh v3 file into the exact v1 layout (v1 tables, v1 meta).
 function downgradeToV1(dbPath: string): void {
+  downgradeToV2(dbPath);
   const db = new Database(dbPath);
   db.exec("DROP TABLE account_snapshots; DROP TABLE stream_connection_log;");
   db.prepare("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'").run();
@@ -101,7 +110,7 @@ function downgradeToV1(dbPath: string): void {
   db.close();
 }
 
-test("a v1 database is upgraded to v2 in place and keeps every row", (t) => {
+test("a v1 database is upgraded to v3 in place and keeps every row", (t) => {
   const dbPath = path.join(tempDir(t), "facts.sqlite3");
   const first = openDemo(dbPath);
   first.writeFacts([fact("order_state", ENTRY_ORDER_RECORD), fact("execution", ENTRY_EXECUTION_RECORD)]);
@@ -123,8 +132,79 @@ test("a v1 database is upgraded to v2 in place and keeps every row", (t) => {
     db.prepare<[], { key: string; value: string }>("SELECT key, value FROM schema_meta").all().map((r) => [r.key, r.value]),
   );
   db.close();
-  assert.equal(meta.schema_version, "2");
+  assert.equal(meta.schema_version, "3");
   assert.equal(meta.snapshot_key_version, "1");
+});
+
+test("a v2 database is upgraded to v3 in place and keeps every row", (t) => {
+  const dbPath = path.join(tempDir(t), "facts.sqlite3");
+  const first = openDemo(dbPath);
+  first.writeFacts([fact("order_state", ENTRY_ORDER_RECORD), fact("execution", ENTRY_EXECUTION_RECORD)]);
+  first.writeStreamBatch({
+    facts: [],
+    snapshots: [],
+    logs: [{ atMs: 1_793_100_000_000, event: "connecting", connId: null, detail: null }],
+  });
+  first.close();
+  downgradeToV2(dbPath);
+
+  const upgraded = openDemo(dbPath);
+  assert.equal(upgraded.readFactsAfter(0, 10).length, 2);
+  assert.equal(upgraded.readConnectionLogAfter(0, 10).length, 1);
+  assert.deepEqual(upgraded.readRestWindows("order_history", 0), []);
+  upgraded.close();
+
+  const db = new Database(dbPath, { readonly: true });
+  const version = db.prepare<[], { value: string }>("SELECT value FROM schema_meta WHERE key = 'schema_version'").get();
+  db.close();
+  assert.equal(version?.value, "3");
+});
+
+test("a REST page and its coverage row are written together; invalid records are skipped", (t) => {
+  const store = openDemo(path.join(tempDir(t), "facts.sqlite3"));
+  t.after(() => store.close());
+  store.writeFacts([fact("execution", ENTRY_EXECUTION_RECORD)]);
+
+  const rest = (kind: FactInput["kind"], rawJson: string): FactInput => ({
+    kind,
+    source: "rest",
+    sourceEndpoint: "rest:/v5/execution/list",
+    rawJson,
+    receivedAtMs: 1_793_100_000_000,
+  });
+  const first = store.writeRestPage({ facts: [rest("execution", SL_EXECUTION_RECORD)] });
+  assert.deepEqual(first, { inserted: 1, duplicates: 0, invalid: 0 });
+  assert.deepEqual(store.readRestWindows("execution_list", 0), []);
+
+  const last = store.writeRestPage({
+    facts: [rest("execution", ENTRY_EXECUTION_RECORD), rest("execution", '{"symbol":"BTCUSDT"}')],
+    window: {
+      endpoint: "execution_list",
+      startMs: 1_793_000_000_000,
+      endMs: 1_793_100_000_000,
+      completedAtMs: 1_793_100_000_001,
+      records: 1,
+      newRecords: 1,
+    },
+  });
+  assert.deepEqual(last, { inserted: 0, duplicates: 1, invalid: 1 });
+  const windows = store.readRestWindows("execution_list", 0);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].records, 3);
+  assert.equal(windows[0].newRecords, 1);
+  assert.deepEqual(store.readRestWindows("order_history", 0), []);
+  assert.deepEqual(store.readRestWindows("execution_list", 1_793_100_000_001), []);
+
+  assert.throws(
+    () =>
+      store.writeRestPage({
+        facts: [rest("execution", FUNDING_EXECUTION_RECORD)],
+        window: { endpoint: "execution_list", startMs: 5, endMs: 5, completedAtMs: 6, records: 0, newRecords: 0 },
+      }),
+    (error: unknown) => error instanceof ExchangeFactsWriteError && error.code === "invalid_window",
+  );
+  // The refused window took its page with it.
+  assert.equal(store.readFactsAfter(0, 100).length, 2);
 });
 
 test("a v1 database of another environment is refused and not upgraded", (t) => {
@@ -171,7 +251,7 @@ test("a file with tables but no schema_meta is refused", (t) => {
 test("a newer schema version and an unknown dedup rule are refused", (t) => {
   const dir = tempDir(t);
   for (const [key, value, reason] of [
-    ["schema_version", "3", "exchange_facts_schema_newer"],
+    ["schema_version", "4", "exchange_facts_schema_newer"],
     ["dedup_key_version", "2", "exchange_facts_dedup_rule_unknown"],
     ["snapshot_key_version", "2", "exchange_facts_dedup_rule_unknown"],
   ] as const) {

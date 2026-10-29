@@ -5,7 +5,7 @@ Stages 1-3 are merged and deployed on the Mac demo: the store (`exchange-facts-s
 ## D1. Endpoints and requests
 
 - `/v5/order/history` and `/v5/execution/list`, `category=linear`, `startTime`/`endTime` window of at most 7 days, `limit` 50 / 100, `nextPageCursor` until empty.
-- Without `symbol`, if Bybit accepts that for `linear` on the account (task 0.1 checks it on Demo). If a symbol is required, the reconciler asks per symbol: every symbol in correlation records plus every symbol already in the store.
+- Without `symbol`; order history is scoped by `settleCoin` (the configured settle coin), which Bybit accepts for `linear` on every account type. If Bybit still refuses a request without symbol (`retCode 10001`), the reconciler switches that endpoint to per-symbol requests for the rest of the run: every symbol in correlation records plus every symbol already in the store (event `exchange_rest_symbol_required`). Task 0.1 checks which case Demo is.
 - New adapter methods `getOrderHistoryWindow` and `getExecutionWindow` reuse `signedGet`, so the existing GET timeout and retry apply. No new HTTP client.
 - REST order history returns the latest state of each order only. Intermediate states during a gap are not recoverable; executions are complete.
 
@@ -36,10 +36,10 @@ Stages 1-3 are merged and deployed on the Mac demo: the store (`exchange-facts-s
 
 ## D6. Completeness check
 
-Runs after every completed sweep, on the store only, in a bounded read:
-- `execMismatchOrders`: orders whose latest stored state is terminal (`Filled`, `Cancelled`, `PartiallyFilledCanceled`, `Deactivated`, `Rejected`) and whose stored `Trade` executions do not sum to that state's `cumExecQty`.
+Runs when the queue drains after the backfill or a sweep, on the store only, in a bounded read. `coveredFromMs` is the start of the coverage that reaches the latest completed window, on both endpoints:
+- `execMismatchOrders`: orders created since `coveredFromMs` whose latest stored state is terminal (`Filled`, `Cancelled`, `PartiallyFilledCanceled`, `Deactivated`, `Rejected`) and whose stored `Trade` executions do not sum to that state's `cumExecQty`.
 - `uncoveredGaps`: stream gaps from the connection log not inside completed windows of both endpoints.
-- `closedCyclesWithoutCloseFill`: correlation records `terminal_closed` since the earliest covered time whose cycle has no linked `close` / `stop_loss` / `take_profit` order with a `Trade` execution.
+- `closedCyclesWithoutCloseFill`: correlation records `terminal_closed` with `first_fill_at_ms` since `coveredFromMs` (a cycle that never filled needs no close) whose cycle has no linked `close` / `stop_loss` / `take_profit` order with a `Trade` execution.
 - `unlabeledRestOrders` (D5).
 Each count with up to 20 ids in the event `exchange_completeness_checked`; no secrets, no payloads.
 
