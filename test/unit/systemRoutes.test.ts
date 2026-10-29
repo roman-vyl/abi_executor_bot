@@ -5,9 +5,15 @@ import test from "node:test";
 
 import type { ExchangeFactsStore } from "../../src/exchangeFacts/exchangeFactsStore.js";
 import { disabledLinkerStatus } from "../../src/exchangeFacts/exchangeOrderLinker.js";
+import { disabledRestStatus, emptyCompletenessStatus } from "../../src/exchangeFacts/exchangeRestReconciler.js";
 import { disabledStreamStatus } from "../../src/exchangeStream/exchangeStreamRecorder.js";
 import { handleSystemRoutes } from "../../src/routes/systemRoutes.js";
 import { makeTestConfig } from "../fixtures/config.js";
+
+const restDisabled = {
+  exchangeRest: disabledRestStatus("store_not_enabled"),
+  exchangeCompleteness: emptyCompletenessStatus(),
+};
 
 test("health is ready only when entry-package execution is ready", async () => {
   const request = makeRequest("GET", "/health");
@@ -22,6 +28,8 @@ test("health is ready only when entry-package execution is ready", async () => {
       exchangeFacts: { status: "disabled" },
       exchangeStream: disabledStreamStatus("store_not_enabled"),
       exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+    ...restDisabled,
+      ...restDisabled,
     }),
     true,
   );
@@ -44,6 +52,8 @@ test("health remains successful when entry-package execution is ready", async ()
       exchangeFacts: { status: "disabled" },
       exchangeStream: disabledStreamStatus("store_not_enabled"),
       exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+    ...restDisabled,
+      ...restDisabled,
     }),
     true,
   );
@@ -69,6 +79,8 @@ test("health reports the exchange facts store without changing ok or the status"
       exchangeFacts,
       exchangeStream: disabledStreamStatus("store_not_enabled"),
       exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+    ...restDisabled,
+      ...restDisabled,
     });
 
     assert.equal(response.status(), 200);
@@ -99,6 +111,7 @@ test("health reports the exchange stream without changing ok or the status", asy
       lastWriteAtMs: 1_793_105_274_202,
     },
     exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+    ...restDisabled,
   });
 
   assert.equal(response.status(), 200);
@@ -171,3 +184,39 @@ function makeResponse(): {
     body: () => JSON.parse(responseBody) as Record<string, unknown>,
   };
 }
+
+test("health reports REST reconciliation and completeness without changing ok or the status", async () => {
+  const response = makeResponse();
+  const exchangeRest = {
+    state: "backfilling" as const,
+    backfillDone: false,
+    queueWindows: 7,
+    requests: 3,
+    recordsFetched: 40,
+    recordsNew: 12,
+    lastError: "timeout",
+  };
+  const exchangeCompleteness = {
+    checkedAtMs: 1_793_105_274_202,
+    execMismatchOrders: 1,
+    uncoveredGaps: 0,
+    closedCyclesWithoutCloseFill: 2,
+    unlabeledRestOrders: 0,
+  };
+  await handleSystemRoutes({
+    request: makeRequest("GET", "/health"),
+    response: response.response,
+    config: makeTestConfig(),
+    entryPackageReady: true,
+    exchangeFacts: { status: "enabled", store: {} as ExchangeFactsStore },
+    exchangeStream: disabledStreamStatus("store_not_enabled"),
+    exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+    exchangeRest,
+    exchangeCompleteness,
+  });
+
+  assert.equal(response.status(), 200);
+  assert.equal(response.body().ok, true);
+  assert.deepEqual(response.body().exchangeRest, exchangeRest);
+  assert.deepEqual(response.body().exchangeCompleteness, exchangeCompleteness);
+});

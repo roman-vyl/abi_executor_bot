@@ -40,7 +40,7 @@ test("serviceStartingFields reports the exchange facts store", () => {
   const store = {} as ExchangeFactsStore;
   const enabled = serviceStartingFields(makeTestConfig({ exchangeFactsEnabled: true }), { status: "enabled", store });
   assert.equal(enabled.exchangeFactsStore, "enabled");
-  assert.equal(enabled.exchangeFactsSchemaVersion, 2);
+  assert.equal(enabled.exchangeFactsSchemaVersion, 3);
 
   const unavailable = serviceStartingFields(makeTestConfig({ exchangeFactsEnabled: true }), {
     status: "unavailable",
