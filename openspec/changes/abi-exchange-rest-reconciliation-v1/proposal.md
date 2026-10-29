@@ -9,6 +9,7 @@ Owner decisions:
 - 2026-10-29 06:37: discuss REST at a high level.
 - 2026-10-29 07:51: at start read the whole REST history.
 - 2026-10-29 07:55 «Давай»: load as proposed (about 210 requests once at the first start, a sweep every 10 minutes over the last hour, no REST in the first 30 s after a 5-minute bar close).
+- 2026-10-29 10:04 «Давай при старте месяц читать»: startup backfill reads the last 30 days, not 2 years.
 
 What already exists:
 - `BybitAdapter.getOrderHistoryForSymbol` (startTime/endTime/cursor) and `getExecutionList`.
@@ -20,7 +21,7 @@ What already exists:
 
 - New ABI component, the exchange REST reconciler, in `src/exchangeFacts/`. It runs only when the store is `enabled` and API keys are present. It reads `/v5/order/history` and `/v5/execution/list` (category `linear`) and stores every record as a fact with `source` `rest`.
 - Three triggers, one serial queue:
-  1. **Startup backfill.** Every interval of the last 730 days (Bybit's history limit) not yet covered is fetched in 7-day windows. The first start reads all history. Later starts read only what is not covered yet.
+  1. **Startup backfill.** Every interval of the last 30 days not yet covered is fetched in 7-day windows. The first start reads the last 30 days. Later starts read only what is not covered yet.
   2. **After a reconnect.** The window from the `disconnected` time minus 2 minutes up to now.
   3. **Sweep.** Every 10 minutes, the last 60 minutes.
 - Pace: one request at a time, at least 500 ms apart (≤ 2 req/s). No request in the first 30 s after a 5-minute bar boundary. Only reads, never order create, amend or cancel.
