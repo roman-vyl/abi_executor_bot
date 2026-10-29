@@ -39,11 +39,28 @@ export type ExchangeStreamStatus = {
   reconnects: number;
   bufferedRecords: number;
   droppedRecords: number;
+  // Since start: stream records taken from frames, rows newly stored, records
+  // the store already had (dedup), and the time of the last stored batch.
+  receivedRecords: number;
+  writtenFacts: number;
+  writtenSnapshots: number;
+  duplicateRecords: number;
+  lastWriteAtMs?: number;
   lastWriteError?: string;
 };
 
 export function disabledStreamStatus(reason: string): ExchangeStreamStatus {
-  return { state: "disabled", reason, reconnects: 0, bufferedRecords: 0, droppedRecords: 0 };
+  return {
+    state: "disabled",
+    reason,
+    reconnects: 0,
+    bufferedRecords: 0,
+    droppedRecords: 0,
+    receivedRecords: 0,
+    writtenFacts: 0,
+    writtenSnapshots: 0,
+    duplicateRecords: 0,
+  };
 }
 
 // What the recorder needs from the store: one transaction per flush.
@@ -116,6 +133,11 @@ export class ExchangeStreamRecorder {
   private droppedRecords = 0;
   private droppedSinceLastLog = 0;
   private lastWriteError: string | undefined;
+  private receivedRecords = 0;
+  private writtenFacts = 0;
+  private writtenSnapshots = 0;
+  private duplicateRecords = 0;
+  private lastWriteAtMs: number | undefined;
   private flushScheduled = false;
   private finalFlushDone = false;
 
@@ -177,6 +199,11 @@ export class ExchangeStreamRecorder {
       reconnects: this.reconnects,
       bufferedRecords: this.records.length,
       droppedRecords: this.droppedRecords,
+      receivedRecords: this.receivedRecords,
+      writtenFacts: this.writtenFacts,
+      writtenSnapshots: this.writtenSnapshots,
+      duplicateRecords: this.duplicateRecords,
+      ...(this.lastWriteAtMs !== undefined ? { lastWriteAtMs: this.lastWriteAtMs } : {}),
       ...(this.lastWriteError !== undefined ? { lastWriteError: this.lastWriteError } : {}),
     };
   }
@@ -364,6 +391,7 @@ export class ExchangeStreamRecorder {
   }
 
   private enqueue(record: BufferedRecord): void {
+    this.receivedRecords += 1;
     if (this.records.length >= this.maxBufferedRecords) {
       this.droppedRecords += 1;
       this.droppedSinceLastLog += 1;
@@ -386,7 +414,7 @@ export class ExchangeStreamRecorder {
   // Returns false when the store failed and the rows must stay buffered.
   private writeOrRecover(records: readonly BufferedRecord[], logs: readonly ConnectionLogInput[]): boolean {
     try {
-      this.options.sink.writeStreamBatch(toBatch(records, logs));
+      this.write(toBatch(records, logs));
       this.lastWriteError = undefined;
       return true;
     } catch (error) {
@@ -399,7 +427,7 @@ export class ExchangeStreamRecorder {
 
     // One invalid record must not cost the batch: write one by one (design D6).
     try {
-      this.options.sink.writeStreamBatch(toBatch([], logs));
+      this.write(toBatch([], logs));
     } catch (error) {
       if (!isValidationError(error)) {
         this.lastWriteError = describe(error);
@@ -410,7 +438,7 @@ export class ExchangeStreamRecorder {
     }
     for (const record of records) {
       try {
-        this.options.sink.writeStreamBatch(toBatch([record], []));
+        this.write(toBatch([record], []));
       } catch (error) {
         if (!isValidationError(error)) {
           this.lastWriteError = describe(error);
@@ -425,6 +453,19 @@ export class ExchangeStreamRecorder {
     }
     this.lastWriteError = undefined;
     return true;
+  }
+
+  // Counts only what the store reports back; a batch without records
+  // (connection log rows alone) does not move lastWriteAtMs.
+  private write(batch: StreamBatch): void {
+    const result = this.options.sink.writeStreamBatch(batch);
+    if (batch.facts.length === 0 && batch.snapshots.length === 0) {
+      return;
+    }
+    this.writtenFacts += result.facts.inserted;
+    this.writtenSnapshots += result.snapshots.inserted;
+    this.duplicateRecords += result.facts.duplicates + result.snapshots.duplicates;
+    this.lastWriteAtMs = this.now();
   }
 
   private safely(action: () => void): void {
