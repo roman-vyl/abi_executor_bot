@@ -877,7 +877,9 @@ Configuration читается из environment.
 | `ABI_ENTRY_PACKAGE_CORRELATION_PATH` | `./var/abi_entry_package_correlation.jsonl` | durable correlation store |
 | `ABI_INSTRUMENT_RULES_CACHE_TTL_MS` | `300000` | trading-rules cache TTL |
 | `ABI_BYBIT_REQUEST_TIMEOUT_MS` | `10000` | Bybit request timeout для POST (ордера) |
-| `ABI_BYBIT_READ_TIMEOUT_MS` | `1500` | таймаут GET-запросов (только чтение); при таймауте один немедленный повтор с тем же таймаутом |
+| `ABI_BYBIT_READ_TIMEOUT_MS` | `1500` | таймаут GET-запросов (только чтение); при таймауте или разрыве соединения (`UND_ERR_SOCKET`, `ECONNRESET`, `EPIPE`) один немедленный повтор с тем же таймаутом |
+| `ABI_BYBIT_KEEPALIVE_TIMEOUT_MS` | `200000` | сколько ABI держит простаивающее соединение с Bybit в своём пуле (Bybit Demo сам закрывает через 240 с) |
+| `ABI_BYBIT_HEARTBEAT_INTERVAL_MS` | `60000` | фоновый `GET /v5/market/time` через тот же пул, чтобы соединение не простаивало; `0` = выключен |
 | `ABI_DIAGNOSTICS_PATH` | empty (off) | временная диагностика: JSONL-файл, по строке на операцию (open-position и др.) с временем каждого запроса к Bybit и причиной internal_error; на поведение не влияет, ошибки записи игнорируются |
 | `ABI_POSITION_SIZING_MODE` | `minimum` | `minimum` or `risk` (risk percent of `totalWalletBalance`, needs API keys) |
 | `ABI_CONFIG_PATH` | empty (no file) | JSON-файл режима входа, читается один раз при старте (см. ниже) |

@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "better-sqlite3": "12.9.0",
+    "undici": "6.24.1",
     "ws": "8.21.3"
   }
 }

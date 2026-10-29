@@ -1,4 +1,7 @@
 import { createHmac } from "node:crypto";
+import diagnosticsChannel from "node:diagnostics_channel";
+
+import { Agent } from "undici";
 
 import type { AbiConfig } from "../config/config.js";
 import { timeBybitRequest } from "../observability/diagnostics.js";
@@ -138,18 +141,79 @@ export type GetOpenPositionsInput = {
   settleCoin?: string;
 };
 
+// Connection counters of one window (abi-bybit-connection-keepalive-v1 D6).
+export type BybitConnectionCounters = {
+  newConnections: number;
+  connectErrors: number;
+  getRetriesTimeout: number;
+  getRetriesConnectionClosed: number;
+};
+
+// Fetch failure causes that mean an established connection broke; only these
+// (and the read timeout) earn a GET its one repeat.
+const CONNECTION_BREAK_CODES = new Set(["UND_ERR_SOCKET", "ECONNRESET", "EPIPE"]);
+
 export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader {
   private readonly baseUrl: string;
   private readonly config: AbiConfig;
+  // One keep-alive pool for every Bybit request of this adapter, GET and POST
+  // (abi-bybit-connection-keepalive-v1 D1). Bybit sends no Keep-Alive hint,
+  // so keepAliveTimeout is the effective idle limit.
+  private readonly agent: Agent;
+  private readonly hostname: string;
+  private counters: BybitConnectionCounters = emptyConnectionCounters();
+  private readonly onConnected = (message: unknown) => {
+    if (this.isOwnConnection(message)) {
+      this.counters.newConnections += 1;
+    }
+  };
+  private readonly onConnectError = (message: unknown) => {
+    if (this.isOwnConnection(message)) {
+      this.counters.connectErrors += 1;
+    }
+  };
 
-  constructor(config: AbiConfig) {
+  // `baseUrl` is a test seam only; production derives it from BYBIT_ENV.
+  constructor(config: AbiConfig, options: { baseUrl?: string } = {}) {
     this.config = config;
-    this.baseUrl = getBybitBaseUrl(config);
+    this.baseUrl = options.baseUrl ?? getBybitBaseUrl(config);
+    this.hostname = new URL(this.baseUrl).hostname;
+    this.agent = new Agent({
+      keepAliveTimeout: config.bybitKeepAliveTimeoutMs,
+      keepAliveMaxTimeout: config.bybitKeepAliveTimeoutMs,
+    });
+    diagnosticsChannel.subscribe("undici:client:connected", this.onConnected);
+    diagnosticsChannel.subscribe("undici:client:connectError", this.onConnectError);
+  }
+
+  // The counters since the last call; the summary event reads them once per window.
+  takeConnectionCounters(): BybitConnectionCounters {
+    const taken = this.counters;
+    this.counters = emptyConnectionCounters();
+    return taken;
+  }
+
+  // Releases the pool on shutdown without waiting for idle connections.
+  close(): void {
+    diagnosticsChannel.unsubscribe("undici:client:connected", this.onConnected);
+    diagnosticsChannel.unsubscribe("undici:client:connectError", this.onConnectError);
+    this.agent.close().catch(() => undefined);
+  }
+
+  private isOwnConnection(message: unknown): boolean {
+    const params = (message as { connectParams?: { hostname?: unknown } } | undefined)?.connectParams;
+    return params?.hostname === this.hostname;
+  }
+
+  private fetchInit(init: RequestInit): RequestInit {
+    // undici's Agent is the dispatcher of Node's built-in fetch; the DOM
+    // RequestInit type does not list the option.
+    return { ...init, dispatcher: this.agent } as RequestInit;
   }
 
   async getServerTime(): Promise<unknown> {
     return this.readWithRetry("/v5/market/time", async (signal) => {
-      const response = await fetch(`${this.baseUrl}/v5/market/time`, { signal });
+      const response = await fetch(`${this.baseUrl}/v5/market/time`, this.fetchInit({ signal }));
       return readBybitResponse(response);
     });
   }
@@ -336,9 +400,10 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
     });
 
     return this.readWithRetry("/v5/market/instruments-info", async (signal) => {
-      const response = await fetch(`${this.baseUrl}/v5/market/instruments-info?${params.toString()}`, {
-        signal,
-      });
+      const response = await fetch(
+        `${this.baseUrl}/v5/market/instruments-info?${params.toString()}`,
+        this.fetchInit({ signal }),
+      );
       return readBybitResponse(response);
     });
   }
@@ -346,9 +411,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   async getOrderPriceLimit(category: string, symbol: string): Promise<unknown> {
     const params = new URLSearchParams({ category, symbol });
     return this.readWithRetry("/v5/market/price-limit", async (signal) => {
-      const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, {
-        signal,
-      });
+      const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, this.fetchInit({ signal }));
       return readBybitResponse(response);
     });
   }
@@ -387,31 +450,39 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
       const signature = createHmac("sha256", this.config.bybitApiSecret)
         .update(signaturePayload)
         .digest("hex");
-      const response = await fetch(`${this.baseUrl}${path}?${queryString}`, {
-        method: "GET",
-        headers: {
-          "X-BAPI-API-KEY": this.config.bybitApiKey,
-          "X-BAPI-TIMESTAMP": timestamp,
-          "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
-          "X-BAPI-SIGN": signature,
-        },
-        signal,
-      });
+      const response = await fetch(
+        `${this.baseUrl}${path}?${queryString}`,
+        this.fetchInit({
+          method: "GET",
+          headers: {
+            "X-BAPI-API-KEY": this.config.bybitApiKey,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
+            "X-BAPI-SIGN": signature,
+          },
+          signal,
+        }),
+      );
 
       return readBybitResponse(response);
     });
   }
 
-  // Read-only GET: a request that hangs past bybitReadTimeoutMs is cut and
-  // retried once at once with the same timeout. Any other error, or a second
-  // timeout, propagates unchanged. Never used for POST (order writes).
+  // Read-only GET: a request that hangs past bybitReadTimeoutMs, or whose
+  // established connection broke, is retried once at once with the same
+  // timeout. Any other error, or a second failure, propagates unchanged.
+  // Never used for POST (order writes).
   private async readWithRetry(path: string, request: (signal: AbortSignal) => Promise<unknown>): Promise<unknown> {
     const attempt = () =>
       timeBybitRequest("GET", path, () => request(AbortSignal.timeout(this.config.bybitReadTimeoutMs)));
     try {
       return await attempt();
     } catch (error) {
-      if (!isTimeoutError(error)) {
+      if (isTimeoutError(error)) {
+        this.counters.getRetriesTimeout += 1;
+      } else if (isConnectionBreak(error)) {
+        this.counters.getRetriesConnectionClosed += 1;
+      } else {
         throw error;
       }
       return attempt();
@@ -435,18 +506,21 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
       .digest("hex");
 
     return timeBybitRequest("POST", path, async () => {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "X-BAPI-API-KEY": this.config.bybitApiKey,
-          "X-BAPI-TIMESTAMP": timestamp,
-          "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
-          "X-BAPI-SIGN": signature,
-        },
-        body,
-        signal: this.timeoutSignal(),
-      });
+      const response = await fetch(
+        `${this.baseUrl}${path}`,
+        this.fetchInit({
+          method: "POST",
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "X-BAPI-API-KEY": this.config.bybitApiKey,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
+            "X-BAPI-SIGN": signature,
+          },
+          body,
+          signal: this.timeoutSignal(),
+        }),
+      );
 
       return readBybitResponse(response);
     });
@@ -455,6 +529,20 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
 
 function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.name === "TimeoutError";
+}
+
+// fetch reports a broken connection as `TypeError: fetch failed` whose cause
+// carries the socket error code.
+function isConnectionBreak(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" && CONNECTION_BREAK_CODES.has(code);
+}
+
+function emptyConnectionCounters(): BybitConnectionCounters {
+  return { newConnections: 0, connectErrors: 0, getRetriesTimeout: 0, getRetriesConnectionClosed: 0 };
 }
 
 function getBybitBaseUrl(config: AbiConfig): string {

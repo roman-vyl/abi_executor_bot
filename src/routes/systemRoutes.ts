@@ -6,6 +6,7 @@ import { getLiveExecutionMode } from "../execution/liveGuard.js";
 import type { ExchangeLinkerStatus } from "../exchangeFacts/exchangeOrderLinker.js";
 import type { ExchangeCompletenessStatus, ExchangeRestStatus } from "../exchangeFacts/exchangeRestReconciler.js";
 import type { ExchangeStreamStatus } from "../exchangeStream/exchangeStreamRecorder.js";
+import type { BybitConnectionStatus } from "../exchange/bybitConnectionHeartbeat.js";
 import { writeJson } from "../app/http.js";
 
 export async function handleSystemRoutes(input: {
@@ -18,9 +19,20 @@ export async function handleSystemRoutes(input: {
   exchangeLinker: ExchangeLinkerStatus;
   exchangeRest: ExchangeRestStatus;
   exchangeCompleteness: ExchangeCompletenessStatus;
+  bybitConnection?: BybitConnectionStatus;
 }): Promise<boolean> {
-  const { request, response, config, entryPackageReady, exchangeFacts, exchangeStream, exchangeLinker, exchangeRest, exchangeCompleteness } =
-    input;
+  const {
+    request,
+    response,
+    config,
+    entryPackageReady,
+    exchangeFacts,
+    exchangeStream,
+    exchangeLinker,
+    exchangeRest,
+    exchangeCompleteness,
+    bybitConnection,
+  } = input;
 
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, entryPackageReady ? 200 : 503, {
@@ -46,6 +58,8 @@ export async function handleSystemRoutes(input: {
       exchangeLinker,
       exchangeRest,
       exchangeCompleteness,
+      // Informational only: the heartbeat never changes ok or the status.
+      ...(bybitConnection !== undefined ? { bybitConnection } : {}),
     });
     return true;
   }

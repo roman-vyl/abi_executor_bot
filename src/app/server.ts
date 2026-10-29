@@ -4,6 +4,7 @@ import { KeyedMutex } from "../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../config/config.js";
 import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCorrelationRepository.js";
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
+import { BybitConnectionHeartbeat } from "../exchange/bybitConnectionHeartbeat.js";
 import { createExchangeOrderLinker } from "../exchangeFacts/exchangeOrderLinker.js";
 import { createExchangeRestReconciler } from "../exchangeFacts/exchangeRestReconciler.js";
 import { createExchangeStreamRecorder } from "../exchangeStream/exchangeStreamStartup.js";
@@ -41,6 +42,9 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   const exchangeStream = createExchangeStreamRecorder(config, exchangeFacts);
 
   const bybit = new RestBybitAdapter(config);
+  // Keeps the pooled Bybit connection in use between bars; trading never
+  // waits for it (abi-bybit-connection-keepalive-v1).
+  const bybitHeartbeat = new BybitConnectionHeartbeat({ adapter: bybit, intervalMs: config.bybitHeartbeatIntervalMs });
 
   const correlationRepository = new EntryPackageCorrelationRepository(config.entryPackageCorrelationPath);
   const rulesProvider = new BybitInstrumentTradingRulesProvider(bybit, config);
@@ -155,6 +159,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         exchangeLinker: exchangeLinker.status(),
         exchangeRest: exchangeRest.status(),
         exchangeCompleteness: exchangeRest.completenessStatus(),
+        bybitConnection: bybitHeartbeat.status(),
       })) {
       return;
     }
@@ -239,6 +244,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   exchangeStream.start();
   exchangeLinker.start();
   exchangeRest.start();
+  bybitHeartbeat.start();
 
   installShutdownHandlers({
     server,
@@ -250,6 +256,8 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
       if (exchangeFacts.status === "enabled") {
         exchangeFacts.store.close();
       }
+      bybitHeartbeat.stop();
+      bybit.close();
     },
   });
 }
