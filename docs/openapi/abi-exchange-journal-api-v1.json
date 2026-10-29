@@ -1,0 +1,969 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ABI Exchange Journal API",
+    "version": "1.0.0",
+    "description": "Read-only access to ABI's exchange facts journal: every Bybit private-stream order state and execution of the account, gap-filled from REST, and each order's link to a strategy instance and trade cycle. Never writes, never calls Bybit, never changes trading state."
+  },
+  "paths": {
+    "/v1/exchange-journal/facts": {
+      "get": {
+        "operationId": "listExchangeJournalFacts",
+        "summary": "Exchange events feed, oldest first, by cursor",
+        "description": "Every stored Bybit order state and execution, ordered by event_seq. Filters combine with AND. Each item carries its order's strategy link at read time, or null. Read only.",
+        "parameters": [
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "description": "Return rows with a sequence greater than this; pass the previous next_after_seq",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 500
+            }
+          },
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "description": "Exact symbol",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "strategy_instance_id",
+            "in": "query",
+            "required": false,
+            "description": "Only events of orders linked to this strategy instance",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "from_ms",
+            "in": "query",
+            "required": false,
+            "description": "exchange_time_ms lower bound (inclusive); events without exchange time are excluded",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "to_ms",
+            "in": "query",
+            "required": false,
+            "description": "exchange_time_ms upper bound (exclusive); greater than from_ms",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactsPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query or path value is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationFailedError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The exchange facts store is disabled or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalUnavailableError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/exchange-journal/order-links": {
+      "get": {
+        "operationId": "listExchangeJournalOrderLinks",
+        "summary": "Order to strategy/trade-cycle links feed, by cursor",
+        "description": "A link can be written after its order's events; a consumer following the events feed also follows this one.",
+        "parameters": [
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "description": "Return rows with a sequence greater than this; pass the previous next_after_seq",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of links",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinksPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query or path value is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationFailedError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The exchange facts store is disabled or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalUnavailableError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/exchange-journal/orders/{order_id}": {
+      "get": {
+        "operationId": "getExchangeJournalOrder",
+        "summary": "One order with its link and all its events",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No event and no link for this order_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderNotFoundError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query or path value is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationFailedError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The exchange facts store is disabled or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalUnavailableError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_id}/exchange-journal": {
+      "get": {
+        "operationId": "getExchangeJournalTradeCycle",
+        "summary": "All exchange orders of one trade cycle with their events",
+        "description": "A cycle with no linked order returns orders: [].",
+        "parameters": [
+          {
+            "name": "strategy_instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "trade_cycle_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cycle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CycleView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query or path value is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationFailedError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The exchange facts store is disabled or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalUnavailableError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/exchange-journal/status": {
+      "get": {
+        "operationId": "getExchangeJournalStatus",
+        "summary": "The journal's own state",
+        "description": "Answers 200 also when the store is disabled or unavailable. stream, linker, rest and completeness equal /health exchangeStream, exchangeLinker, exchangeRest, exchangeCompleteness.",
+        "responses": {
+          "200": {
+            "description": "Journal state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query or path value is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationFailedError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_seq",
+          "fact_kind",
+          "source",
+          "source_endpoint",
+          "symbol",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id",
+          "exec_id",
+          "exec_type",
+          "order_status",
+          "exchange_time_ms",
+          "received_at_ms",
+          "raw"
+        ],
+        "properties": {
+          "event_seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fact_kind": {
+            "enum": [
+              "order_state",
+              "execution"
+            ]
+          },
+          "source": {
+            "enum": [
+              "ws",
+              "rest"
+            ]
+          },
+          "source_endpoint": {
+            "type": "string",
+            "examples": [
+              "ws:order",
+              "ws:execution",
+              "rest:/v5/order/history",
+              "rest:/v5/execution/list"
+            ]
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exec_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exec_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_time_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "received_at_ms": {
+            "type": "integer"
+          },
+          "raw": {
+            "type": "object",
+            "description": "The Bybit record exactly as stored; decimals stay strings"
+          }
+        }
+      },
+      "FeedEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_seq",
+          "fact_kind",
+          "source",
+          "source_endpoint",
+          "symbol",
+          "order_id",
+          "order_link_id",
+          "parent_order_link_id",
+          "exec_id",
+          "exec_type",
+          "order_status",
+          "exchange_time_ms",
+          "received_at_ms",
+          "raw",
+          "link"
+        ],
+        "properties": {
+          "event_seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fact_kind": {
+            "enum": [
+              "order_state",
+              "execution"
+            ]
+          },
+          "source": {
+            "enum": [
+              "ws",
+              "rest"
+            ]
+          },
+          "source_endpoint": {
+            "type": "string",
+            "examples": [
+              "ws:order",
+              "ws:execution",
+              "rest:/v5/order/history",
+              "rest:/v5/execution/list"
+            ]
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exec_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exec_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_time_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "received_at_ms": {
+            "type": "integer"
+          },
+          "raw": {
+            "type": "object",
+            "description": "The Bybit record exactly as stored; decimals stay strings"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Link"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "link_seq",
+          "order_id",
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "role",
+          "generation",
+          "order_link_id",
+          "parent_order_link_id",
+          "evidence",
+          "established_at_ms"
+        ],
+        "properties": {
+          "link_seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "strategy_instance_id": {
+            "type": "string"
+          },
+          "trade_cycle_id": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "entry",
+              "close",
+              "stop_loss",
+              "take_profit"
+            ]
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_order_link_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "enum": [
+              "create_response",
+              "own_order_link_id_lookup",
+              "parent_order_link_id"
+            ]
+          },
+          "established_at_ms": {
+            "type": "integer"
+          }
+        }
+      },
+      "FactsPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_after_seq",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedEvent"
+            }
+          },
+          "next_after_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LinksPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_after_seq",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Link"
+            }
+          },
+          "next_after_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OrderView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "order_id",
+          "link",
+          "events",
+          "truncated"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Link"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CycleOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "link",
+          "events",
+          "truncated"
+        ],
+        "properties": {
+          "link": {
+            "$ref": "#/components/schemas/Link"
+          },
+          "events": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CycleView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_instance_id",
+          "trade_cycle_id",
+          "orders",
+          "truncated"
+        ],
+        "properties": {
+          "strategy_instance_id": {
+            "type": "string"
+          },
+          "trade_cycle_id": {
+            "type": "string"
+          },
+          "orders": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/CycleOrder"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "JournalStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "store",
+          "schema_version",
+          "last_event_seq",
+          "last_link_seq",
+          "stream",
+          "linker",
+          "rest",
+          "completeness"
+        ],
+        "properties": {
+          "store": {
+            "enum": [
+              "enabled",
+              "disabled",
+              "unavailable"
+            ]
+          },
+          "store_reason": {
+            "type": "string",
+            "description": "Only when store is unavailable"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "last_event_seq": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_link_seq": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "object"
+          },
+          "linker": {
+            "type": "object"
+          },
+          "rest": {
+            "type": "object"
+          },
+          "completeness": {
+            "type": "object"
+          }
+        }
+      },
+      "ValidationDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "examples": [
+              "/query/limit",
+              "/path/order_id"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidationFailedError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "code": {
+                "const": "validation_failed"
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/components/schemas/ValidationDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "OrderNotFoundError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "order_not_found"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "JournalUnavailableError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "exchange_journal_unavailable"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "internal_error"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
