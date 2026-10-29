@@ -33,7 +33,7 @@ A small class `BybitConnectionHeartbeat` (`src/exchange/bybitConnectionHeartbeat
 Everything else is thrown on the first attempt: other `TypeError: fetch failed` causes (DNS `ENOTFOUND`, `ECONNREFUSED`, TLS certificate errors, `UND_ERR_CONNECT_TIMEOUT`), HTTP status errors (403 included) and Bybit `retCode` errors, which `readBybitResponse` raises from a received answer. `signedPost` is unchanged: no retry of any kind.
 
 ### D5. Shutdown
-`startServer` passes to `installShutdownHandlers` an `onServerClosed` that stops the heartbeat, closes the exchange facts store (as today) and calls `adapter.close()`, which runs `agent.close()` without waiting (in-flight requests may finish; idle sockets are released). The process exit is not delayed by the pool.
+`startServer` passes to `installShutdownHandlers` an `onServerClosed` that first stops the heartbeat, then closes the exchange facts store (as today), and calls `adapter.close()` in a `finally`, so the pool is closed even if closing the store throws. `adapter.close()` runs `agent.close()` without waiting and swallows its rejection (in-flight requests may finish; idle sockets are released). The process exit is not delayed by the pool.
 
 ### D6. Diagnostics
 - Counters in the adapter: new connections (`connected` events of the agent's clients via `node:diagnostics_channel` `undici:client:connected`, filtered to the adapter's origin), connect errors (`undici:client:connectError`), GET retries by reason (`timeout`, `connection_closed`).

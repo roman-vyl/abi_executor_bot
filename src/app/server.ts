@@ -249,15 +249,20 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   installShutdownHandlers({
     server,
     onServerClosed: () => {
-      // The recorder writes its last buffered records before the store closes.
-      exchangeStream.stop();
-      exchangeLinker.stop();
-      exchangeRest.stop();
-      if (exchangeFacts.status === "enabled") {
-        exchangeFacts.store.close();
-      }
+      // The heartbeat stops first and the pool is closed even if closing the
+      // store throws (abi-bybit-connection-keepalive-v1 D5).
       bybitHeartbeat.stop();
-      bybit.close();
+      try {
+        // The recorder writes its last buffered records before the store closes.
+        exchangeStream.stop();
+        exchangeLinker.stop();
+        exchangeRest.stop();
+        if (exchangeFacts.status === "enabled") {
+          exchangeFacts.store.close();
+        }
+      } finally {
+        bybit.close();
+      }
     },
   });
 }
