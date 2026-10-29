@@ -10,6 +10,8 @@ export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
     instrumentRulesCacheTtlMs: 300_000,
     bybitRequestTimeoutMs: 10_000,
     bybitReadTimeoutMs: 1_500,
+    bybitKeepAliveTimeoutMs: 200_000,
+    bybitHeartbeatIntervalMs: 0,
     bybitEnvironment: "testnet",
     bybitTestnet: true,
     bybitApiKey: "",

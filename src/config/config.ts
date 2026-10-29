@@ -9,6 +9,8 @@ export type AbiConfig = {
   instrumentRulesCacheTtlMs: number;
   bybitRequestTimeoutMs: number;
   bybitReadTimeoutMs: number;
+  bybitKeepAliveTimeoutMs: number;
+  bybitHeartbeatIntervalMs: number;
   bybitEnvironment: "demo" | "testnet" | "mainnet";
   bybitTestnet: boolean;
   bybitApiKey: string;
@@ -71,6 +73,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     bybitRequestTimeoutMs: readPositiveInt("ABI_BYBIT_REQUEST_TIMEOUT_MS", env.ABI_BYBIT_REQUEST_TIMEOUT_MS, 10_000),
     // GET (read-only) requests only: a hung read is cut here and retried once.
     bybitReadTimeoutMs: readPositiveInt("ABI_BYBIT_READ_TIMEOUT_MS", env.ABI_BYBIT_READ_TIMEOUT_MS, 1_500),
+    // Idle limit of the adapter's connection pool; below Bybit Demo's own
+    // 240 s idle close, so ABI lets a connection go first.
+    bybitKeepAliveTimeoutMs: readPositiveInt(
+      "ABI_BYBIT_KEEPALIVE_TIMEOUT_MS",
+      env.ABI_BYBIT_KEEPALIVE_TIMEOUT_MS,
+      200_000,
+    ),
+    // 0 turns the background GET /v5/market/time heartbeat off.
+    bybitHeartbeatIntervalMs: readNonNegativeInt(
+      "ABI_BYBIT_HEARTBEAT_INTERVAL_MS",
+      env.ABI_BYBIT_HEARTBEAT_INTERVAL_MS,
+      60_000,
+    ),
     bybitEnvironment,
     bybitTestnet: bybitEnvironment === "testnet",
     bybitApiKey,
@@ -246,6 +261,24 @@ function readPositiveInt(name: string, value: string | undefined, fallback: numb
   const parsed = Number.parseInt(trimmed, 10);
   if (parsed <= 0) {
     throw new Error(`${name} must be greater than 0`);
+  }
+
+  return parsed;
+}
+
+function readNonNegativeInt(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${name} must be an integer`);
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (parsed < 0) {
+    throw new Error(`${name} must not be negative`);
   }
 
   return parsed;
