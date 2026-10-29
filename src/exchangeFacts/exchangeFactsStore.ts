@@ -7,6 +7,7 @@ import {
   DEDUP_KEY_VERSION,
   SCHEMA_DDL,
   SCHEMA_V2_ADDITIONS_DDL,
+  SCHEMA_V3_ADDITIONS_DDL,
   SCHEMA_VERSION,
   SNAPSHOT_KEY_VERSION,
   STORAGE_SCHEMA,
@@ -42,6 +43,7 @@ export type ExchangeFactsWriteErrorCode =
   | "invalid_fact"
   | "invalid_snapshot"
   | "invalid_log"
+  | "invalid_window"
   | "invalid_link"
   | "link_conflict";
 
@@ -201,6 +203,41 @@ export type StoredLink = {
 
 export type FactWriteResult = { inserted: number; duplicates: number };
 
+// The two REST history endpoints the reconciler reads
+// (abi-exchange-rest-reconciliation-v1, design D1).
+export type RestEndpoint = "order_history" | "execution_list";
+
+export type RestWindowInput = {
+  endpoint: RestEndpoint;
+  startMs: number;
+  endMs: number;
+  completedAtMs: number;
+  // Totals of the window's earlier pages; the store adds the last page's own.
+  records: number;
+  newRecords: number;
+};
+
+export type StoredRestWindow = RestWindowInput & { windowSeq: number };
+
+// One REST page: its facts, and the window's coverage row when it is the
+// window's last page (design D2).
+export type RestPageInput = {
+  facts: readonly FactInput[];
+  window?: RestWindowInput;
+};
+
+// A record Bybit sent that cannot be a fact (no symbol, no execId) is skipped
+// and counted, not allowed to block the window.
+export type RestPageResult = FactWriteResult & { invalid: number };
+
+// The latest stored state of a terminal order and the execQty of each of its
+// stored Trade executions (design D6).
+export type TerminalOrderFill = {
+  orderId: string;
+  cumExecQty: string | null;
+  execQtys: string[];
+};
+
 const MAX_READ_LIMIT = 1000;
 
 type FactRow = {
@@ -253,6 +290,18 @@ type LinkRow = {
   evidence: LinkEvidence;
   established_at_ms: number;
 };
+
+type WindowRow = {
+  window_seq: number;
+  endpoint: RestEndpoint;
+  start_ms: number;
+  end_ms: number;
+  completed_at_ms: number;
+  records: number;
+  new_records: number;
+};
+
+const MAX_COMPLETENESS_LIMIT = 100_000;
 
 type DatabaseConstructor = new (path: string) => Database.Database;
 
@@ -492,6 +541,137 @@ export class ExchangeFactsStore {
     }));
   }
 
+  // One call = one transaction: the page's facts, and the coverage row when
+  // given, are stored together or not at all (design D2).
+  writeRestPage(page: RestPageInput): RestPageResult {
+    const insertFact = this.db.prepare(
+      `INSERT INTO exchange_facts (
+         fact_kind, source, source_endpoint, symbol, order_id, order_link_id, parent_order_link_id,
+         exec_id, exec_type, order_status, exchange_time_ms, received_at_ms, dedup_key, raw_json
+       ) VALUES (
+         @fact_kind, @source, @source_endpoint, @symbol, @order_id, @order_link_id, @parent_order_link_id,
+         @exec_id, @exec_type, @order_status, @exchange_time_ms, @received_at_ms, @dedup_key, @raw_json
+       ) ON CONFLICT(dedup_key) DO NOTHING`,
+    );
+    const insertWindow = this.db.prepare(
+      `INSERT INTO rest_sync_windows (endpoint, start_ms, end_ms, completed_at_ms, records, new_records)
+       VALUES (@endpoint, @start_ms, @end_ms, @completed_at_ms, @records, @new_records)`,
+    );
+
+    const run = this.db.transaction((input: RestPageInput): RestPageResult => {
+      let inserted = 0;
+      let invalid = 0;
+      for (const fact of input.facts) {
+        let row: Omit<FactRow, "event_seq">;
+        try {
+          row = toFactRow(fact);
+        } catch (error) {
+          if (error instanceof ExchangeFactsWriteError) {
+            invalid += 1;
+            continue;
+          }
+          throw error;
+        }
+        inserted += insertFact.run(row).changes;
+      }
+      if (input.window !== undefined) {
+        insertWindow.run(
+          toWindowRow({
+            ...input.window,
+            records: input.window.records + input.facts.length,
+            newRecords: input.window.newRecords + inserted,
+          }),
+        );
+      }
+      return { inserted, duplicates: input.facts.length - inserted - invalid, invalid };
+    });
+
+    return run.immediate(page);
+  }
+
+  // Completed windows of one endpoint that end at or after a time, oldest
+  // end first.
+  readRestWindows(endpoint: RestEndpoint, endingAtOrAfterMs: number): StoredRestWindow[] {
+    return this.db
+      .prepare<[string, number], WindowRow>(
+        "SELECT * FROM rest_sync_windows WHERE endpoint = ? AND end_ms >= ? ORDER BY end_ms ASC, window_seq ASC",
+      )
+      .all(endpoint, endingAtOrAfterMs)
+      .map(fromWindowRow);
+  }
+
+  // Every symbol that has a stored fact; the reconciler asks per symbol when
+  // Bybit refuses a request without one (design D1).
+  listFactSymbols(): string[] {
+    return this.db
+      .prepare<[], { symbol: string }>("SELECT DISTINCT symbol FROM exchange_facts ORDER BY symbol")
+      .all()
+      .map((row) => row.symbol);
+  }
+
+  // Latest stored state of every order created at or after a time whose
+  // status is terminal, with the execQty of its stored Trade executions
+  // (design D6). Read only.
+  readTerminalOrderFills(createdAtOrAfterMs: number, limit: number): TerminalOrderFill[] {
+    const rows = this.db
+      .prepare<[number, number], { order_id: string; cum_exec_qty: unknown; exec_qtys: string | null }>(
+        `WITH latest AS (
+           SELECT order_id, order_status, raw_json,
+                  ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY exchange_time_ms DESC, event_seq DESC) AS rn
+             FROM exchange_facts
+            WHERE fact_kind = 'order_state' AND order_id IS NOT NULL
+         )
+         SELECT l.order_id,
+                json_extract(l.raw_json, '$.cumExecQty') AS cum_exec_qty,
+                (SELECT group_concat(json_extract(e.raw_json, '$.execQty'), ',')
+                   FROM exchange_facts e
+                  WHERE e.fact_kind = 'execution' AND e.order_id = l.order_id AND e.exec_type = 'Trade') AS exec_qtys
+           FROM latest l
+          WHERE l.rn = 1
+            AND l.order_status IN ('Filled','Cancelled','PartiallyFilledCanceled','Deactivated','Rejected')
+            AND CAST(json_extract(l.raw_json, '$.createdTime') AS INTEGER) >= ?
+          ORDER BY l.order_id
+          LIMIT ?`,
+      )
+      .all(createdAtOrAfterMs, checkedCompletenessLimit(limit));
+    return rows.map((row) => ({
+      orderId: row.order_id,
+      cumExecQty: row.cum_exec_qty === null || row.cum_exec_qty === undefined ? null : String(row.cum_exec_qty),
+      execQtys: row.exec_qtys === null || row.exec_qtys === "" ? [] : row.exec_qtys.split(","),
+    }));
+  }
+
+  // Orders whose every stored state came from REST without orderLinkId and
+  // without parentOrderLinkId (design D5, D6).
+  readUnlabeledRestOrders(limit: number): { count: number; orderIds: string[] } {
+    const query = `SELECT order_id FROM exchange_facts
+                    WHERE fact_kind = 'order_state' AND order_id IS NOT NULL
+                    GROUP BY order_id
+                   HAVING SUM(source = 'ws') = 0
+                      AND SUM(order_link_id IS NOT NULL OR parent_order_link_id IS NOT NULL) = 0`;
+    const count = this.db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM (${query})`).get()!.n;
+    const orderIds = this.db
+      .prepare<[number], { order_id: string }>(`${query} ORDER BY order_id LIMIT ?`)
+      .all(checkedLimit(limit))
+      .map((row) => row.order_id);
+    return { count, orderIds };
+  }
+
+  // Whether a cycle has a linked close, stop loss or take profit order with a
+  // stored Trade execution (design D6).
+  hasLinkedCloseFill(strategyInstanceId: string, tradeCycleId: string): boolean {
+    const row = this.db
+      .prepare<[string, string], { one: number }>(
+        `SELECT 1 AS one FROM order_links l
+           JOIN exchange_facts e ON e.order_id = l.order_id AND e.fact_kind = 'execution' AND e.exec_type = 'Trade'
+          WHERE l.strategy_instance_id = ? AND l.trade_cycle_id = ?
+            AND l.role IN ('close','stop_loss','take_profit')
+          LIMIT 1`,
+      )
+      .get(strategyInstanceId, tradeCycleId);
+    return row !== undefined;
+  }
+
   readLinksAfter(afterLinkSeq: number, limit: number): StoredLink[] {
     const rows = this.db
       .prepare<[number, number], LinkRow>(
@@ -512,6 +692,7 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
     db.transaction(() => {
       db.exec(SCHEMA_DDL);
       db.exec(SCHEMA_V2_ADDITIONS_DDL);
+      db.exec(SCHEMA_V3_ADDITIONS_DDL);
       const setMeta = db.prepare("INSERT INTO schema_meta (key, value) VALUES (?, ?)");
       setMeta.run("storage_schema", STORAGE_SCHEMA);
       setMeta.run("schema_version", String(SCHEMA_VERSION));
@@ -545,7 +726,7 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
       `database schema_version ${version} is newer than ${SCHEMA_VERSION}`,
     );
   }
-  if (version !== 1 && version !== SCHEMA_VERSION) {
+  if (version !== 1 && version !== 2 && version !== SCHEMA_VERSION) {
     throw new ExchangeFactsOpenError("exchange_facts_unknown_database", "database schema_version is not recognized");
   }
 
@@ -563,25 +744,30 @@ function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnviron
     );
   }
 
-  if (version === 1) {
-    // Additive upgrade of an accepted version 1 file (design D7): every
-    // existing row stays; only the two new tables and versions are added.
-    db.transaction(() => {
-      db.exec(SCHEMA_V2_ADDITIONS_DDL);
-      db.prepare("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
-      db.prepare("INSERT INTO schema_meta (key, value) VALUES ('snapshot_key_version', ?)").run(
-        String(SNAPSHOT_KEY_VERSION),
-      );
-    }).immediate();
-    return;
-  }
-
-  if (meta.get("snapshot_key_version") !== String(SNAPSHOT_KEY_VERSION)) {
+  if (version !== 1 && meta.get("snapshot_key_version") !== String(SNAPSHOT_KEY_VERSION)) {
     throw new ExchangeFactsOpenError(
       "exchange_facts_dedup_rule_unknown",
       "database snapshot_key_version is not recognized",
     );
   }
+
+  if (version === SCHEMA_VERSION) {
+    return;
+  }
+
+  // Additive upgrade of an accepted version 1 or 2 file (stream recorder D7,
+  // REST reconciliation D2): every existing row stays; only the missing
+  // tables and versions are added, in one transaction.
+  db.transaction(() => {
+    if (version === 1) {
+      db.exec(SCHEMA_V2_ADDITIONS_DDL);
+      db.prepare("INSERT INTO schema_meta (key, value) VALUES ('snapshot_key_version', ?)").run(
+        String(SNAPSHOT_KEY_VERSION),
+      );
+    }
+    db.exec(SCHEMA_V3_ADDITIONS_DDL);
+    db.prepare("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
+  }).immediate();
 }
 
 function toFactRow(fact: FactInput): Omit<FactRow, "event_seq"> {
@@ -713,6 +899,47 @@ function toSnapshotRow(snapshot: SnapshotInput): Omit<SnapshotRow, "snapshot_seq
     exchange_time_ms: frameTime,
     dedup_key: walletSnapshotDedupKey(identifier(item.accountType) ?? "", frameTime, snapshot.rawJson),
   };
+}
+
+function toWindowRow(window: RestWindowInput): Omit<WindowRow, "window_seq"> {
+  if (window.endpoint !== "order_history" && window.endpoint !== "execution_list") {
+    throw new ExchangeFactsWriteError("invalid_window", "window endpoint must be order_history or execution_list");
+  }
+  const times = [window.startMs, window.endMs, window.completedAtMs];
+  if (times.some((value) => !Number.isSafeInteger(value) || value <= 0) || window.endMs <= window.startMs) {
+    throw new ExchangeFactsWriteError("invalid_window", "window times must be positive integers with end after start");
+  }
+  const counts = [window.records, window.newRecords];
+  if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new ExchangeFactsWriteError("invalid_window", "window counts must be non-negative integers");
+  }
+  return {
+    endpoint: window.endpoint,
+    start_ms: window.startMs,
+    end_ms: window.endMs,
+    completed_at_ms: window.completedAtMs,
+    records: window.records,
+    new_records: window.newRecords,
+  };
+}
+
+function fromWindowRow(row: WindowRow): StoredRestWindow {
+  return {
+    windowSeq: row.window_seq,
+    endpoint: row.endpoint,
+    startMs: row.start_ms,
+    endMs: row.end_ms,
+    completedAtMs: row.completed_at_ms,
+    records: row.records,
+    newRecords: row.new_records,
+  };
+}
+
+function checkedCompletenessLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_COMPLETENESS_LIMIT) {
+    throw new RangeError(`limit must be an integer from 1 to ${MAX_COMPLETENESS_LIMIT}`);
+  }
+  return limit;
 }
 
 function toLogRow(log: ConnectionLogInput): Omit<LogRow, "log_seq"> {

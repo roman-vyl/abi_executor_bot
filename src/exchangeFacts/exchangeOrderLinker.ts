@@ -269,7 +269,12 @@ export class ExchangeOrderLinker {
       return;
     }
     if (fact.parentOrderLinkId === null) {
-      this.notLinkable.set(orderId, "no_label");
+      // Bybit REST order history carries no parentOrderLinkId: an unlabeled
+      // REST state does not decide the order, a later WS or labelled fact
+      // does (abi-exchange-rest-reconciliation-v1 D5).
+      if (fact.source !== "rest") {
+        this.notLinkable.set(orderId, "no_label");
+      }
       return;
     }
     const role = CHILD_ROLES[stopOrderType(fact.rawJson)];

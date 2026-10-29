@@ -3,7 +3,7 @@
 // contract: the future read-only HTTP API is the only one.
 
 export const STORAGE_SCHEMA = "abi-exchange-facts-storage";
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const DEDUP_KEY_VERSION = 1;
 // Dedup rule of account_snapshots (abi-exchange-stream-recorder-v1, design D7).
 export const SNAPSHOT_KEY_VERSION = 1;
@@ -80,4 +80,20 @@ CREATE TABLE stream_connection_log (
   conn_id   TEXT,
   detail    TEXT
 );
+`;
+
+// Added in schema_version 3 (abi-exchange-rest-reconciliation-v1, design D2):
+// one row per completed REST window, never updated or deleted. A version 1 or
+// 2 database gets exactly these statements when it is opened.
+export const SCHEMA_V3_ADDITIONS_DDL = `
+CREATE TABLE rest_sync_windows (
+  window_seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint          TEXT NOT NULL CHECK (endpoint IN ('order_history','execution_list')),
+  start_ms          INTEGER NOT NULL,
+  end_ms            INTEGER NOT NULL CHECK (end_ms > start_ms),
+  completed_at_ms   INTEGER NOT NULL,
+  records           INTEGER NOT NULL,
+  new_records       INTEGER NOT NULL
+);
+CREATE INDEX rest_sync_windows_endpoint_end ON rest_sync_windows(endpoint, end_ms);
 `;

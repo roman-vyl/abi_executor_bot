@@ -5,6 +5,7 @@ import type { AbiConfig } from "../config/config.js";
 import { EntryPackageCorrelationRepository } from "../correlation/entryPackageCorrelationRepository.js";
 import { RestBybitAdapter } from "../exchange/bybitAdapter.js";
 import { createExchangeOrderLinker } from "../exchangeFacts/exchangeOrderLinker.js";
+import { createExchangeRestReconciler } from "../exchangeFacts/exchangeRestReconciler.js";
 import { createExchangeStreamRecorder } from "../exchangeStream/exchangeStreamStartup.js";
 import { BybitExchangeInstrumentResolver } from "../exchange/exchangeInstrumentResolver.js";
 import { BybitInstrumentTradingRulesProvider } from "../exchange/instrumentTradingRulesProvider.js";
@@ -127,6 +128,15 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     isCorrelationReady: () => readiness.isReady,
   });
 
+  // Fills stream gaps from Bybit REST history and checks completeness; read
+  // only, starts after the correlation replay, never called by trading
+  // (abi-exchange-rest-reconciliation-v1).
+  const exchangeRest = createExchangeRestReconciler(config, exchangeFacts, {
+    reader: bybit,
+    listRecords: () => correlationRepository.listAllRecords(),
+    isCorrelationReady: () => readiness.isReady,
+  });
+
   void replayCorrelationStore(correlationRepository, readiness, {
     bybit,
     linearPolicy: config.bybitLinearPositionBindingMode,
@@ -142,6 +152,8 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         exchangeFacts,
         exchangeStream: exchangeStream.status(),
         exchangeLinker: exchangeLinker.status(),
+        exchangeRest: exchangeRest.status(),
+        exchangeCompleteness: exchangeRest.completenessStatus(),
       })) {
       return;
     }
@@ -207,6 +219,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
 
   exchangeStream.start();
   exchangeLinker.start();
+  exchangeRest.start();
 
   installShutdownHandlers({
     server,
@@ -214,6 +227,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
       // The recorder writes its last buffered records before the store closes.
       exchangeStream.stop();
       exchangeLinker.stop();
+      exchangeRest.stop();
       if (exchangeFacts.status === "enabled") {
         exchangeFacts.store.close();
       }

@@ -473,3 +473,53 @@ test("the label index resolves the labels trading builds, for every generation a
     3,
   );
 });
+
+function fromRest(fact: FactInput): FactInput {
+  return { ...fact, source: "rest", sourceEndpoint: "rest:/v5/order/history" };
+}
+
+test("an unlabeled REST order state does not decide the order; its later WS child state links it", (t) => {
+  const { store } = openStore(t);
+  const entryLabel = label(CYCLE, "entry", 1);
+  write(store, [entryOrder("entry-1", entryLabel)]);
+  // REST order history carries no parentOrderLinkId.
+  store.writeRestPage({ facts: [fromRest(orderRecord({ orderId: "sl-1", stopOrderType: "PartialStopLoss" }))] });
+  const { linker } = makeLinker(store, [record(CYCLE, 1)]);
+
+  linker.tick();
+  assert.deepEqual(linker.status().notLinkableOrders, {});
+  assert.equal(links(store).length, 1);
+
+  write(store, [childOrder("sl-1", entryLabel, "PartialStopLoss", T + 10)]);
+  linker.tick();
+
+  assert.deepEqual(
+    links(store).map((link) => [link.orderId, link.role]),
+    [
+      ["entry-1", "entry"],
+      ["sl-1", "stop_loss"],
+    ],
+  );
+  assert.deepEqual(linker.status().notLinkableOrders, {});
+});
+
+test("an entry placed before the journal is linked from REST and its waiting WS child follows", (t) => {
+  const { store } = openStore(t);
+  const entryLabel = label(CYCLE, "entry", 1);
+  write(store, [childOrder("sl-1", entryLabel, "PartialStopLoss")]);
+  const { linker } = makeLinker(store, [record(CYCLE, 1)]);
+  linker.tick();
+  assert.deepEqual(linker.status().waitingOrders, { parent_not_found: 1 });
+
+  store.writeRestPage({ facts: [fromRest(entryOrder("entry-1", entryLabel))] });
+  linker.tick();
+
+  assert.deepEqual(
+    links(store).map((link) => [link.orderId, link.role]),
+    [
+      ["entry-1", "entry"],
+      ["sl-1", "stop_loss"],
+    ],
+  );
+  assert.deepEqual(linker.status().waitingOrders, {});
+});
