@@ -76,7 +76,25 @@ const expectedDocuments = [
     ],
     validate: validatePositionManagementDocument,
   },
+  {
+    file: "abi-exchange-journal-api-v1.json",
+    title: "ABI Exchange Journal API",
+    operations: [
+      journalOperation("/v1/exchange-journal/facts", ["200", "422", "500", "503"]),
+      journalOperation("/v1/exchange-journal/order-links", ["200", "422", "500", "503"]),
+      journalOperation("/v1/exchange-journal/orders/{order_id}", ["200", "404", "422", "500", "503"]),
+      journalOperation(`${routePrefix}/exchange-journal`, ["200", "422", "500", "503"], true),
+      journalOperation("/v1/exchange-journal/status", ["200", "422", "500"]),
+    ],
+    validate: validateExchangeJournalDocument,
+  },
 ];
+
+// Journal reads take query or other path parameters, so only the cycle route
+// checks the shared pair of path parameters.
+function journalOperation(path, responses, sharedPathParameters = false) {
+  return { method: "get", httpMethod: "GET", path, responses, requestBody: "absent", sharedPathParameters };
+}
 
 const actualFiles = (await readdir(openapiDir)).filter((name) => name.endsWith(".json")).sort();
 const expectedFiles = expectedDocuments.map((document) => document.file).sort();
@@ -118,7 +136,9 @@ function validateDocumentInventory(document, expected) {
     const operation = document.paths[operationSpec.path]?.[operationSpec.method];
     assert.ok(operation, `${expected.file}: ${operationSpec.httpMethod} ${operationSpec.path} is required`);
     assert.equal(typeof operation.operationId, "string", `${expected.file}: operationId is required`);
-    assertSharedPathParameters(operation, `${expected.file}: ${operationSpec.httpMethod} ${operationSpec.path}`);
+    if (operationSpec.sharedPathParameters !== false) {
+      assertSharedPathParameters(operation, `${expected.file}: ${operationSpec.httpMethod} ${operationSpec.path}`);
+    }
     assert.deepEqual(Object.keys(operation.responses).sort(), operationSpec.responses, `${expected.file}: responses`);
 
     if (operationSpec.requestBody === "required") {
@@ -402,6 +422,37 @@ function validatePositionManagementDocument(document) {
 
 // abi-open-position-entry-order-identity-v1: both keys are required on
 // every success shape; only the open shape carries values.
+function validateExchangeJournalDocument(document) {
+  const schemas = document.components.schemas;
+  const eventFields = [
+    "event_seq", "fact_kind", "source", "source_endpoint", "symbol", "order_id", "order_link_id",
+    "parent_order_link_id", "exec_id", "exec_type", "order_status", "exchange_time_ms", "received_at_ms", "raw",
+  ];
+  const linkFields = [
+    "link_seq", "order_id", "strategy_instance_id", "trade_cycle_id", "role", "generation", "order_link_id",
+    "parent_order_link_id", "evidence", "established_at_ms",
+  ];
+
+  assert.deepEqual(schemas.Event.required, eventFields);
+  assert.deepEqual(schemas.FeedEvent.required, [...eventFields, "link"]);
+  assert.deepEqual(schemas.Link.required, linkFields);
+  for (const name of ["Event", "FeedEvent", "Link", "FactsPage", "LinksPage", "OrderView", "CycleView", "JournalStatus"]) {
+    assert.equal(schemas[name].additionalProperties, false, `${name} must be closed`);
+  }
+  assert.equal(schemas.InternalError.properties.error.properties.code.const, "internal_error");
+  assert.equal(schemas.JournalUnavailableError.properties.error.properties.code.const, "exchange_journal_unavailable");
+
+  const facts = document.paths["/v1/exchange-journal/facts"].get;
+  assert.deepEqual(
+    facts.parameters.map((parameter) => parameter.name),
+    ["after_seq", "limit", "symbol", "strategy_instance_id", "from_ms", "to_ms"],
+  );
+  const limit = facts.parameters.find((parameter) => parameter.name === "limit");
+  assert.equal(limit.schema.maximum, 1000);
+
+  assertForbiddenText(document, ["dedup_key", "raw_json", "apiKey", "api_secret"]);
+}
+
 function assertEntryOrderIdentity(openSchema, ...otherSchemas) {
   for (const schema of [openSchema, ...otherSchemas]) {
     assert.ok(schema.required.includes("entry_order_link_id"));

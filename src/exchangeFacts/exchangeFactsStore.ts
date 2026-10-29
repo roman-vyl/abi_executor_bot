@@ -201,6 +201,18 @@ export type StoredLink = {
   establishedAtMs: number;
 };
 
+// Filters of the journal events feed (abi-exchange-journal-read-api-v1, D3).
+export type JournalFactsQuery = {
+  afterSeq: number;
+  limit: number;
+  symbol?: string;
+  strategyInstanceId?: string;
+  fromMs?: number;
+  toMs?: number;
+};
+
+export type JournalFact = { fact: StoredFact; link: StoredLink | null };
+
 export type FactWriteResult = { inserted: number; duplicates: number };
 
 // The two REST history endpoints the reconciler reads
@@ -289,6 +301,20 @@ type LinkRow = {
   parent_order_link_id: string | null;
   evidence: LinkEvidence;
   established_at_ms: number;
+};
+
+// The link columns of a fact row joined with order_links; all null when the
+// order has no link.
+type LinkColumns = {
+  l_link_seq: number | null;
+  l_strategy_instance_id: string | null;
+  l_trade_cycle_id: string | null;
+  l_role: LinkRole | null;
+  l_generation: number | null;
+  l_order_link_id: string | null;
+  l_parent_order_link_id: string | null;
+  l_evidence: LinkEvidence | null;
+  l_established_at_ms: number | null;
 };
 
 type WindowRow = {
@@ -680,6 +706,87 @@ export class ExchangeFactsStore {
       .all(afterLinkSeq, checkedLimit(limit));
     return rows.map(fromLinkRow);
   }
+
+  // Reads of the journal API (abi-exchange-journal-read-api-v1). They take
+  // one row more than a page so the caller can tell whether more exist.
+
+  readJournalFacts(query: JournalFactsQuery): JournalFact[] {
+    const where = ["f.event_seq > @afterSeq"];
+    const params: Record<string, string | number> = { afterSeq: query.afterSeq, limit: checkedJournalLimit(query.limit) };
+    if (query.symbol !== undefined) {
+      where.push("f.symbol = @symbol");
+      params.symbol = query.symbol;
+    }
+    if (query.strategyInstanceId !== undefined) {
+      where.push("l.strategy_instance_id = @strategyInstanceId");
+      params.strategyInstanceId = query.strategyInstanceId;
+    }
+    if (query.fromMs !== undefined) {
+      where.push("f.exchange_time_ms >= @fromMs");
+      params.fromMs = query.fromMs;
+    }
+    if (query.toMs !== undefined) {
+      where.push("f.exchange_time_ms < @toMs");
+      params.toMs = query.toMs;
+    }
+    const join = query.strategyInstanceId === undefined ? "LEFT JOIN" : "JOIN";
+    const rows = this.db
+      .prepare<Record<string, string | number>, FactRow & LinkColumns>(
+        `SELECT f.*, l.link_seq AS l_link_seq, l.strategy_instance_id AS l_strategy_instance_id,
+                l.trade_cycle_id AS l_trade_cycle_id, l.role AS l_role, l.generation AS l_generation,
+                l.order_link_id AS l_order_link_id, l.parent_order_link_id AS l_parent_order_link_id,
+                l.evidence AS l_evidence, l.established_at_ms AS l_established_at_ms
+           FROM exchange_facts f ${join} order_links l ON l.order_id = f.order_id
+          WHERE ${where.join(" AND ")}
+          ORDER BY f.event_seq ASC LIMIT @limit`,
+      )
+      .all(params);
+    return rows.map((row) => ({ fact: fromFactRow(row), link: linkFromColumns(row) }));
+  }
+
+  readLinksAfterForJournal(afterLinkSeq: number, limit: number): StoredLink[] {
+    const rows = this.db
+      .prepare<[number, number], LinkRow>(
+        "SELECT * FROM order_links WHERE link_seq > ? ORDER BY link_seq ASC LIMIT ?",
+      )
+      .all(afterLinkSeq, checkedJournalLimit(limit));
+    return rows.map(fromLinkRow);
+  }
+
+  readFactsForOrder(orderId: string, limit: number): StoredFact[] {
+    const rows = this.db
+      .prepare<[string, number], FactRow>(
+        "SELECT * FROM exchange_facts WHERE order_id = ? ORDER BY event_seq ASC LIMIT ?",
+      )
+      .all(orderId, checkedJournalLimit(limit));
+    return rows.map(fromFactRow);
+  }
+
+  readLinkForOrder(orderId: string): StoredLink | null {
+    const row = this.db
+      .prepare<[string], LinkRow>("SELECT * FROM order_links WHERE order_id = ?")
+      .get(orderId);
+    return row === undefined ? null : fromLinkRow(row);
+  }
+
+  readLinksForCycle(strategyInstanceId: string, tradeCycleId: string, limit: number): StoredLink[] {
+    const rows = this.db
+      .prepare<[string, string, number], LinkRow>(
+        "SELECT * FROM order_links WHERE strategy_instance_id = ? AND trade_cycle_id = ? ORDER BY link_seq ASC LIMIT ?",
+      )
+      .all(strategyInstanceId, tradeCycleId, checkedJournalLimit(limit));
+    return rows.map(fromLinkRow);
+  }
+
+  readLastSequences(): { lastEventSeq: number; lastLinkSeq: number } {
+    const row = this.db
+      .prepare<[], { last_event_seq: number; last_link_seq: number }>(
+        `SELECT (SELECT COALESCE(MAX(event_seq), 0) FROM exchange_facts) AS last_event_seq,
+                (SELECT COALESCE(MAX(link_seq), 0) FROM order_links) AS last_link_seq`,
+      )
+      .get()!;
+    return { lastEventSeq: row.last_event_seq, lastLinkSeq: row.last_link_seq };
+  }
 }
 
 function initializeOrCheck(db: Database.Database, bybitEnvironment: BybitEnvironment, category: string): void {
@@ -1010,6 +1117,32 @@ function epochMs(value: unknown): number | null {
   }
   const parsed = Number(text);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+// A journal page is at most MAX_READ_LIMIT rows plus one probe row.
+function checkedJournalLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT + 1) {
+    throw new RangeError(`limit must be an integer from 1 to ${MAX_READ_LIMIT + 1}`);
+  }
+  return limit;
+}
+
+function linkFromColumns(row: FactRow & LinkColumns): StoredLink | null {
+  if (row.l_link_seq === null || row.order_id === null) {
+    return null;
+  }
+  return fromLinkRow({
+    link_seq: row.l_link_seq,
+    order_id: row.order_id,
+    strategy_instance_id: row.l_strategy_instance_id!,
+    trade_cycle_id: row.l_trade_cycle_id!,
+    role: row.l_role!,
+    generation: row.l_generation!,
+    order_link_id: row.l_order_link_id,
+    parent_order_link_id: row.l_parent_order_link_id,
+    evidence: row.l_evidence!,
+    established_at_ms: row.l_established_at_ms!,
+  });
 }
 
 function checkedLimit(limit: number): number {

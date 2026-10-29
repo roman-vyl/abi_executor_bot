@@ -43,8 +43,9 @@ historical delivery-plan document as the canonical architecture reference.
   execution record of any `execType`, Funding included). Attribution lives only in `order_links`:
   one immutable row per Bybit `orderId`; Partial SL/TP children take their entry's cycle through
   `parentOrderLinkId`. Aggregated positions are never evidence.
-- Foundation only (`abi-exchange-facts-sqlite-foundation-v1`): off by default, nothing in order
-  execution calls the store; fact collection and the read API are later changes.
+- Off by default; nothing in order execution calls the store. Collected from the private stream
+  and REST history, linked to trade cycles, and read through `GET /v1/exchange-journal/...`
+  (`abi-exchange-journal-read-api-v1`, `docs/openapi/abi-exchange-journal-api-v1.json`).
 
 ## Known limitations / deferred items
 

@@ -391,6 +391,33 @@ trading route calls it, and it calls nothing in trading.
   - `unlabeledRestOrders`: orders seen only by REST, without any label.
   All four 0 means the journal is complete for the covered time.
 
+### Exchange journal read API
+
+Read-only `GET` routes over the store (`abi-exchange-journal-read-api-v1`, contract
+`docs/openapi/abi-exchange-journal-api-v1.json`). They never write, never call Bybit and do not
+wait for the correlation replay. With the store disabled or unavailable they answer `503
+exchange_journal_unavailable`; status still answers `200`.
+
+| Route | What |
+| --- | --- |
+| `/v1/exchange-journal/facts?after_seq=&limit=&symbol=&strategy_instance_id=&from_ms=&to_ms=` | Events feed by `event_seq`, each with its order's link or `null` |
+| `/v1/exchange-journal/order-links?after_seq=&limit=` | Links feed by `link_seq` |
+| `/v1/exchange-journal/orders/{order_id}` | One order: link and events (`404 order_not_found` if unknown) |
+| `/v1/strategy-instances/{sid}/trade-cycles/{cid}/exchange-journal` | All linked orders of a cycle with their events |
+| `/v1/exchange-journal/status` | Store state, last sequences, and the `/health` journal objects |
+
+Following the journal: keep `next_after_seq` of each feed and ask again with it as `after_seq`
+while `has_more` is `true`. Pages hold at most 1000 rows (default 500). Links can arrive after
+their events, so follow both feeds. Example:
+
+```bash
+curl -s 'http://127.0.0.1:8787/v1/exchange-journal/facts?after_seq=0&limit=100'
+curl -s 'http://127.0.0.1:8787/v1/exchange-journal/status'
+```
+
+A read error answers `500 internal_error` and emits `exchange_journal_read_failed` with
+`endpoint` and `errorCode` only; trading and the writers are not affected.
+
 ## Read-only sandbox smoke
 
 Checks connectivity and credentials without placing orders:

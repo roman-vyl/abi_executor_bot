@@ -28,6 +28,7 @@ import { installShutdownHandlers } from "./shutdown.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryCycleRecoveryRoutes } from "../routes/entryCycleRecoveryRoutes.js";
 import { handleEntryPackageRoutes } from "../routes/entryPackageRoutes.js";
+import { handleExchangeJournalRoutes } from "../routes/exchangeJournalRoutes.js";
 import { handleOpenPositionRoutes } from "../routes/openPositionRoutes.js";
 import { handlePositionManagementRoutes } from "../routes/positionManagementRoutes.js";
 import { handleSystemRoutes } from "../routes/systemRoutes.js";
@@ -159,6 +160,24 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     }
 
     if (await handleAccountRoutes({ request, response, config, bybit })) {
+      return;
+    }
+
+    // Read-only journal API; works without correlation readiness, because it
+    // reads only the exchange facts store (abi-exchange-journal-read-api-v1).
+    if (
+      await handleExchangeJournalRoutes({
+        request,
+        response,
+        exchangeFacts,
+        health: () => ({
+          stream: exchangeStream.status(),
+          linker: exchangeLinker.status(),
+          rest: exchangeRest.status(),
+          completeness: exchangeRest.completenessStatus(),
+        }),
+      })
+    ) {
       return;
     }
 
