@@ -181,10 +181,17 @@ otherwise `blockedReasons` lists what is missing.
   - `touch_trigger` + `limit` (abi-touch-trigger-limit-entry-v1): `orderType: Limit`, `timeInForce: GTC`, `price` =
     `planned_entry_price` aligned to the instrument `tickSize` (on-grid kept; otherwise long up, short down; no
     offset), no trigger fields; everything else as `market`.
-  - Limit V1 limitations: the remainder of a partially filled Limit stays live (ABI never cancels it; it ends by
-    filling, a Runtime CANCEL/REPLACE, or close execution); exactly one native SL/TP pair per entry is assumed (more
+  - Limit V1 limitations: the remainder of a partially filled Limit stays live until it fills, Runtime asks
+    `POST .../entry-remainder/cancel` (below), or close execution ends it; exactly one native SL/TP pair per entry is assumed (more
     = ambiguous attribution, protection changes fail closed). Count children per parent in the exchange-facts store
     (`order_links`, roles `stop_loss` / `take_profit` by `parent_order_link_id`).
+- Entry-remainder cancel (abi-entry-remainder-cancel-v1): `POST /v1/strategy-instances/{sid}/trade-cycles/{tid}/entry-remainder/cancel`
+  with body `{}`. Only after the pair's first fill is captured (else `422 entry_not_filled`). ABI cancels the pair's
+  own current entry order by its `orderLinkId` (never another pair, an earlier generation, or a symbol-wide cancel)
+  and confirms it terminal; an already terminal order gets no cancel. Answers `entry_remainder_cancelled` or
+  `entry_order_already_terminal` with `executed_quantity` (null for a closed cycle or an order no longer returned).
+  It never reads or closes the position, never touches the native SL/TP children, never writes the correlation record.
+  Any unconfirmed step is `500 internal_error`; the caller retries. Events: operation `entry_remainder_cancel`.
 - Do not enable `touch_trigger` on a trading stack before the Bybit Demo check (Partial SL/TP children linked by
   `parentOrderLinkId`, fill and child timing, partial Market fill reporting).
 

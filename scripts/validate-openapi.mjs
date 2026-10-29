@@ -66,6 +66,13 @@ const expectedDocuments = [
         responses: ["200", "400", "415", "422", "500"],
         requestBody: "required",
       },
+      {
+        method: "post",
+        httpMethod: "POST",
+        path: `${routePrefix}/entry-remainder/cancel`,
+        responses: ["200", "400", "415", "422", "500"],
+        requestBody: "required",
+      },
     ],
     validate: validatePositionManagementDocument,
   },
@@ -362,6 +369,33 @@ function validatePositionManagementDocument(document) {
   assert.ok(protectionOperation.responses["200"].content["application/json"].examples.applied);
   assert.ok(closeOperation.requestBody.content["application/json"].examples.fullClose);
   assert.ok(closeOperation.responses["200"].content["application/json"].examples.closed);
+
+  const remainderOperation = document.paths[`${routePrefix}/entry-remainder/cancel`].post;
+  assert.deepEqual(remainderOperation.requestBody.content["application/json"].schema, {
+    $ref: "#/components/schemas/EntryRemainderCancelRequest",
+  });
+  assert.equal(schemas.EntryRemainderCancelRequest.additionalProperties, false);
+  assert.deepEqual(schemas.EntryRemainderCancelRequest.properties, {});
+  assert.equal(schemas.EntryRemainderCancelResponse.additionalProperties, false);
+  assert.deepEqual(schemas.EntryRemainderCancelResponse.required, [
+    "strategy_instance_id",
+    "trade_cycle_id",
+    "status",
+    "executed_quantity",
+  ]);
+  assert.deepEqual(schemas.EntryRemainderCancelResponse.properties.status.enum, [
+    "entry_remainder_cancelled",
+    "entry_order_already_terminal",
+  ]);
+  assert.deepEqual(
+    schemas.EntryRemainderCancelBusinessError.oneOf.map((entry) => entry.$ref),
+    [
+      "#/components/schemas/ValidationFailedError",
+      "#/components/schemas/UnknownTradeCycleBindingError",
+      "#/components/schemas/EntryNotFilledError",
+    ],
+  );
+  assert.ok(remainderOperation.responses["200"].content["application/json"].examples.cancelled);
 
   assertForbiddenText(document, ["bybit", "Bybit", "adapter", "positionIdx", "orderLinkId"]);
 }

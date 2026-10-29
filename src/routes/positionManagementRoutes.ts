@@ -9,11 +9,22 @@ import {
   malformedJsonResult,
   unsupportedMediaTypeResult,
   validateCloseCommand,
+  validateEntryRemainderCancelCommand,
   validateProtectionCommand,
   validationFailedResult,
 } from "../domain/positionManagementApi.js";
-import type { CloseCommand, PositionManagementHttpResult, ProtectionCommand } from "../domain/positionManagementApi.js";
-import { classifyCloseResult, classifyProtectionResult, withOperationEvents } from "../observability/events.js";
+import type {
+  CloseCommand,
+  EntryRemainderCancelCommand,
+  PositionManagementHttpResult,
+  ProtectionCommand,
+} from "../domain/positionManagementApi.js";
+import {
+  classifyCloseResult,
+  classifyEntryRemainderCancelResult,
+  classifyProtectionResult,
+  withOperationEvents,
+} from "../observability/events.js";
 
 // Narrow structural port, not the concrete class: this route must not touch
 // correlation state, Bybit, or the mutex directly — it only knows how to
@@ -27,6 +38,12 @@ export type ProtectionApplicationServicePort = {
 // close pipeline.
 export type CloseApplicationServicePort = {
   apply(command: CloseCommand): Promise<PositionManagementHttpResult>;
+};
+
+// Same narrow-port split, for the entry-remainder cancel
+// (abi-entry-remainder-cancel-v1).
+export type EntryRemainderCancelServicePort = {
+  apply(command: EntryRemainderCancelCommand): Promise<PositionManagementHttpResult>;
 };
 
 export type PositionManagementRouteMatch =
@@ -45,15 +62,18 @@ export async function handlePositionManagementRoutes(input: {
   response: ServerResponse;
   protectionApplicationService: ProtectionApplicationServicePort;
   closeApplicationService: CloseApplicationServicePort;
+  entryRemainderCancelService: EntryRemainderCancelServicePort;
   isReady: () => boolean;
 }): Promise<boolean> {
-  const { request, response, protectionApplicationService, closeApplicationService, isReady } = input;
+  const { request, response, protectionApplicationService, closeApplicationService, entryRemainderCancelService, isReady } =
+    input;
   try {
     return await handlePositionManagementRoutesSafely(
       request,
       response,
       protectionApplicationService,
       closeApplicationService,
+      entryRemainderCancelService,
       isReady,
     );
   } catch {
@@ -67,6 +87,7 @@ async function handlePositionManagementRoutesSafely(
   response: ServerResponse,
   protectionApplicationService: ProtectionApplicationServicePort,
   closeApplicationService: CloseApplicationServicePort,
+  entryRemainderCancelService: EntryRemainderCancelServicePort,
   isReady: () => boolean,
 ): Promise<boolean> {
   const protectionMatch = matchProtectionRoute(request.method, request.url);
@@ -78,6 +99,12 @@ async function handlePositionManagementRoutesSafely(
   const closeMatch = matchCloseRoute(request.method, request.url);
   if (closeMatch.matched) {
     await handleClose(request, response, closeMatch, closeApplicationService, isReady);
+    return true;
+  }
+
+  const remainderMatch = matchEntryRemainderCancelRoute(request.method, request.url);
+  if (remainderMatch.matched) {
+    await handleEntryRemainderCancel(request, response, remainderMatch, entryRemainderCancelService, isReady);
     return true;
   }
 
@@ -203,6 +230,63 @@ async function handleClose(
   writeResult(response, result);
 }
 
+async function handleEntryRemainderCancel(
+  request: IncomingMessage,
+  response: ServerResponse,
+  match: Extract<PositionManagementRouteMatch, { matched: true }>,
+  entryRemainderCancelService: EntryRemainderCancelServicePort,
+  isReady: () => boolean,
+): Promise<void> {
+  // Same content-type/JSON-parse flow as handleClose; the body is a closed {}.
+  if (!isSupportedJsonContentType(request.headers["content-type"])) {
+    writeResult(response, unsupportedMediaTypeResult());
+    return;
+  }
+
+  if (match.details !== undefined) {
+    writeResult(response, validationFailedResult(match.details));
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(request);
+  } catch {
+    writeResult(response, malformedJsonResult());
+    return;
+  }
+
+  const validation = validateEntryRemainderCancelCommand(
+    {
+      strategyInstanceId: match.strategyInstanceId,
+      tradeCycleId: match.tradeCycleId,
+    },
+    payload,
+  );
+
+  if (!validation.ok) {
+    writeResult(response, validationFailedResult(validation.details));
+    return;
+  }
+
+  if (!isReady()) {
+    // Same fail-closed readiness gate as handleClose.
+    writeResult(response, internalErrorResult());
+    return;
+  }
+
+  const result = await withOperationEvents(
+    {
+      operation: "entry_remainder_cancel",
+      strategyInstanceId: validation.command.strategyInstanceId,
+      tradeCycleId: validation.command.tradeCycleId,
+    },
+    () => entryRemainderCancelService.apply(validation.command),
+    (httpResult) => classifyEntryRemainderCancelResult(httpResult.body),
+  );
+  writeResult(response, result);
+}
+
 export function matchProtectionRoute(
   method: string | undefined,
   requestUrl: string | undefined,
@@ -260,6 +344,38 @@ export function matchCloseRoute(
   const details: EntryPackageValidationDetail[] = [];
   // Reused from openPositionApi.ts: same opaque-path decode-and-empty-check
   // this resource's existing GET already uses.
+  const strategyInstanceId = decodeOpaquePathValue(segments[3], "/path/strategy_instance_id", details);
+  const tradeCycleId = decodeOpaquePathValue(segments[5], "/path/trade_cycle_id", details);
+
+  if (details.length > 0) {
+    return { matched: true, details };
+  }
+
+  return { matched: true, strategyInstanceId, tradeCycleId };
+}
+
+export function matchEntryRemainderCancelRoute(
+  method: string | undefined,
+  requestUrl: string | undefined,
+): PositionManagementRouteMatch {
+  if (method !== "POST" || requestUrl === undefined) {
+    return { matched: false };
+  }
+
+  const segments = pathSegments(requestUrl);
+  if (
+    segments.length !== 8 ||
+    segments[0] !== "" ||
+    segments[1] !== "v1" ||
+    segments[2] !== "strategy-instances" ||
+    segments[4] !== "trade-cycles" ||
+    segments[6] !== "entry-remainder" ||
+    segments[7] !== "cancel"
+  ) {
+    return { matched: false };
+  }
+
+  const details: EntryPackageValidationDetail[] = [];
   const strategyInstanceId = decodeOpaquePathValue(segments[3], "/path/strategy_instance_id", details);
   const tradeCycleId = decodeOpaquePathValue(segments[5], "/path/trade_cycle_id", details);
 

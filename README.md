@@ -113,6 +113,7 @@ resolution
 | `OpenPositionResolutionService` | determine current open-position truth |
 | `ProtectionApplicationService` | update and verify position SL/TP |
 | `CloseApplicationService` | neutralize entry order, close position and terminalize trade cycle |
+| `EntryRemainderCancelService` | cancel the unfilled remainder of a filled entry order, position and SL/TP untouched |
 
 Внешний success не означает «запрос в Bybit был отправлен». ABI старается возвращать success только после того, как нужный результат подтверждён fresh exchange reads или уже доказан durable state.
 
@@ -777,6 +778,7 @@ DELETE /v1/strategy-instances/{strategy_instance_id}/trade-cycles/{trade_cycle_i
 | `GET .../open-position` | resolve current position truth for the pair |
 | `PUT .../protection` | apply and confirm current stop/take protection |
 | `DELETE .../open-position` | close and terminalize the trade cycle |
+| `POST .../entry-remainder/cancel` | cancel the unfilled remainder of a filled entry order |
 
 Полные wire schemas здесь не дублируются. Актуальные OpenAPI documents находятся в [`docs/openapi/`](docs/openapi/), behavioral authority — в [`openspec/specs/`](openspec/specs/).
 
@@ -1088,6 +1090,7 @@ src/
 | `src/services/openPosition` | current position determination |
 | `src/services/protection` | protection execution/read-back |
 | `src/services/close` | position close and terminalization |
+| `src/services/entryRemainder` | entry-remainder cancel after a fill |
 | `src/domain` | transport/domain contracts and exact-decimal primitives |
 | `src/correlation` | durable execution records, indexes, replay |
 | `src/concurrency` | keyed process-local synchronization |
