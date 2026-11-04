@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { loadConfig } from "../../src/config/config.js";
+import { publishProtectedCredentials } from "../../src/config/protectedCredentials.js";
 import { getLiveExecutionMode } from "../../src/execution/liveGuard.js";
 
 function fixture(t: TestContext) {
@@ -61,4 +63,23 @@ test("protected credentials do not authorize Mainnet trading", (t) => {
     ...env, BYBIT_ENV: "mainnet", ABI_DRY_RUN: "false", ABI_LIVE_TRADING_ENABLED: "true",
   });
   assert.equal(getLiveExecutionMode(config).canExecuteLive, false);
+});
+
+test("a protected startup accepts one handoff even after ABI consumes the pair", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "abi-protected-handoff-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { ABI_PROTECTED_CREDENTIALS_DIR: root };
+  const handoff = (key: string, secret: string) =>
+    publishProtectedCredentials(root, Readable.from([JSON.stringify([key, secret]) + "\n"]));
+
+  await handoff("first-key", "first-secret");
+  await assert.rejects(handoff("second-key", "second-secret"), { code: "EEXIST" });
+
+  const config = loadConfig(env);
+  assert.equal(config.bybitApiKey, "first-key");
+  assert.equal(config.bybitApiSecret, "first-secret");
+
+  await assert.rejects(handoff("third-key", "third-secret"), { code: "EEXIST" });
+  assert.equal(existsSync(join(root, "ready")), false);
+  assert.throws(() => loadConfig(env), /Invalid or unreadable/);
 });

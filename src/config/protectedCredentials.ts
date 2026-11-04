@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, rmSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -55,5 +55,33 @@ export function readProtectedCredentials(root: string): [string, string] {
     } catch {
       throw new Error("Could not remove protected credential files");
     }
+  }
+}
+
+export async function publishProtectedCredentials(root: string, input: AsyncIterable<string>): Promise<void> {
+  // This directory is also the exclusive claim for the single handoff.
+  const staging = join(root, "incoming");
+  mkdirSync(staging, { mode: 0o700 });
+  let committed = false;
+  try {
+    let payload = "";
+    for await (const chunk of input) {
+      payload += chunk;
+      if (payload.length > 2 * credentialLimit + 16) throw new Error();
+    }
+    // A terminator distinguishes a complete frame from a stream cut before EOF.
+    if (!payload.endsWith("\n")) throw new Error();
+    const pair: unknown = JSON.parse(payload);
+    if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(isCredential)) throw new Error();
+    // Keep the claim for the lifetime of the mount after publishing the pair.
+    const ready = join(staging, "pair");
+    mkdirSync(ready, { mode: 0o700 });
+    for (const [index, name] of credentialFiles.entries()) {
+      writeFileSync(join(ready, name), pair[index], { flag: "wx", mode: 0o400 });
+    }
+    renameSync(ready, join(root, "ready"));
+    committed = true;
+  } finally {
+    if (!committed) rmSync(staging, { recursive: true, force: true });
   }
 }
