@@ -1,10 +1,13 @@
 import { loadConfig } from "../config/config.js";
+import { protectedCredentialsRoot, waitForCredentials } from "../config/protectedCredentials.js";
 import { configureDiagnostics } from "../observability/diagnostics.js";
 import { emitEvent } from "../observability/events.js";
 import { openExchangeFactsStore } from "./exchangeFactsStartup.js";
 import { serviceStartingFields } from "./serviceStartingEvent.js";
 import { startServer } from "./server.js";
 
+const protectedRoot = protectedCredentialsRoot(process.env);
+if (protectedRoot !== undefined) await waitForCredentials(protectedRoot);
 const config = loadConfig();
 configureDiagnostics(process.env.ABI_DIAGNOSTICS_PATH);
 

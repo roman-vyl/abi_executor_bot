@@ -8,3 +8,5 @@ var/
 *.zip
 .DS_Store
 *.log
+
+*.abi-credentials.*
