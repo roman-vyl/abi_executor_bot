@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { protectedCredentialsRoot, readProtectedCredentials } from "./protectedCredentials.js";
 
 export type AbiConfig = {
   host: string;
@@ -45,8 +46,10 @@ const CONFIG_FILE_KEYS = new Set(["live_entry_mode", "touch_trigger_entry_order_
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
   const bybitEnvironment = readBybitEnvironment(env);
-  const bybitApiKey = env.BYBIT_API_KEY?.trim() ?? "";
-  const bybitApiSecret = env.BYBIT_API_SECRET?.trim() ?? "";
+  const protectedRoot = protectedCredentialsRoot(env);
+  const [bybitApiKey, bybitApiSecret] = protectedRoot === undefined
+    ? [env.BYBIT_API_KEY?.trim() ?? "", env.BYBIT_API_SECRET?.trim() ?? ""]
+    : readProtectedCredentials(protectedRoot);
   const positionSizingMode = readPositionSizingMode(env.ABI_POSITION_SIZING_MODE);
   const liveEntryConfig = readLiveEntryConfigFile(env.ABI_CONFIG_PATH);
   // Risk sizing reads the wallet balance on every entry, so it cannot run

@@ -464,3 +464,32 @@ npm run smoke:entry-package:fake
   credentials it calls Bybit and returns whatever error Bybit reports.
 - **Container never becomes healthy** — check `docker compose logs abi`; the healthcheck polls
   `GET /health` and fails closed if the process is not listening.
+
+## Protected Demo startup on Docker Desktop
+
+Use a dedicated Bybit Demo account or subaccount for the protected smoke. Set
+`BBB_DATA_ROOT` as usual and choose an encrypted file outside the repo and data
+root. The command prompts for both Demo credentials and a passphrase without
+echo. It creates a private file and refuses to overwrite it.
+
+```bash
+mkdir -p "$BBB_DATA_ROOT/abi-protected-demo"
+docker --context desktop-linux compose -f docker-compose.protected.yml build
+node scripts/abi-protected.mjs encrypt /path/to/demo.abi-credentials.enc
+node scripts/abi-protected.mjs start /path/to/demo.abi-credentials.enc
+```
+
+The protected endpoint is `http://127.0.0.1:8788`. Check `/health` and
+`/execution/mode` before running a smoke. Use the following command to stop.
+Start again with the passphrase after any process exit.
+
+```bash
+docker --context desktop-linux stop abi-protected-unlocked
+```
+
+This project uses a separate correlation directory and does not participate in
+the existing Demo deployment. Credential files are removed before HTTP startup.
+The Linux container has swap disabled. This does not verify paging behavior in
+macOS or isolate secrets from the Docker daemon, the runner's Mac account, or
+code executing inside ABI. Protect the encrypted file and keep its passphrase
+separately. The protected Compose configuration targets Demo.
