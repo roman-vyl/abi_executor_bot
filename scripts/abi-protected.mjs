@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Writable } from "node:stream";
@@ -9,7 +9,6 @@ import { Writable } from "node:stream";
 const composeFile = fileURLToPath(new URL("../docker-compose.protected.yml", import.meta.url));
 const compose = ["compose", "--project-name", "abi-protected", "--file", composeFile];
 const containerName = "abi-protected-unlocked";
-const header = Buffer.from("ABI-CREDS-V1\n");
 
 async function prompt(label) {
   if (!process.stdin.isTTY) throw new Error("An interactive terminal is required");
@@ -35,54 +34,40 @@ function validatePair(pair) {
   }
 }
 
-function deriveKey(password, salt) {
-  return scryptSync(password, salt, 32, { N: 2 ** 17, r: 8, p: 1, maxmem: 192 * 1024 ** 2 });
+function age(args, input, error) {
+  if (!process.stdin.isTTY) throw new Error("An interactive terminal is required");
+  const result = spawnSync("age", args, {
+    input,
+    stdio: [input === undefined ? "inherit" : "pipe", "pipe", "inherit"],
+    maxBuffer: 8192,
+  });
+  if (result.error?.code === "ENOENT") throw new Error("Install age and make it available on PATH");
+  if (result.status !== 0) {
+    result.stdout?.fill(0);
+    throw new Error(error);
+  }
+  return result.stdout;
 }
 
 async function encrypt(path) {
   const pair = [await prompt("Bybit Demo API key: "), await prompt("Bybit Demo API secret: ")];
   validatePair(pair);
-  const password = await prompt("New passphrase: ");
-  if (password.length < 16) throw new Error("Use a passphrase of at least 16 characters");
-  if (password !== await prompt("Repeat passphrase: ")) throw new Error("Passphrases differ");
-
-  const salt = randomBytes(16);
-  const nonce = randomBytes(12);
-  const key = deriveKey(password, salt);
+  const plaintext = Buffer.from(JSON.stringify(pair));
   try {
-    const cipher = createCipheriv("aes-256-gcm", key, nonce);
-    cipher.setAAD(header);
-    const ciphertext = Buffer.concat([cipher.update(JSON.stringify(pair)), cipher.final()]);
-    writeFileSync(path, Buffer.concat([header, salt, nonce, cipher.getAuthTag(), ciphertext]), {
-      flag: "wx", mode: 0o600,
-    });
+    const ciphertext = age(["--passphrase"], plaintext, "Could not encrypt credentials");
+    writeFileSync(path, ciphertext, { flag: "wx", mode: 0o600 });
   } finally {
-    key.fill(0);
+    plaintext.fill(0);
   }
 }
 
-async function decrypt(path) {
+function decrypt(path) {
   const stat = statSync(path);
   if (!stat.isFile() || stat.size > 4096 || (stat.mode & 0o077) !== 0) {
     throw new Error("Use a regular encrypted credential file with private permissions");
   }
-  const file = readFileSync(path);
-  const offset = header.length;
-  if (file.length <= offset + 44 || !file.subarray(0, offset).equals(header)) {
-    throw new Error("Invalid encrypted credential file");
-  }
-  const password = await prompt("Passphrase: ");
-  const key = deriveKey(password, file.subarray(offset, offset + 16));
-  try {
-    const decipher = createDecipheriv("aes-256-gcm", key, file.subarray(offset + 16, offset + 28));
-    decipher.setAAD(header);
-    decipher.setAuthTag(file.subarray(offset + 28, offset + 44));
-    return Buffer.concat([decipher.update(file.subarray(offset + 44)), decipher.final()]);
-  } catch {
-    throw new Error("Could not unlock credentials");
-  } finally {
-    key.fill(0);
-  }
+  // Buffer all output and require a successful exit before touching Docker.
+  return age(["--decrypt", resolve(path)], undefined, "Could not unlock credentials");
 }
 
 function docker(args, error, options = {}) {
@@ -92,7 +77,7 @@ function docker(args, error, options = {}) {
 }
 
 async function start(path) {
-  const plaintext = await decrypt(path);
+  const plaintext = decrypt(path);
   let id;
   try {
     let pair;
@@ -145,8 +130,8 @@ async function start(path) {
 
 try {
   const [command, path, extra] = process.argv.slice(2);
-  if ((command !== "encrypt" && command !== "start") || !path?.endsWith(".abi-credentials.enc") || extra !== undefined) {
-    throw new Error("Usage: node scripts/abi-protected.mjs encrypt|start <path.abi-credentials.enc>");
+  if ((command !== "encrypt" && command !== "start") || !path?.endsWith(".abi-credentials.age") || extra !== undefined) {
+    throw new Error("Usage: node scripts/abi-protected.mjs encrypt|start <path.abi-credentials.age>");
   }
   if (command === "encrypt") await encrypt(path);
   else await start(path);

@@ -467,16 +467,19 @@ npm run smoke:entry-package:fake
 
 ## Protected Demo startup on Docker Desktop
 
-Use a dedicated Bybit Demo account or subaccount for the protected smoke. Set
+Install [age](https://github.com/FiloSottile/age#installation) on the Mac and
+make it available on PATH. Use a dedicated Bybit Demo account or subaccount for the protected smoke. Set
 `BBB_DATA_ROOT` as usual and choose an encrypted file outside the repo and data
 root. The command prompts for both Demo credentials and a passphrase without
-echo. It creates a private file and refuses to overwrite it.
+echo. It creates a private age file and refuses to overwrite it. For an
+earlier `.abi-credentials.enc` file, use the original Demo credentials to
+create a new `.abi-credentials.age` file.
 
 ```bash
 mkdir -p "$BBB_DATA_ROOT/abi-protected-demo"
 docker --context desktop-linux compose -f docker-compose.protected.yml build
-node scripts/abi-protected.mjs encrypt /path/to/demo.abi-credentials.enc
-node scripts/abi-protected.mjs start /path/to/demo.abi-credentials.enc
+node scripts/abi-protected.mjs encrypt /path/to/demo.abi-credentials.age
+node scripts/abi-protected.mjs start /path/to/demo.abi-credentials.age
 ```
 
 Set `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE=hedge` when starting against a

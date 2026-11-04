@@ -18,4 +18,4 @@ yarn-error.log*
 *.swp
 *.zip
 
-*.abi-credentials.enc
+*.abi-credentials.*
