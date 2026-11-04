@@ -479,6 +479,9 @@ node scripts/abi-protected.mjs encrypt /path/to/demo.abi-credentials.enc
 node scripts/abi-protected.mjs start /path/to/demo.abi-credentials.enc
 ```
 
+Set `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE=hedge` when starting against a
+Demo account configured for hedge mode. The default is `one_way`.
+
 The protected endpoint is `http://127.0.0.1:8788`. Check `/health` and
 `/execution/mode` before running a smoke. Use the following command to stop.
 Start again with the passphrase after any process exit.
