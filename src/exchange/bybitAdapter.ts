@@ -3,6 +3,7 @@ import diagnosticsChannel from "node:diagnostics_channel";
 
 import { Agent } from "undici";
 
+import type { AuthorizationService, Credentials } from "../authorization/authorizationService.js";
 import type { AbiConfig } from "../config/config.js";
 import { timeBybitRequest } from "../observability/diagnostics.js";
 import { classifyExactDecimalText, isExactDecimalText, isPositiveExactDecimalText } from "../domain/entryPackageApi.js";
@@ -153,9 +154,15 @@ export type BybitConnectionCounters = {
 // (and the read timeout) earn a GET its one repeat.
 const CONNECTION_BREAK_CODES = new Set(["UND_ERR_SOCKET", "ECONNRESET", "EPIPE"]);
 
+export type CredentialsSource = Pick<AuthorizationService, "credentials">;
+type BybitAdapterConfig = Pick<AbiConfig,
+  "bybitEnvironment" | "bybitAccountType" | "bybitCategory" | "bybitSettleCoin" |
+  "bybitRecvWindow" | "bybitRequestTimeoutMs" | "bybitReadTimeoutMs" | "bybitKeepAliveTimeoutMs">;
+
 export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader {
   private readonly baseUrl: string;
-  private readonly config: AbiConfig;
+  private readonly config: BybitAdapterConfig;
+  private readonly credentialsSource: CredentialsSource | undefined;
   // One keep-alive pool for every Bybit request of this adapter, GET and POST
   // (abi-bybit-connection-keepalive-v1 D1). Bybit sends no Keep-Alive hint,
   // so keepAliveTimeout is the effective idle limit.
@@ -174,8 +181,15 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   };
 
   // `baseUrl` is a test seam only; production derives it from BYBIT_ENV.
-  constructor(config: AbiConfig, options: { baseUrl?: string } = {}) {
-    this.config = config;
+  constructor(config: BybitAdapterConfig, options: { baseUrl?: string; credentialsSource?: CredentialsSource } = {}) {
+    // Temporary optional dependency for the stacked integration PR; never fall back to config credentials.
+    this.credentialsSource = options.credentialsSource;
+    this.config = {
+      bybitEnvironment: config.bybitEnvironment, bybitAccountType: config.bybitAccountType,
+      bybitCategory: config.bybitCategory, bybitSettleCoin: config.bybitSettleCoin,
+      bybitRecvWindow: config.bybitRecvWindow, bybitRequestTimeoutMs: config.bybitRequestTimeoutMs,
+      bybitReadTimeoutMs: config.bybitReadTimeoutMs, bybitKeepAliveTimeoutMs: config.bybitKeepAliveTimeoutMs,
+    };
     this.baseUrl = options.baseUrl ?? getBybitBaseUrl(config);
     this.hostname = new URL(this.baseUrl).hostname;
     this.agent = new Agent({
@@ -421,13 +435,11 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   }
 
   async getMarketPrice(symbol: string): Promise<string> {
-    const response = await this.signedGet(
-      "/v5/market/tickers",
-      new URLSearchParams({
-        category: this.config.bybitCategory,
-        symbol,
-      }),
-    );
+    const params = new URLSearchParams({ category: this.config.bybitCategory, symbol });
+    const response = await this.readWithRetry("/v5/market/tickers", async (signal) => {
+      const response = await fetch(`${this.baseUrl}/v5/market/tickers?${params}`, this.fetchInit({ signal }));
+      return readBybitResponse(response);
+    });
 
     return readTickerLastPrice(response);
   }
@@ -436,18 +448,22 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
     return stub("placeMarketOrder", input);
   }
 
+  private requireCredentials(): Credentials {
+    const pair = this.credentialsSource?.credentials();
+    if (pair === undefined) throw new Error("Bybit authorization is required");
+    return pair;
+  }
+
   private async signedGet(path: string, params: URLSearchParams): Promise<unknown> {
-    if (this.config.bybitApiKey === "" || this.config.bybitApiSecret === "") {
-      throw new Error("BYBIT_API_KEY and BYBIT_API_SECRET are required");
-    }
+    const credentials = this.requireCredentials();
 
     const queryString = params.toString();
 
     // Each attempt is signed with its own fresh timestamp.
     return this.readWithRetry(path, async (signal) => {
       const timestamp = String(Date.now());
-      const signaturePayload = `${timestamp}${this.config.bybitApiKey}${this.config.bybitRecvWindow}${queryString}`;
-      const signature = createHmac("sha256", this.config.bybitApiSecret)
+      const signaturePayload = `${timestamp}${credentials.apiKey}${this.config.bybitRecvWindow}${queryString}`;
+      const signature = createHmac("sha256", credentials.apiSecret)
         .update(signaturePayload)
         .digest("hex");
       const response = await fetch(
@@ -455,7 +471,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
         this.fetchInit({
           method: "GET",
           headers: {
-            "X-BAPI-API-KEY": this.config.bybitApiKey,
+            "X-BAPI-API-KEY": credentials.apiKey,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
             "X-BAPI-SIGN": signature,
@@ -494,14 +510,12 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   }
 
   private async signedPost(path: string, payload: object): Promise<unknown> {
-    if (this.config.bybitApiKey === "" || this.config.bybitApiSecret === "") {
-      throw new Error("BYBIT_API_KEY and BYBIT_API_SECRET are required");
-    }
+    const credentials = this.requireCredentials();
 
     const timestamp = String(Date.now());
     const body = JSON.stringify(payload);
-    const signaturePayload = `${timestamp}${this.config.bybitApiKey}${this.config.bybitRecvWindow}${body}`;
-    const signature = createHmac("sha256", this.config.bybitApiSecret)
+    const signaturePayload = `${timestamp}${credentials.apiKey}${this.config.bybitRecvWindow}${body}`;
+    const signature = createHmac("sha256", credentials.apiSecret)
       .update(signaturePayload)
       .digest("hex");
 
@@ -512,7 +526,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
           method: "POST",
           headers: {
             "content-type": "application/json; charset=utf-8",
-            "X-BAPI-API-KEY": this.config.bybitApiKey,
+            "X-BAPI-API-KEY": credentials.apiKey,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-RECV-WINDOW": this.config.bybitRecvWindow,
             "X-BAPI-SIGN": signature,
@@ -545,7 +559,7 @@ function emptyConnectionCounters(): BybitConnectionCounters {
   return { newConnections: 0, connectErrors: 0, getRetriesTimeout: 0, getRetriesConnectionClosed: 0 };
 }
 
-function getBybitBaseUrl(config: AbiConfig): string {
+function getBybitBaseUrl(config: Pick<AbiConfig, "bybitEnvironment">): string {
   if (config.bybitEnvironment === "demo") {
     return "https://api-demo.bybit.com";
   }
