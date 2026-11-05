@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo, Socket } from "node:net";
 import test from "node:test";
 
+import { AuthorizationService } from "../../src/authorization/authorizationService.js";
 import { loadConfig } from "../../src/config/config.js";
 import { RestBybitAdapter } from "../../src/exchange/bybitAdapter.js";
 import { BybitConnectionHeartbeat } from "../../src/exchange/bybitConnectionHeartbeat.js";
@@ -11,7 +12,13 @@ import { makeTestConfig } from "../fixtures/config.js";
 const OK_BODY = { retCode: 0, retMsg: "OK", result: {} };
 
 function keyedConfig(overrides: Parameters<typeof makeTestConfig>[0] = {}) {
-  return makeTestConfig({ bybitApiKey: "key", bybitApiSecret: "secret", bybitReadTimeoutMs: 500, ...overrides });
+  return makeTestConfig({ bybitReadTimeoutMs: 500, ...overrides });
+}
+
+async function authorizedAdapter(config: ReturnType<typeof keyedConfig>, options: { baseUrl?: string } = {}) {
+  const credentialsSource = new AuthorizationService(async () => "accepted");
+  await credentialsSource.authorize({ apiKey: "key", apiSecret: "secret" });
+  return new RestBybitAdapter(config, { ...options, credentialsSource });
 }
 
 // Scripted global fetch: each step either answers or throws a fetch failure
@@ -49,7 +56,7 @@ test("keep-alive and heartbeat settings default to 200 s and 60 s and are valida
 
 test("every GET and POST of the adapter goes through the same pool", async () => {
   const fake = scriptFetch(["ok", "ok", "ok", "ok"]);
-  const adapter = new RestBybitAdapter(keyedConfig());
+  const adapter = await authorizedAdapter(keyedConfig());
   try {
     await adapter.getServerTime();
     await adapter.getActiveOrders({ symbol: "BTCUSDT" });
@@ -67,7 +74,7 @@ test("every GET and POST of the adapter goes through the same pool", async () =>
 for (const code of ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE"]) {
   test(`a GET whose connection broke (${code}) is retried once`, async () => {
     const fake = scriptFetch([{ code }, "ok"]);
-    const adapter = new RestBybitAdapter(keyedConfig());
+    const adapter = await authorizedAdapter(keyedConfig());
     try {
       assert.deepEqual(await adapter.getActiveOrders({ symbol: "BTCUSDT" }), OK_BODY);
       assert.equal(fake.calls.length, 2);
@@ -82,7 +89,7 @@ for (const code of ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE"]) {
 for (const code of ["ENOTFOUND", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT", undefined]) {
   test(`a GET failing with ${code ?? "a plain fetch failure"} is not retried`, async () => {
     const fake = scriptFetch([{ code }, "ok"]);
-    const adapter = new RestBybitAdapter(keyedConfig());
+    const adapter = await authorizedAdapter(keyedConfig());
     try {
       await assert.rejects(adapter.getActiveOrders({ symbol: "BTCUSDT" }), /fetch failed/);
       assert.equal(fake.calls.length, 1);
@@ -95,7 +102,7 @@ for (const code of ["ENOTFOUND", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT", unde
 
 test("a GET answered with HTTP 403 or a Bybit error code is not retried", async () => {
   const original = globalThis.fetch;
-  const adapter = new RestBybitAdapter(keyedConfig());
+  const adapter = await authorizedAdapter(keyedConfig());
   let calls = 0;
   const answers = [
     new Response("forbidden", { status: 403 }),
@@ -118,7 +125,7 @@ test("a GET answered with HTTP 403 or a Bybit error code is not retried", async 
 
 test("a GET that breaks twice fails with the second error after exactly two attempts", async () => {
   const fake = scriptFetch([{ code: "ECONNRESET" }, { code: "UND_ERR_SOCKET" }, "ok"]);
-  const adapter = new RestBybitAdapter(keyedConfig());
+  const adapter = await authorizedAdapter(keyedConfig());
   try {
     await assert.rejects(
       adapter.getActiveOrders({ symbol: "BTCUSDT" }),
@@ -133,7 +140,7 @@ test("a GET that breaks twice fails with the second error after exactly two atte
 
 test("a POST on a broken connection is sent exactly once", async () => {
   const fake = scriptFetch([{ code: "UND_ERR_SOCKET" }, "ok"]);
-  const adapter = new RestBybitAdapter(keyedConfig());
+  const adapter = await authorizedAdapter(keyedConfig());
   try {
     await assert.rejects(adapter.cancelOrder(cancelPayload), /fetch failed/);
     assert.equal(fake.calls.length, 1);
@@ -182,7 +189,7 @@ async function stopServer(server: Server): Promise<void> {
 
 test("requests within the idle limit reuse one connection", async () => {
   const local = await localServer((_request, response) => answerOk(response));
-  const adapter = new RestBybitAdapter(keyedConfig(), { baseUrl: local.baseUrl });
+  const adapter = await authorizedAdapter(keyedConfig(), { baseUrl: local.baseUrl });
   try {
     await adapter.getServerTime();
     await settle();
@@ -201,7 +208,7 @@ test("requests within the idle limit reuse one connection", async () => {
 test("after the server closes an idle connection the next request opens a new one", async () => {
   const local = await localServer((_request, response) => answerOk(response));
   local.server.keepAliveTimeout = 50;
-  const adapter = new RestBybitAdapter(keyedConfig(), { baseUrl: local.baseUrl });
+  const adapter = await authorizedAdapter(keyedConfig(), { baseUrl: local.baseUrl });
   try {
     await adapter.getServerTime();
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -223,7 +230,7 @@ test("a GET whose reused connection is dropped succeeds on the retry; a POST fai
     }
     answerOk(response);
   });
-  const adapter = new RestBybitAdapter(keyedConfig(), { baseUrl: local.baseUrl });
+  const adapter = await authorizedAdapter(keyedConfig(), { baseUrl: local.baseUrl });
   try {
     await adapter.getServerTime();
     await settle();

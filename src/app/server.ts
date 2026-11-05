@@ -1,3 +1,9 @@
+import { createAuthorizationSocket } from "../authorization/authorizationSocket.js";
+import { assureConfiguredActiveBindings } from "./positionModeAssuranceSeams.js";
+import { disabledStreamStatus } from "../exchangeStream/exchangeStreamRecorder.js";
+import { disabledRestStatus, emptyCompletenessStatus } from "../exchangeFacts/exchangeRestReconciler.js";
+import type { ExchangeStreamHandle } from "../exchangeStream/exchangeStreamStartup.js";
+import type { ExchangeRestReconcilerHandle } from "../exchangeFacts/exchangeRestReconciler.js";
 import { createServer } from "node:http";
 
 import { KeyedMutex } from "../concurrency/keyedMutex.js";
@@ -36,12 +42,63 @@ import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 // The exchange facts store is opened by the caller before anything listens;
 // nothing in order execution uses it.
-export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState): void {
-  // Read-only private stream recorder; runs only with an enabled store and a
-  // key, and never touches order execution (abi-exchange-stream-recorder-v1).
-  const exchangeStream = createExchangeStreamRecorder(config, exchangeFacts);
-
-  const bybit = new RestBybitAdapter(config);
+export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState,
+  retryTimers: Pick<typeof globalThis, "setTimeout" | "clearTimeout"> = globalThis) {
+  let stopping = false;
+  let activate: () => void = () => undefined;
+  let authorizationChanged: () => void = () => undefined;
+  const control = await createAuthorizationSocket({
+    path: config.authorizationSocketPath,
+    policy: { environment: config.bybitEnvironment as "demo" | "testnet", expectedUid: config.expectedBybitUid,
+      category: config.bybitCategory as "linear" | "spot", recvWindow: config.bybitRecvWindow },
+    onAuthorizationResult: result => {
+      if (result !== "busy" && result !== "retry_required" && result !== "no_candidate") authorizationChanged();
+    },
+  });
+  const authorization = control.authorization;
+  const bybit = new RestBybitAdapter(config, { credentialsSource: authorization });
+  let exchangeStream: ExchangeStreamHandle | undefined;
+  let exchangeRest: ExchangeRestReconcilerHandle | undefined;
+  let bindingsVerified = false;
+  let activationReason: string | undefined;
+  let activation: Promise<void> | undefined;
+  const accountReady = () => !stopping && authorization.status() === "AUTHORIZED";
+  const executionReady = () => accountReady() && readiness.isReady && bindingsVerified;
+  // One completion-based timer for the two safe startup read phases. Never retries trading commands.
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryPhase: "authorization" | "bindings" | undefined;
+  let retryStep = 0;
+  let authorizationAttempt: Promise<void> | undefined;
+  const cancelRetryTimer = () => {
+    if (retryTimer !== undefined) retryTimers.clearTimeout(retryTimer);
+    retryTimer = undefined;
+  };
+  const resetRetry = () => { cancelRetryTimer(); retryPhase = undefined; retryStep = 0; };
+  const scheduleRetry = (phase: "authorization" | "bindings") => {
+    if (stopping || retryTimer !== undefined) return;
+    if (retryPhase !== phase) { retryPhase = phase; retryStep = 0; }
+    const delayMs = [5_000, 15_000, 30_000][Math.min(retryStep++, 2)];
+    retryTimer = retryTimers.setTimeout(() => {
+      retryTimer = undefined;
+      if (stopping) return;
+      if (authorization.status() === "RETRY_PENDING" && !authorizationAttempt) {
+        authorizationAttempt = (async () => {
+          await authorization.retry();
+          authorizationChanged();
+        })().finally(() => { authorizationAttempt = undefined; });
+      } else if (accountReady()) activate();
+    }, delayMs);
+    retryTimer.unref?.();
+    emitEvent("info", "startup_retry_scheduled", { phase, delayMs });
+  };
+  authorizationChanged = () => {
+    if (stopping) return;
+    cancelRetryTimer();
+    const state = authorization.status();
+    if (state === "RETRY_PENDING") scheduleRetry("authorization");
+    else if (state === "AUTHORIZED") activate();
+    else if (state === "LOCKED") resetRetry();
+  };
   // Keeps the pooled Bybit connection in use between bars; trading never
   // waits for it (abi-bybit-connection-keepalive-v1).
   const bybitHeartbeat = new BybitConnectionHeartbeat({ adapter: bybit, intervalMs: config.bybitHeartbeatIntervalMs });
@@ -133,38 +190,69 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     isCorrelationReady: () => readiness.isReady,
   });
 
-  // Fills stream gaps from Bybit REST history and checks completeness; read
-  // only, starts after the correlation replay, never called by trading
-  // (abi-exchange-rest-reconciliation-v1).
-  const exchangeRest = createExchangeRestReconciler(config, exchangeFacts, {
-    reader: bybit,
-    listRecords: () => correlationRepository.listAllRecords(),
-    isCorrelationReady: () => readiness.isReady,
-  });
+  // Preserve the existing local recovery exactly once, independently of authorization.
+  const localRecovery = replayCorrelationStore(correlationRepository, readiness);
+  activate = () => {
+    if (!accountReady() || activation || bindingsVerified) return;
+    activation = (async () => {
+      try {
+        if (stopping) return;
+        if (!exchangeStream) {
+          exchangeStream = createExchangeStreamRecorder(config, exchangeFacts, authorization);
+          exchangeStream.start();
+        }
+        if (!exchangeRest) {
+          exchangeRest = createExchangeRestReconciler(config, exchangeFacts, {
+            reader: bybit, listRecords: () => correlationRepository.listAllRecords(),
+            isCorrelationReady: () => readiness.isReady,
+          });
+          exchangeRest.start();
+        }
+        await localRecovery;
+        if (stopping || !readiness.isReady) return;
+        const result = await assureConfiguredActiveBindings({ bybit,
+          linearPolicy: config.bybitLinearPositionBindingMode,
+          activeRecords: correlationRepository.findAllActiveRecords() });
+        if (stopping) return;
+        bindingsVerified = result.ok;
+        activationReason = result.ok ? undefined : result.reason;
+        if (result.ok) { resetRetry(); emitEvent("info", "execution_ready"); }
+        else {
+          emitEvent("warn", "execution_activation_failed", { reason: result.reason });
+          if (result.retryable) scheduleRetry("bindings");
+          else resetRetry();
+        }
+      } catch {
+        activationReason = "activation_failed";
+        emitEvent("warn", "execution_activation_failed", { reason: activationReason });
+      }
+    })().finally(() => { activation = undefined; });
+  };
 
-  void replayCorrelationStore(correlationRepository, readiness, {
-    bybit,
-    linearPolicy: config.bybitLinearPositionBindingMode,
-    getActiveRecords: () => correlationRepository.findAllActiveRecords(),
-  });
+  // Cover an authorization that completed while the socket was being opened.
+  authorizationChanged();
 
   const server = createServer(async (request, response) => {
     if (await handleSystemRoutes({
         request,
         response,
         config,
-        entryPackageReady: readiness.isReady,
+        entryPackageReady: executionReady(),
+        authorizationState: authorization.status(),
+        localRecoveryReady: readiness.isReady,
+        bindingsVerified,
+        activationReason,
         exchangeFacts,
-        exchangeStream: exchangeStream.status(),
+        exchangeStream: exchangeStream?.status() ?? disabledStreamStatus("awaiting_authorization"),
         exchangeLinker: exchangeLinker.status(),
-        exchangeRest: exchangeRest.status(),
-        exchangeCompleteness: exchangeRest.completenessStatus(),
+        exchangeRest: exchangeRest?.status() ?? disabledRestStatus("awaiting_authorization"),
+        exchangeCompleteness: exchangeRest?.completenessStatus() ?? emptyCompletenessStatus(),
         bybitConnection: bybitHeartbeat.status(),
       })) {
       return;
     }
 
-    if (await handleAccountRoutes({ request, response, config, bybit })) {
+    if (await handleAccountRoutes({ request, response, config, bybit, isReady: accountReady })) {
       return;
     }
 
@@ -176,10 +264,10 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         response,
         exchangeFacts,
         health: () => ({
-          stream: exchangeStream.status(),
+          stream: exchangeStream?.status() ?? disabledStreamStatus("awaiting_authorization"),
           linker: exchangeLinker.status(),
-          rest: exchangeRest.status(),
-          completeness: exchangeRest.completenessStatus(),
+          rest: exchangeRest?.status() ?? disabledRestStatus("awaiting_authorization"),
+          completeness: exchangeRest?.completenessStatus() ?? emptyCompletenessStatus(),
         }),
       })
     ) {
@@ -191,7 +279,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         applicationService,
-        isReady: () => readiness.isReady,
+        isReady: executionReady,
       })
     ) {
       return;
@@ -202,7 +290,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         resolutionService: openPositionResolutionService,
-        isReady: () => readiness.isReady,
+        isReady: executionReady,
       })
     ) {
       return;
@@ -213,7 +301,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         resolutionService: entryCycleRecoveryResolutionService,
-        isReady: () => readiness.isReady,
+        isReady: executionReady,
       })
     ) {
       return;
@@ -226,7 +314,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         protectionApplicationService,
         closeApplicationService,
         entryRemainderCancelService,
-        isReady: () => readiness.isReady,
+        isReady: executionReady,
       })
     ) {
       return;
@@ -237,32 +325,41 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     });
   });
 
-  server.listen(config.port, config.host, () => {
-    emitEvent("info", "server_listening", { host: config.host, port: config.port });
-  });
-
-  exchangeStream.start();
+  let controlClosed: Promise<void> | undefined;
+  const beginShutdown = () => {
+    stopping = true;
+    resetRetry();
+    controlClosed ??= control.close();
+    // Observe rejection immediately even while HTTP requests drain.
+    void controlClosed.catch(() => undefined);
+  };
+  const release = async () => {
+    beginShutdown();
+    await controlClosed;
+    await authorizationAttempt;
+    await activation;
+    bybitHeartbeat.stop();
+    try {
+      exchangeStream?.stop();
+      exchangeLinker.stop();
+      exchangeRest?.stop();
+      if (exchangeFacts.status === "enabled") exchangeFacts.store.close();
+    } finally { bybit.close(); }
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(config.port, config.host, () => { server.removeListener("error", reject); resolve(); });
+    });
+  } catch (error) { await release(); throw error; }
+  emitEvent("info", "server_listening", { host: config.host, port: config.port });
   exchangeLinker.start();
-  exchangeRest.start();
   bybitHeartbeat.start();
-
-  installShutdownHandlers({
-    server,
-    onServerClosed: () => {
-      // The heartbeat stops first and the pool is closed even if closing the
-      // store throws (abi-bybit-connection-keepalive-v1 D5).
-      bybitHeartbeat.stop();
-      try {
-        // The recorder writes its last buffered records before the store closes.
-        exchangeStream.stop();
-        exchangeLinker.stop();
-        exchangeRest.stop();
-        if (exchangeFacts.status === "enabled") {
-          exchangeFacts.store.close();
-        }
-      } finally {
-        bybit.close();
-      }
-    },
-  });
+  const close = async () => {
+    beginShutdown();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await release();
+  };
+  installShutdownHandlers({ server, onShutdownStarted: beginShutdown, onServerClosed: release });
+  return { server, close, authorization };
 }

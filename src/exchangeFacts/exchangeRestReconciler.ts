@@ -591,9 +591,6 @@ export function createExchangeRestReconciler(
   if (exchangeFacts.status !== "enabled") {
     return disabledHandle("store_not_enabled");
   }
-  if (config.bybitApiKey === "" || config.bybitApiSecret === "") {
-    return disabledHandle("no_api_key");
-  }
   return new ExchangeRestReconciler({ ...deps, store: exchangeFacts.store, category: config.bybitCategory });
 }
 

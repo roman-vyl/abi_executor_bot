@@ -3,8 +3,8 @@ import { SCHEMA_VERSION } from "../exchangeFacts/schema.js";
 import type { ExchangeFactsStoreState } from "./exchangeFactsStartup.js";
 
 // The service_starting event's fields — deliberately excludes
-// bybitApiKey/bybitApiSecret; only a boolean "is a key configured" fact is
-// reported, mirroring the pre-existing config dump this event replaces.
+// credentials; startup is always LOCKED. Legacy boolean field is retained
+// as false until later health reporting reflects authorization.
 export function serviceStartingFields(
   config: AbiConfig,
   exchangeFacts: ExchangeFactsStoreState,
@@ -23,7 +23,7 @@ export function serviceStartingFields(
     bybitTriggerBy: config.bybitTriggerBy,
     bybitLinearPositionBindingMode: config.bybitLinearPositionBindingMode,
     positionSizingMode: config.positionSizingMode,
-    bybitApiKeyConfigured: config.bybitApiKey !== "",
+    bybitApiKeyConfigured: false,
     // State after the open attempt: disabled, enabled or unavailable.
     exchangeFactsStore: exchangeFacts.status,
     // The only version this build opens; any other leaves the store unavailable.

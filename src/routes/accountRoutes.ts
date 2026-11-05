@@ -1,3 +1,4 @@
+import { admitExecution } from "../execution/executionAdmission.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
@@ -15,6 +16,7 @@ export async function handleAccountRoutes(input: {
   response: ServerResponse;
   config: AbiConfig;
   bybit: BybitAdapter;
+  isReady?: () => boolean;
 }): Promise<boolean> {
   const { request, response, config, bybit } = input;
 
@@ -23,6 +25,10 @@ export async function handleAccountRoutes(input: {
   }
 
   const pathname = getPathname(request.url, config);
+
+  const known = (request.method === "GET" && ["/account/balance", "/account/orders/active", "/account/positions/open"].includes(pathname)) ||
+    (request.method === "POST" && ["/account/orders/cancel-all", "/account/positions/close-all"].includes(pathname));
+  if (known && !admitExecution(response, input.isReady ?? (() => bybit.isAuthorized()))) return true;
 
   if (request.method === "GET" && pathname === "/account/balance") {
     await handleBalance({ request, response, config, bybit });
@@ -76,21 +82,6 @@ async function handleActiveOrders(input: AccountRouteInput): Promise<void> {
   const symbol = url.searchParams.get("symbol") ?? undefined;
   const query = buildAccountQuery(config, symbol);
 
-  if (config.bybitApiKey === "" || config.bybitApiSecret === "") {
-    writeJson(response, 200, {
-      status: "skipped_bybit_query",
-      wouldQueryBybit: {
-        endpoint: "/v5/order/realtime",
-        params: {
-          ...query,
-          openOnly: "0",
-          limit: "50",
-        },
-      },
-      reason: "BYBIT_API_KEY and BYBIT_API_SECRET are required",
-    });
-    return;
-  }
 
   try {
     const bybitResponse = await bybit.getActiveOrders({ symbol });
@@ -120,17 +111,6 @@ async function handleOpenPositions(input: AccountRouteInput): Promise<void> {
   const symbol = url.searchParams.get("symbol") ?? undefined;
   const query = buildAccountQuery(config, symbol);
 
-  if (config.bybitApiKey === "" || config.bybitApiSecret === "") {
-    writeJson(response, 200, {
-      status: "skipped_bybit_query",
-      wouldQueryBybit: {
-        endpoint: "/v5/position/list",
-        params: query,
-      },
-      reason: "BYBIT_API_KEY and BYBIT_API_SECRET are required",
-    });
-    return;
-  }
 
   try {
     const bybitResponse = await bybit.getOpenPositions({ symbol });
@@ -155,7 +135,7 @@ async function handleCancelAllOrders(input: AccountRouteInput): Promise<void> {
   const url = new URL(request.url ?? "", `http://${config.host}:${config.port}`);
   const symbol = url.searchParams.get("symbol") ?? undefined;
   const payload = buildCancelAllOrdersPayload(config, symbol);
-  const mode = getLiveExecutionMode(config);
+  const mode = getLiveExecutionMode(config, bybit.isAuthorized());
 
   if (!mode.canExecuteLive) {
     writeJson(response, 200, {
@@ -193,20 +173,8 @@ async function handleCloseAllPositions(input: AccountRouteInput): Promise<void> 
   const url = new URL(request.url ?? "", `http://${config.host}:${config.port}`);
   const symbol = url.searchParams.get("symbol") ?? undefined;
   const query = buildAccountQuery(config, symbol);
-  const mode = getLiveExecutionMode(config);
+  const mode = getLiveExecutionMode(config, bybit.isAuthorized());
 
-  if (config.bybitApiKey === "" || config.bybitApiSecret === "") {
-    writeJson(response, 200, {
-      status: "skipped_bybit_query",
-      wouldQueryBybit: {
-        endpoint: "/v5/position/list",
-        params: query,
-      },
-      mode,
-      reason: "BYBIT_API_KEY and BYBIT_API_SECRET are required",
-    });
-    return;
-  }
 
   try {
     const positionsResponse = await bybit.getOpenPositions({ symbol });

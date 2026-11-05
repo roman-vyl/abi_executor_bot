@@ -208,7 +208,7 @@ quantity = floor_to_qtyStep( (totalWalletBalance × risk_multiplier / 100) / |pl
 - Риск чистый: комиссии и проскальзывание не учтены, реальный убыток может быть больше.
 - Количество округляется только вниз и никогда не поднимается до биржевого минимума.
 - ABI не читает и не меняет плечо; маржой и исполнением управляет Bybit.
-- Режим `risk` требует `BYBIT_API_KEY` и `BYBIT_API_SECRET` (старт без них падает, также в dry-run).
+- Режим `risk` запускается в LOCKED без ключей; чтение баланса и execution доступны после поздней авторизации.
 
 Если вход невозможен, первый APPLY пары получает `200 entry_package_declined` с `decline_reason` и `decline_message`; пара перед ответом закрывается как `absent`, recovery для неё — `terminal_without_fill`. Причины:
 
@@ -677,9 +677,7 @@ ABI_DRY_RUN=false
 AND
 ABI_LIVE_TRADING_ENABLED=true
 AND
-BYBIT_API_KEY configured
-AND
-BYBIT_API_SECRET configured
+AuthorizationService = AUTHORIZED
 AND
 BYBIT_ENV is demo or testnet
 ```
@@ -732,10 +730,12 @@ Close подтверждает и zero position, и terminality attributed entry
 
 Это **не общий retry/recovery daemon**:
 
-- ABI не имеет бесконечного background retry loop;
+- ABI не повторяет торговые POST фоновым циклом;
 - transport failure не превращается автоматически в success;
 - ambiguous result fail-closed;
 - durable pending/correlation state сохраняет контекст, необходимый для повторной команды или startup replay.
+
+Отдельно composition root автоматически повторяет только стартовую проверку сохранённых credentials и временно недоступных торговых привязок: 5/15/30 секунд, затем по 30 секунд. Пароль передаётся один раз; replay, observers и торговые POST этим таймером не повторяются.
 
 ---
 
@@ -885,8 +885,8 @@ Configuration читается из environment.
 | `ABI_CONFIG_PATH` | empty (no file) | JSON-файл режима входа, читается один раз при старте (см. ниже) |
 | `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |
-| `BYBIT_API_KEY` | empty | Bybit API key |
-| `BYBIT_API_SECRET` | empty | Bybit API secret |
+| `ABI_EXPECTED_BYBIT_UID` | required at startup | Доверенный UID целевого Demo/testnet-аккаунта |
+| `ABI_AUTHORIZATION_SOCKET_PATH` | `/run/abi-authorization/control.sock` | Закрытый Unix socket авторизации |
 | `BYBIT_ACCOUNT_TYPE` | `UNIFIED` | Bybit account type |
 | `BYBIT_RECV_WINDOW` | `5000` | signed request receive window |
 | `BYBIT_CATEGORY` | `linear` | default category for paths that use global config |
@@ -952,10 +952,12 @@ npm run build
 Запуск compiled service:
 
 ```bash
+export ABI_EXPECTED_BYBIT_UID=<trusted-account-uid>
+export ABI_AUTHORIZATION_SOCKET_PATH=/tmp/abi-authorization/control.sock
 npm start
 ```
 
-Без explicit environment service использует safe local defaults и bind:
+После настройки UID и socket service использует dry-run и локальный bind:
 
 ```text
 127.0.0.1:8787
@@ -980,6 +982,7 @@ curl http://127.0.0.1:8787/execution/mode
 
 ```bash
 export BBB_DATA_ROOT=/path/to/bbb-data
+export ABI_EXPECTED_BYBIT_UID=<trusted-account-uid>
 docker compose up --build
 ```
 
@@ -992,7 +995,7 @@ docker compose up --build
 - использует `BYBIT_ENV=testnet`;
 - не требует Bybit credentials для safe startup;
 - монтирует `${BBB_DATA_ROOT}/abi:/app/var`;
-- использует `/health` для container healthcheck.
+- использует `/health/live` для container healthcheck; `/health/ready` сообщает готовность исполнения.
 
 Проверить:
 
@@ -1039,7 +1042,7 @@ chown 1000:1000 "${BBB_DATA_ROOT}/abi"
 
 На Docker Desktop (macOS/Windows) bind-mount ownership проходит через virtualization/file-sharing layer, и predварительный numeric `chown` обычно не требуется — используй его только если реально столкнулся с permission error при первом запуске.
 
-Для explicit demo workflow используется отдельный Compose override; Bybit credentials подгружаются из host-side `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` (canonical Demo credential location, вне repo и вне `BBB_DATA_ROOT`), не из repo-local файла. Operational details находятся в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Demo override сохраняет торговые настройки, но не загружает ключи в environment. Deploy запускает LOCKED ABI; команда age/socket авторизует его позже без рестарта. Контракт и команды: [`docs/authorization/verifier-delivery.md`](docs/authorization/verifier-delivery.md). BYBIT_API_KEY/BYBIT_API_SECRET больше не читаются.
 
 ---
 

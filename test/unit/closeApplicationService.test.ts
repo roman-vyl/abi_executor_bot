@@ -588,8 +588,6 @@ function liveConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
   return makeTestConfig({
     dryRun: false,
     liveTradingEnabled: true,
-    bybitApiKey: "test-key",
-    bybitApiSecret: "test-secret",
     bybitEnvironment: "testnet",
     ...overrides,
   });

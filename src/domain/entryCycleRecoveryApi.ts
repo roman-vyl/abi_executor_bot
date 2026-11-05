@@ -25,7 +25,7 @@ export type RecoveryStateSuccessResponse = {
   entry_order_id: string | null;
 };
 
-export type RecoveryStateErrorCode = "validation_failed" | "unknown_trade_cycle_binding" | "internal_error";
+export type RecoveryStateErrorCode = "validation_failed" | "unknown_trade_cycle_binding" | "internal_error" | "execution_not_ready";
 
 export type RecoveryStateErrorResponse = {
   error: {
@@ -38,7 +38,7 @@ export type RecoveryStateErrorResponse = {
 export type RecoveryStateResponseBody = RecoveryStateSuccessResponse | RecoveryStateErrorResponse;
 
 export type RecoveryStateHttpResult = {
-  statusCode: 200 | 422 | 500;
+  statusCode: 200 | 422 | 500 | 503;
   body: RecoveryStateResponseBody;
 };
 

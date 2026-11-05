@@ -5,6 +5,8 @@ Operational guide for running, checking, and troubleshooting Abi.
 ## Prerequisites
 
 - Node.js 20+
+- age и Python 3 на Mac для команды поздней авторизации
+- Доверенный ABI_EXPECTED_BYBIT_UID целевого Demo/testnet-аккаунта
 - Docker and Docker Compose, for the container path
 - Bybit demo or testnet API credentials, only if you intend to exercise live Bybit calls
 
@@ -18,6 +20,8 @@ npm install
 
 ```bash
 npm run build
+export ABI_EXPECTED_BYBIT_UID=<trusted-account-uid>
+export ABI_AUTHORIZATION_SOCKET_PATH=/tmp/abi-authorization/control.sock
 npm start
 ```
 
@@ -31,6 +35,7 @@ container:
 
 ```bash
 export BBB_DATA_ROOT=/path/to/bbb-data
+export ABI_EXPECTED_BYBIT_UID=<trusted-account-uid>
 docker compose up --build
 ```
 
@@ -67,64 +72,27 @@ A normal startup emits, among others, `service_starting`, `correlation_replay_st
 and `server_listening`. Correlation-store replay runs asynchronously relative to the HTTP server
 starting to listen, so the relative order between `server_listening` and the replay/readiness
 events is not a guaranteed contract — the container can already be accepting connections before
-`readiness_ready` fires, which is exactly what `/health` (and the container healthcheck) gates
-on. A graceful `docker compose stop` emits `shutdown_started` then `shutdown_completed`.
+`readiness_ready` fires. Это событие относится к локальному replay. Торговая готовность дополнительно требует AUTHORIZED и проверки привязок; /health и /health/ready сообщают составной результат. Container healthcheck использует /health/live и не ждёт пароль. A graceful `docker compose stop` emits `shutdown_started` then `shutdown_completed`.
 Error-level events (`level: "error"`) go to stderr; everything else goes to stdout.
 
-For an explicit demo-live override:
+## Поздняя авторизация
+
+Demo override запускает тот же ABI с BYBIT_ENV=demo без env_file с ключами. Задайте доверенный UID именно Demo-аккаунта. Deploy не запрашивает пароль. Данные и адрес abi:8787 в основном BBB stack сохраняются.
+
+Ключи постоянно хранятся только в зашифрованном .age с JSON-парой `[apiKey, apiSecret]`; пароль запрашивает установленный age. BYBIT_API_KEY/BYBIT_API_SECRET больше не читаются. Новая версия не поддерживает env-fallback.
 
 ```bash
-export BBB_SECRETS_ROOT=/path/to/bbb-secrets
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+cid=$(docker compose -f docker-compose.yml -f docker-compose.demo.yml ps -q abi)
+python3 scripts/abi-authorize.py "$cid" status
+python3 scripts/abi-authorize.py "$cid" authorize /path/to/credentials.age
+python3 scripts/abi-authorize.py "$cid" retry
 ```
 
-This loads Bybit credentials from `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` on the host and sets
-`ABI_DRY_RUN=false`, `ABI_LIVE_TRADING_ENABLED=true`, `BYBIT_ENV=demo`. `BBB_SECRETS_ROOT` is
-required only for this Demo Compose path; the base Compose stack above starts with no secrets
-root and no Bybit credentials. If `BBB_SECRETS_ROOT` is not set, the Demo Compose command fails
-immediately with an explicit `BBB_SECRETS_ROOT must be set` error instead of starting without
-credentials.
+Для основного bbb_stack используйте его scripts/authorize_abi.py, который сам находит существующий контейнер основного Compose-проекта. AUTHORIZED подтверждает полномочия; /health/ready сообщает торговую готовность. При потерянном ответе сначала status. После временного сбоя ABI сам повторяет проверку credentials или торговых привязок через 5/15/30 секунд и далее по 30 секунд, без участия Mac и повторного пароля. Ручной retry остаётся диагностическим. После рестарта снова LOCKED. Mainnet запрещён.
 
-`${BBB_SECRETS_ROOT}/abi/bybit-demo.env` is the canonical Demo credential location — it is a
-host-side file outside the ABI repo checkout and outside `BBB_DATA_ROOT`, never tracked or
-copied into the image. It must contain only the two Bybit credential lines:
+Socket находится в tmpfs /run/abi-authorization (каталог 0700, socket 0600). Команда проверяет memory.swap.max=0 до передачи. Отсутствие swap macOS и уничтожение всех копий в памяти не гарантируются. Подробные границы и dummy-only Docker smoke: [verifier-delivery.md](authorization/verifier-delivery.md).
 
-```bash
-BYBIT_API_KEY=...
-BYBIT_API_SECRET=...
-```
-
-Execution-mode settings (`ABI_DRY_RUN`, `ABI_LIVE_TRADING_ENABLED`, `BYBIT_ENV`) stay in
-`docker-compose.demo.yml` as deployment configuration — do not add them to the secret file.
-
-Recommended host setup (example path — express any real path through `BBB_SECRETS_ROOT`):
-
-```bash
-mkdir -p "${BBB_SECRETS_ROOT}/abi"
-chmod 700 "${BBB_SECRETS_ROOT}"
-chmod 700 "${BBB_SECRETS_ROOT}/abi"
-chmod 600 "${BBB_SECRETS_ROOT}/abi/bybit-demo.env"
-```
-
-## Credential hygiene
-
-- Keep `.env` and other `.env.*` files local; only `.env.example` is tracked, with empty values.
-- Keep Demo credentials only in `${BBB_SECRETS_ROOT}/abi/bybit-demo.env` or runtime environment
-  variables — never in a tracked file, and never repo-local.
-- Use demo-only API credentials with the minimum permissions needed.
-- Rotate a credential immediately if it appears in a commit, log, correlation-store file, ZIP,
-  screenshot, or shared terminal output.
-- Never put credentials in this document, other tracked files, or command examples.
-
-To load credentials locally for non-Docker runs:
-
-```bash
-cp .env.example .env
-# edit .env with your demo credentials
-set -a
-source .env
-set +a
-```
+Не сохраняйте пароль и открытые ключи в env, аргументах, логах, исходниках или journal. Перед реальным Demo-переключением отдельно согласуйте image pins ABI и Runtime #46 и проверьте текущие заявки/позиции. Для отката нужен предыдущий проверенный образ вместе с прежней конфигурацией; это не альтернативный режим нового ABI.
 
 ## Dry-run / live execution guard
 
@@ -132,7 +100,7 @@ Live Bybit writes require all of:
 
 - `ABI_DRY_RUN=false`
 - `ABI_LIVE_TRADING_ENABLED=true`
-- `BYBIT_API_KEY` and `BYBIT_API_SECRET` set
+- AuthorizationService = AUTHORIZED
 - `BYBIT_ENV` set to `demo` or `testnet` (mainnet is always blocked)
 
 Check the guard before relying on live behavior:
@@ -149,7 +117,7 @@ otherwise `blockedReasons` lists what is missing.
 `ABI_POSITION_SIZING_MODE` is `minimum` (default) or `risk`, independent of `BYBIT_ENV`.
 
 - `risk` sizes each entry as `totalWalletBalance × risk_multiplier / 100 / |entry − stop|`, rounded down to `qtyStep`. `risk_multiplier` from Runtime is the percent itself (`1` = 1 %).
-- `risk` needs `BYBIT_API_KEY` and `BYBIT_API_SECRET`; startup fails without them, also in dry-run.
+- `risk` starts in LOCKED without keys; signed balance reads are admitted only after authorization.
 - The account must be in cross (`REGULAR_MARGIN`) or portfolio margin. In Isolated margin every entry is declined with `margin_mode_not_supported`.
 - `totalWalletBalance` counts every coin on the account in USD. Keep only USDT on the trading account, or accept that the bankroll moves with the price of other coins.
 - Risk is net of fees and slippage: a real loss can be larger than the percent.
@@ -286,7 +254,7 @@ facts (order records, executions) and orderId → trade cycle links. The exchang
 facts store. It is read-only: it authenticates with ABI's key, subscribes to `order`,
 `execution`, `position` and `wallet`, and pings; it never sends an order request.
 
-- Runs only when the store is `enabled` and `BYBIT_API_KEY`/`BYBIT_API_SECRET` are set. URL by
+- Runs only when the store is `enabled` and AuthorizationService is AUTHORIZED. URL by
   `BYBIT_ENV`: demo `wss://stream-demo.bybit.com/v5/private`, testnet
   `wss://stream-testnet.bybit.com/v5/private`, mainnet `wss://stream.bybit.com/v5/private`.
 - Every record is stored as received: `order` → `order_state` fact, `execution` → `execution`
@@ -458,9 +426,6 @@ npm run smoke:entry-package:fake
 - **`/execution/mode` reports `canExecuteLive: false`** — read `blockedReasons` in the response;
   each entry names exactly which condition (dry-run flag, live-trading flag, credentials,
   environment) is unmet.
-- **Active-orders, open-positions, or close-all return `skipped_bybit_query`** —
-  `BYBIT_API_KEY`/`BYBIT_API_SECRET` are not set; the response's `wouldQueryBybit` field shows
-  what would have been sent. The balance route has no such skip path — with missing or invalid
-  credentials it calls Bybit and returns whatever error Bybit reports.
+- **Account или trade-cycle API возвращает 503 execution_not_ready** — сначала проверьте authorization через /health/ready. Account не зависит от correlation replay; торговые циклы дополнительно требуют localRecoveryReady и bindingsVerified. Пароль не исправит повреждённый journal.
 - **Container never becomes healthy** — check `docker compose logs abi`; the healthcheck polls
-  `GET /health` and fails closed if the process is not listening.
+  `GET /health/live`; LOCKED сам по себе не означает нездоровый контейнер.

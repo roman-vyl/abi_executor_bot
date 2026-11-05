@@ -22,6 +22,8 @@ import type {
 } from "../../src/exchange/bybitOrderMapper.js";
 
 export class FakeBybitAdapter implements BybitAdapter {
+  authorized = true;
+  isAuthorized(): boolean { return this.authorized; }
   readonly createOrderCalls: Array<BybitCreateOrderPayload | BybitMarketCloseOrderPayload> = [];
   readonly cancelOrderCalls: BybitCancelOrderPayload[] = [];
   readonly amendOrderCalls: BybitAmendOrderPayload[] = [];

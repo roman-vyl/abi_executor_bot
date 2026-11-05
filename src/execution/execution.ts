@@ -45,7 +45,7 @@ export async function executeEntryOrder(input: {
   bybit: BybitAdapter;
   payload: BybitCreateOrderPayload;
 }): Promise<EntryOrderExecutionResult> {
-  const mode = getLiveExecutionMode(input.config);
+  const mode = getLiveExecutionMode(input.config, input.bybit.isAuthorized());
 
   if (!mode.canExecuteLive) {
     return {
@@ -68,7 +68,7 @@ export async function cancelEntryOrder(input: {
   bybit: BybitAdapter;
   payload: BybitCancelOrderPayload;
 }): Promise<EntryOrderCancelExecutionResult> {
-  const mode = getLiveExecutionMode(input.config);
+  const mode = getLiveExecutionMode(input.config, input.bybit.isAuthorized());
 
   if (!mode.canExecuteLive) {
     return {
@@ -91,7 +91,7 @@ export async function executeMarketCloseOrder(input: {
   bybit: BybitAdapter;
   payload: BybitMarketCloseOrderPayload;
 }): Promise<MarketCloseOrderExecutionResult> {
-  const mode = getLiveExecutionMode(input.config);
+  const mode = getLiveExecutionMode(input.config, input.bybit.isAuthorized());
 
   if (!mode.canExecuteLive) {
     return {

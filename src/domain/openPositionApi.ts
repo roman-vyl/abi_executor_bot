@@ -31,7 +31,8 @@ export type OpenPositionErrorCode =
   | "validation_failed"
   | "unknown_trade_cycle_binding"
   | "unsupported_exchange_scope"
-  | "internal_error";
+  | "internal_error"
+  | "execution_not_ready";
 
 export type OpenPositionErrorResponse = {
   error: {
@@ -44,7 +45,7 @@ export type OpenPositionErrorResponse = {
 export type OpenPositionResponseBody = OpenPositionSuccessResponse | OpenPositionErrorResponse;
 
 export type OpenPositionHttpResult = {
-  statusCode: 200 | 422 | 500;
+  statusCode: 200 | 422 | 500 | 503;
   body: OpenPositionResponseBody;
 };
 

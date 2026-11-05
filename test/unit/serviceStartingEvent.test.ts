@@ -7,8 +7,6 @@ import { makeTestConfig } from "../fixtures/config.js";
 
 test("serviceStartingFields excludes the raw Bybit API key and secret", () => {
   const config = makeTestConfig({
-    bybitApiKey: "super-secret-key",
-    bybitApiSecret: "super-secret-secret",
   });
 
   const fields = serviceStartingFields(config, { status: "disabled" });
@@ -18,11 +16,11 @@ test("serviceStartingFields excludes the raw Bybit API key and secret", () => {
   assert.equal(serialized.includes("super-secret-secret"), false);
   assert.equal("bybitApiKey" in fields, false);
   assert.equal("bybitApiSecret" in fields, false);
-  assert.equal(fields.bybitApiKeyConfigured, true);
+  assert.equal(fields.bybitApiKeyConfigured, false);
 });
 
 test("serviceStartingFields reports bybitApiKeyConfigured false when no key is set", () => {
-  const config = makeTestConfig({ bybitApiKey: "" });
+  const config = makeTestConfig({});
   const fields = serviceStartingFields(config, { status: "disabled" });
   assert.equal(fields.bybitApiKeyConfigured, false);
 });

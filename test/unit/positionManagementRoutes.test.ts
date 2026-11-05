@@ -273,8 +273,8 @@ test("a transport-valid protection request fails safe without dispatching when n
     }),
     true,
   );
-  assert.equal(response.status(), 500);
-  assert.deepEqual(response.body(), internalErrorResult().body);
+  assert.equal(response.status(), 503);
+  assert.deepEqual(response.body(), { error: { code: "execution_not_ready", message: "execution is not ready" } });
 });
 
 test("a transport-valid close request is dispatched to the application service once ready", async () => {
@@ -317,8 +317,8 @@ test("a transport-valid close request fails safe without dispatching when not re
     }),
     true,
   );
-  assert.equal(response.status(), 500);
-  assert.deepEqual(response.body(), internalErrorResult().body);
+  assert.equal(response.status(), 503);
+  assert.deepEqual(response.body(), { error: { code: "execution_not_ready", message: "execution is not ready" } });
 });
 
 test("unsupported media type on close maps to 415", async () => {
@@ -670,6 +670,6 @@ test("entry-remainder cancel fails safe without dispatching when not ready", asy
     }),
     true,
   );
-  assert.equal(response.status(), 500);
-  assert.deepEqual(response.body(), internalErrorResult().body);
+  assert.equal(response.status(), 503);
+  assert.deepEqual(response.body(), { error: { code: "execution_not_ready", message: "execution is not ready" } });
 });

@@ -1,3 +1,4 @@
+import type { AuthorizationState } from "../authorization/authorizationService.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AbiConfig } from "../config/config.js";
@@ -14,6 +15,10 @@ export async function handleSystemRoutes(input: {
   response: ServerResponse;
   config: AbiConfig;
   entryPackageReady: boolean;
+  authorizationState?: AuthorizationState;
+  localRecoveryReady?: boolean;
+  bindingsVerified?: boolean;
+  activationReason?: string;
   exchangeFacts: ExchangeFactsStoreState;
   exchangeStream: ExchangeStreamStatus;
   exchangeLinker: ExchangeLinkerStatus;
@@ -34,7 +39,11 @@ export async function handleSystemRoutes(input: {
     bybitConnection,
   } = input;
 
-  if (request.method === "GET" && request.url === "/health") {
+  const authorized = input.authorizationState === "AUTHORIZED";
+  if (request.method === "GET" && request.url === "/health/live") {
+    writeJson(response, 200, { ok: true }); return true;
+  }
+  if (request.method === "GET" && ["/health", "/health/ready"].includes(request.url ?? "")) {
     writeJson(response, entryPackageReady ? 200 : 503, {
       ok: entryPackageReady,
       host: config.host,
@@ -48,7 +57,11 @@ export async function handleSystemRoutes(input: {
       bybitCategory: config.bybitCategory,
       bybitSettleCoin: config.bybitSettleCoin,
       bybitTriggerBy: config.bybitTriggerBy,
-      bybitApiKeyConfigured: config.bybitApiKey !== "",
+      bybitApiKeyConfigured: authorized,
+      authorization: input.authorizationState ?? "LOCKED",
+      localRecoveryReady: input.localRecoveryReady ?? false,
+      bindingsVerified: input.bindingsVerified ?? false,
+      ...(input.activationReason ? { activationReason: input.activationReason } : {}),
       entryPackageReady,
       // Informational only: the journal state never changes ok or the status.
       exchangeFactsStore: exchangeFacts.status,
@@ -65,7 +78,7 @@ export async function handleSystemRoutes(input: {
   }
 
   if (request.method === "GET" && request.url === "/execution/mode") {
-    writeJson(response, 200, getLiveExecutionMode(config));
+    writeJson(response, 200, getLiveExecutionMode(config, authorized));
     return true;
   }
 

@@ -1,3 +1,4 @@
+import { admitExecution } from "../execution/executionAdmission.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { readJsonBody, writeJson } from "../app/http.js";
@@ -149,13 +150,7 @@ async function handleProtection(
     return;
   }
 
-  if (!isReady()) {
-    // Correlation-store replay hasn't completed (or failed) yet — fail
-    // closed rather than risk acting before durable state is recovered
-    // (mirrors entryPackageRoutes.ts's readiness gate).
-    writeResult(response, internalErrorResult());
-    return;
-  }
+  if (!admitExecution(response, isReady)) return;
 
   const result = await withOperationEvents(
     {
@@ -210,13 +205,7 @@ async function handleClose(
     return;
   }
 
-  if (!isReady()) {
-    // Correlation-store replay hasn't completed (or failed) yet — fail
-    // closed rather than risk acting before durable state is recovered
-    // (mirrors handleProtection's identical readiness gate).
-    writeResult(response, internalErrorResult());
-    return;
-  }
+  if (!admitExecution(response, isReady)) return;
 
   const result = await withOperationEvents(
     {
@@ -269,11 +258,7 @@ async function handleEntryRemainderCancel(
     return;
   }
 
-  if (!isReady()) {
-    // Same fail-closed readiness gate as handleClose.
-    writeResult(response, internalErrorResult());
-    return;
-  }
+  if (!admitExecution(response, isReady)) return;
 
   const result = await withOperationEvents(
     {

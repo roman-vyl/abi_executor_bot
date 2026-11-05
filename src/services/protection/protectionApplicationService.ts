@@ -159,7 +159,7 @@ export class ProtectionApplicationService {
       return internalErrorResult();
     }
 
-    if (!getLiveExecutionMode(this.deps.config).canExecuteLive) {
+    if (!getLiveExecutionMode(this.deps.config, this.deps.bybit.isAuthorized()).canExecuteLive) {
       return internalErrorResult();
     }
 

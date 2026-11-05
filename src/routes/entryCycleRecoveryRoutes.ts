@@ -1,3 +1,4 @@
+import { admitExecution } from "../execution/executionAdmission.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { writeJson } from "../app/http.js";
@@ -58,14 +59,7 @@ async function handleEntryCycleRecoveryRoutesSafely(
     return true;
   }
 
-  if (!isReady()) {
-    // Correlation-store replay hasn't completed (or failed) yet — fail
-    // closed with the same safe internal_error response the other
-    // correlation-backed routes already use, rather than resolving against
-    // not-yet-recovered state.
-    writeResult(response, internalErrorResult());
-    return true;
-  }
+  if (!admitExecution(response, isReady)) return true;
 
   const strategyInstanceId = match.strategyInstanceId as string;
   const tradeCycleId = match.tradeCycleId as string;

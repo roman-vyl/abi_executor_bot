@@ -23,8 +23,6 @@ test("Change 8 matrix: sole owner uses the same Partial protection and pair-scop
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const bybit = new FakeBybitAdapter();
@@ -93,8 +91,6 @@ test("Change 8 matrix: two genuine same-side owners remain attributable and clos
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const bybit = new FakeBybitAdapter();
@@ -202,8 +198,6 @@ test("Change 8 negative matrix has no opposite-side admission write and no prote
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const bybit = new FakeBybitAdapter();

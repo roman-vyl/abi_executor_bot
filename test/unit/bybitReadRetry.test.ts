@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { AuthorizationService } from "../../src/authorization/authorizationService.js";
 import { loadConfig } from "../../src/config/config.js";
 import { RestBybitAdapter } from "../../src/exchange/bybitAdapter.js";
 import { makeTestConfig } from "../fixtures/config.js";
@@ -44,9 +45,12 @@ function scriptFetch(steps: Step[]): { calls: FetchCall[]; restore: () => void }
   };
 }
 
-function adapter(readTimeoutMs = 50): RestBybitAdapter {
+async function adapter(readTimeoutMs = 50): Promise<RestBybitAdapter> {
+  const credentialsSource = new AuthorizationService(async () => "accepted");
+  await credentialsSource.authorize({ apiKey: "key", apiSecret: "secret" });
   return new RestBybitAdapter(
-    makeTestConfig({ bybitApiKey: "key", bybitApiSecret: "secret", bybitReadTimeoutMs: readTimeoutMs }),
+    makeTestConfig({ bybitReadTimeoutMs: readTimeoutMs }),
+    { credentialsSource },
   );
 }
 
@@ -60,7 +64,7 @@ test("a GET that hangs past the read timeout is retried once and its answer retu
   const fake = scriptFetch(["hang", "ok"]);
   try {
     const started = Date.now();
-    const body = await adapter().getActiveOrders({ symbol: "BTCUSDT" });
+    const body = await (await adapter()).getActiveOrders({ symbol: "BTCUSDT" });
     assert.deepEqual(body, { retCode: 0, retMsg: "OK", result: { list: [] } });
     assert.equal(fake.calls.length, 2);
     assert.ok(fake.calls.every((call) => call.method === "GET" && call.url.includes("/v5/order/realtime")));
@@ -73,7 +77,7 @@ test("a GET that hangs past the read timeout is retried once and its answer retu
 test("each signed GET attempt carries its own fresh timestamp and signal", async () => {
   const fake = scriptFetch(["hang", "ok"]);
   try {
-    await adapter(30).getActiveOrders({ symbol: "BTCUSDT" });
+    await (await adapter(30)).getActiveOrders({ symbol: "BTCUSDT" });
     assert.equal(fake.calls.length, 2);
     assert.notEqual(fake.calls[0]?.signal, fake.calls[1]?.signal);
     assert.ok(Number(fake.calls[1]?.timestamp) >= Number(fake.calls[0]?.timestamp) + 30);
@@ -85,7 +89,7 @@ test("each signed GET attempt carries its own fresh timestamp and signal", async
 test("a GET that times out twice fails with the timeout error after exactly two attempts", async () => {
   const fake = scriptFetch(["hang", "hang", "ok"]);
   try {
-    await assert.rejects(adapter().getActiveOrders({ symbol: "BTCUSDT" }), (error: Error) => error.name === "TimeoutError");
+    await assert.rejects((await adapter()).getActiveOrders({ symbol: "BTCUSDT" }), (error: Error) => error.name === "TimeoutError");
     assert.equal(fake.calls.length, 2);
   } finally {
     fake.restore();
@@ -95,7 +99,7 @@ test("a GET that times out twice fails with the timeout error after exactly two 
 test("a GET that fails for a reason other than a timeout is not retried", async () => {
   const fake = scriptFetch(["fail", "ok"]);
   try {
-    await assert.rejects(adapter().getActiveOrders({ symbol: "BTCUSDT" }), /fetch failed/);
+    await assert.rejects((await adapter()).getActiveOrders({ symbol: "BTCUSDT" }), /fetch failed/);
     assert.equal(fake.calls.length, 1);
   } finally {
     fake.restore();
@@ -105,7 +109,7 @@ test("a GET that fails for a reason other than a timeout is not retried", async 
 test("public GETs use the same read timeout and single retry", async () => {
   const fake = scriptFetch(["hang", "ok"]);
   try {
-    await adapter().getInstrumentInfo("linear", "BTCUSDT");
+    await (await adapter()).getInstrumentInfo("linear", "BTCUSDT");
     assert.equal(fake.calls.length, 2);
   } finally {
     fake.restore();
@@ -116,7 +120,7 @@ test("a POST is never retried and keeps the long request timeout", async () => {
   const fake = scriptFetch(["fail", "ok"]);
   try {
     await assert.rejects(
-      adapter().cancelOrder({ category: "linear", symbol: "BTCUSDT", orderLinkId: "x" } as never),
+      (await adapter()).cancelOrder({ category: "linear", symbol: "BTCUSDT", orderLinkId: "x" } as never),
       /fetch failed/,
     );
     assert.equal(fake.calls.length, 1);
@@ -141,7 +145,7 @@ test("a POST that takes longer than the read timeout is not cut by it", async ()
     return new Response(JSON.stringify({ retCode: 0, retMsg: "OK", result: {} }), { status: 200 });
   }) as typeof fetch;
   try {
-    const body = await adapter(50).cancelOrder({ category: "linear", symbol: "BTCUSDT", orderLinkId: "x" } as never);
+    const body = await (await adapter(50)).cancelOrder({ category: "linear", symbol: "BTCUSDT", orderLinkId: "x" } as never);
     assert.deepEqual(body, { retCode: 0, retMsg: "OK", result: {} });
     assert.equal(calls, 1);
   } finally {

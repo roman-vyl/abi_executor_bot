@@ -1179,7 +1179,7 @@ test("skipped_live_execution never produces entry_package_applied or entry_packa
       assertInternalError(result);
       assert.equal(bybit.createOrderCalls.length, 0);
     },
-    { dryRun: true, liveTradingEnabled: false, bybitApiKey: "", bybitApiSecret: "" },
+    { dryRun: true, liveTradingEnabled: false },
   );
 });
 
@@ -1524,8 +1524,6 @@ test("retry after config change confirms against the generation's durable hedge 
     const oneWayConfig = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
       bybitLinearPositionBindingMode: "one_way",
     });
@@ -1844,8 +1842,6 @@ async function runServiceAgainstRepository(
   const config = makeTestConfig({
     dryRun: false,
     liveTradingEnabled: true,
-    bybitApiKey: "test-key",
-    bybitApiSecret: "test-secret",
     bybitEnvironment: "testnet",
   });
   const bybit = new FakeBybitAdapter();
@@ -2047,8 +2043,6 @@ async function withService(
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
       ...configOverrides,
     });
@@ -2088,8 +2082,6 @@ async function withRealRulesProviderService(
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const bybit = new FakeBybitAdapter();
