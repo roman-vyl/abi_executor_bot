@@ -14,6 +14,10 @@ export type LiveExecutionMode = {
 export function getLiveExecutionMode(config: AbiConfig): LiveExecutionMode {
   const blockedReasons: string[] = [];
 
+  if (config.authorizationMode === "runtime") {
+    blockedReasons.push("ABI runtime authorization is locked");
+  }
+
   if (config.dryRun) {
     blockedReasons.push("ABI_DRY_RUN must be false");
   }

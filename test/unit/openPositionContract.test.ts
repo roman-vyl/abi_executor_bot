@@ -120,8 +120,8 @@ test("not-ready readiness fails closed without attempting correlation lookup or 
 
     const response = await invoke({ isReady: () => false });
 
-    assert.equal(response.status(), 500);
-    assert.equal(response.body().error.code, "internal_error");
+    assert.equal(response.status(), 503);
+    assert.equal(response.body().error.code, "execution_not_ready");
     assert.equal(bybit.getOpenPositionsCalls.length, 0);
   });
 });

@@ -464,3 +464,22 @@ npm run smoke:entry-package:fake
   credentials it calls Bybit and returns whatever error Bybit reports.
 - **Container never becomes healthy** — check `docker compose logs abi`; the healthcheck polls
   `GET /health` and fails closed if the process is not listening.
+
+## Runtime authorization preparation
+
+Set `ABI_AUTHORIZATION_MODE=runtime` to start ABI with HTTP and its local
+journal available while exchange execution stays `LOCKED`. Omit both
+`BYBIT_API_KEY` and `BYBIT_API_SECRET` in this mode. Risk sizing configuration
+is accepted before credentials arrive.
+
+`GET /health/live` reports process liveness. `GET /health/ready` reports
+execution readiness. `GET /health` keeps its existing readiness meaning.
+`GET /execution/mode` reports `authorizationState` and `canExecuteLive`.
+
+A valid exchange-dependent request rejected before admission returns HTTP 503
+with `error.code=execution_not_ready`. Once admitted, a request retains the
+ordinary success or uncertain-error contract even if readiness changes.
+
+This preparation stage starts permanently LOCKED. The socket and activation
+stages follow separate acceptance. Continue using the existing environment
+mode for the operational Demo until the complete rollout is accepted.

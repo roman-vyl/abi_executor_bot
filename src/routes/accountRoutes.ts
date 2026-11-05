@@ -1,3 +1,5 @@
+import { admitExecution } from "../app/executionAdmission.js";
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
@@ -15,6 +17,7 @@ export async function handleAccountRoutes(input: {
   response: ServerResponse;
   config: AbiConfig;
   bybit: BybitAdapter;
+  isReady?: () => boolean;
 }): Promise<boolean> {
   const { request, response, config, bybit } = input;
 
@@ -23,6 +26,13 @@ export async function handleAccountRoutes(input: {
   }
 
   const pathname = getPathname(request.url, config);
+
+  const exchangeRoute =
+    (request.method === "GET" && ["/account/balance", "/account/orders/active", "/account/positions/open"].includes(pathname)) ||
+    (request.method === "POST" && ["/account/orders/cancel-all", "/account/positions/close-all"].includes(pathname));
+  if (exchangeRoute && !admitExecution(response, input.isReady ?? (() => config.authorizationMode === "env"))) {
+    return true;
+  }
 
   if (request.method === "GET" && pathname === "/account/balance") {
     await handleBalance({ request, response, config, bybit });

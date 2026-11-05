@@ -99,11 +99,11 @@ test("application/json and UTF-8 charset are supported", async () => {
     const response = await invokeRoute(makePackagePayload(), {
       "content-type": contentType,
     });
-    assert.equal(response.status(), 500);
+    assert.equal(response.status(), 503);
     assert.deepEqual(response.body(), {
       error: {
-        code: "internal_error",
-        message: "internal error",
+        code: "execution_not_ready",
+        message: "ABI execution is not ready",
       },
     });
   }
@@ -176,11 +176,11 @@ test("valid absence reaches safe unconfigured boundary without fabricated succes
     risk_multiplier: "1",
   });
 
-  assert.equal(response.status(), 500);
+  assert.equal(response.status(), 503);
   assert.deepEqual(response.body(), {
     error: {
-      code: "internal_error",
-      message: "internal error",
+      code: "execution_not_ready",
+      message: "ABI execution is not ready",
     },
   });
 });
@@ -422,3 +422,53 @@ function makeResponse(): {
     body: () => JSON.parse(responseBody) as Record<string, any>,
   };
 }
+
+test("readiness becoming true after rejection does not queue or dispatch the command", async () => {
+  let ready = false;
+  let calls = 0;
+  const service: EntryPackageApplicationServicePort = {
+    async apply() { calls++; return internalErrorResult(); },
+  };
+  const response = await invokeRoute(makePackagePayload(), undefined, service, () => {
+    const admitted = ready;
+    ready = true;
+    return admitted;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(response.status(), 503);
+  assert.equal(response.body().error.code, "execution_not_ready");
+  assert.equal(ready, true);
+  assert.equal(calls, 0);
+});
+
+test("readiness dropping after admission preserves the use-case result", async () => {
+  for (const outcome of ["success", "uncertain"] as const) {
+    let ready = true;
+    let checks = 0;
+    let calls = 0;
+    const service: EntryPackageApplicationServicePort = {
+      async apply(command) {
+        calls++;
+        ready = false;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (outcome === "uncertain") throw new Error("response was lost after dispatch");
+        return {
+          statusCode: 200,
+          body: {
+            strategy_instance_id: command.strategyInstanceId,
+            trade_cycle_id: command.tradeCycleId,
+            status: "entry_package_absent",
+          },
+        };
+      },
+    };
+    const response = await invokeRoute(makePackagePayload(), undefined, service, () => {
+      checks++;
+      return ready;
+    });
+    assert.equal(response.status(), outcome === "success" ? 200 : 500);
+    assert.notEqual(response.body().error?.code, "execution_not_ready");
+    assert.equal(checks, 1);
+    assert.equal(calls, 1);
+  }
+});

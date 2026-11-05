@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 export type AbiConfig = {
+  authorizationMode: "env" | "runtime";
   host: string;
   port: number;
   dryRun: boolean;
@@ -44,6 +45,14 @@ const TOUCH_TRIGGER_ENTRY_ORDER_TYPES: readonly TouchTriggerEntryOrderType[] = [
 const CONFIG_FILE_KEYS = new Set(["live_entry_mode", "touch_trigger_entry_order_type"]);
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
+  const authorizationMode = env.ABI_AUTHORIZATION_MODE ?? "env";
+  if (authorizationMode !== "env" && authorizationMode !== "runtime") {
+    throw new Error("ABI_AUTHORIZATION_MODE must be env or runtime");
+  }
+  if (authorizationMode === "runtime" &&
+      (env.BYBIT_API_KEY !== undefined || env.BYBIT_API_SECRET !== undefined)) {
+    throw new Error("Runtime authorization does not accept credentials from environment");
+  }
   const bybitEnvironment = readBybitEnvironment(env);
   const bybitApiKey = env.BYBIT_API_KEY?.trim() ?? "";
   const bybitApiSecret = env.BYBIT_API_SECRET?.trim() ?? "";
@@ -51,11 +60,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
   const liveEntryConfig = readLiveEntryConfigFile(env.ABI_CONFIG_PATH);
   // Risk sizing reads the wallet balance on every entry, so it cannot run
   // without credentials — also in dry-run, where those reads still happen.
-  if (positionSizingMode === "risk" && (bybitApiKey === "" || bybitApiSecret === "")) {
+  if (authorizationMode === "env" && positionSizingMode === "risk" && (bybitApiKey === "" || bybitApiSecret === "")) {
     throw new Error("ABI_POSITION_SIZING_MODE=risk requires BYBIT_API_KEY and BYBIT_API_SECRET");
   }
 
   return {
+    authorizationMode,
     host: readString("ABI_HOST", env.ABI_HOST, "127.0.0.1"),
     port: readPort(env.ABI_PORT, 8787),
     dryRun: readBool("ABI_DRY_RUN", env.ABI_DRY_RUN, true),

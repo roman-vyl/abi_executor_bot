@@ -162,6 +162,22 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Execution is not ready. This attempt was rejected before admission and has no execution side effects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionNotReady"
+                },
+                "example": {
+                  "error": {
+                    "code": "execution_not_ready",
+                    "message": "ABI execution is not ready"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -525,6 +541,33 @@
             }
           }
         }
+      },
+      "ExecutionNotReady": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "execution_not_ready"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "description": "Definitive pre-admission refusal. No exchange operation or execution-state change occurred for this attempt. Never returned after admission."
       }
     }
   }
