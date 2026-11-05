@@ -1,40 +1,69 @@
 ## Purpose
 
-Позволить оператору авторизовать уже работающий ABI в любое время после обычного деплоя BBB, сохраняя существующий reconciliation и безопасный допуск к исполнению.
+Позволить оператору авторизовать работающий ABI после обычного деплоя, сохраняя независимость полномочий Bybit от торгового восстановления и существующий reconciliation.
 
 ## ADDED Requirements
 
-### Requirement: Protected ABI accepts authorization after startup
-ABI SHALL стартовать без ключей и без таймаута ожидания авторизации. Локальные хранилища и HTTP SHALL оставаться доступными. Авторизация SHALL работать без пересоздания процесса.
+### Requirement: One independent authorization owner
+ABI SHALL иметь единственного владельца кандидата, подтверждённых credentials и состояния авторизации. Он MUST зависеть только от переданного verifier с результатами accepted, rejected и temporary_failure, без зависимости от журнала, readiness, торговых сервисов, Runtime или observers. Подтверждённая пара SHALL быть защищена от внешней мутации и доступна только после accepted. Новая совокупная версия MUST NOT читать рабочие credentials из env/config или поддерживать старый fallback.
+
+#### Scenario: Journal recovery fails independently
+- **WHEN** credentials, expected UID и права подтверждены, но торговый журнал не восстановлен
+- **THEN** авторизация остаётся успешной и независимые account-запросы доступны с их существующими ограничениями
+- **AND** торговые циклы остаются заблокированы необходимыми проверками торгового состояния
+
+#### Scenario: Concurrent and repeated candidates
+- **WHEN** проверка уже выполняется или пара уже подтверждена
+- **THEN** новая попытка не заменяет сохранённую пару, одна проверка активна одновременно, подтверждённые значения не изменяются вызывающим кодом
+
+### Requirement: Candidate verification is real and bounded
+Проверка кандидата SHALL использовать только ограниченные операции чтения для подтверждения credentials, фиксированного expected UID и необходимых прав. Она MUST NOT предоставлять order writes, произвольные endpoint-запросы или обходной production accepted. Отсутствующий expected UID и неполная проверка MUST NOT приводить к accepted. Каждая попытка MUST иметь общий deadline, отмену и защиту от запоздалого accepted после отмены.
+
+#### Scenario: Candidate is confirmed
+- **WHEN** реальная проверка подтверждает credentials, expected UID и все необходимые права в пределах deadline
+- **THEN** авторизация становится успешной независимо от готовности торгового журнала и подключения observers
+
+#### Scenario: Candidate is explicitly unsuitable
+- **WHEN** достоверно установлены неверные credentials, несовпадающий UID или неподходящие права
+- **THEN** кандидат отклоняется и удаляется, новая попытка разрешена, рабочие подписанные запросы не выполняются
+
+#### Scenario: Verification is inconclusive
+- **WHEN** произошли timeout, сетевой или VPN сбой, generic HTTP 403 либо нераспознанный ответ
+- **THEN** результат temporary_failure, кандидат сохранён только для явного retry без нового пароля и не доступен рабочему REST
+
+#### Scenario: Verification finishes after cancellation
+- **WHEN** shutdown или deadline отменили попытку, а транспорт позднее вернул успешный ответ
+- **THEN** этот результат не приводит к AUTHORIZED или запуску компонентов; таймеры и обработчики отмены освобождены
+
+### Requirement: ABI accepts authorization after startup
+ABI SHALL запускаться без credentials в LOCKED, обслуживать HTTP и локальные хранилища без ограничения времени ожидания. Авторизация SHALL выполняться без пересоздания процесса. AUTHORIZED SHALL означать только подтверждение полномочий, а Trading READY SHALL дополнительно требовать существующие проверки торгового состояния.
 
 #### Scenario: Operator authorizes long after deploy
 - **WHEN** оператор передаёт пару после произвольного времени в LOCKED
-- **THEN** ABI проверяет ключи и ожидаемый UID, выполняет существующие биржевые проверки активации и становится READY при их успехе
-- **AND** исторический REST backfill не является дополнительным условием READY
+- **THEN** credentials проверяются без перезапуска ABI
+- **AND** успешная авторизация не подменяет результат локального восстановления и биржевой проверки привязок
 
-### Requirement: Local authorization preserves the secret delivery boundary
-age SHALL расшифровывать файл на Mac. Команда SHALL проверять полную пару и успешное завершение age до передачи через stdin локального docker exec в Unix socket работающего ABI. Сокет SHALL иметь права 0600 в каталоге 0700 на tmpfs. Ключи и пароль SHALL отсутствовать в аргументах, окружении, логах и постоянных открытых файлах. Подкачка контейнера SHALL быть запрещена и проверена перед передачей.
+### Requirement: Secret delivery uses local age and Unix socket
+age SHALL расшифровывать файл на Mac. Команда SHALL проверять полную пару и успешное завершение age до передачи ограниченного frame через stdin локального docker exec в Unix socket. Socket SHALL иметь права 0600 в каталоге 0700 на tmpfs. Пароль и ключи MUST NOT попадать в argv, env, логи или постоянные открытые файлы. До передачи SHALL проверяться запрет container swap; гарантия отсутствия swap macOS не заявляется. Привилегированный контейнер и Docker socket внутри ABI MUST NOT требоваться.
 
-#### Scenario: Password or payload is invalid
-- **WHEN** расшифровка или проверка пары завершается ошибкой
-- **THEN** авторизация не начинается и процесс ABI продолжает работать
+#### Scenario: Invalid password or incomplete frame
+- **WHEN** расшифровка, проверка полной пары, размера или целостности frame неуспешна
+- **THEN** authorize не вызывается, кандидат частично не принимается и ABI продолжает работать
 
-#### Scenario: Concurrent or repeated authorization
-- **WHEN** попытка авторизации уже выполняется либо ABI уже успешно авторизован
-- **THEN** другая попытка не заменяет рабочую пару и не запускает дублирующие биржевые компоненты
-- **AND** ошибка отклонённой пары допускает новую попытку без рестарта
+### Requirement: Observers and trading readiness have separate lifecycles
+Composition root SHALL создавать реальные private WS и REST observers после успешной авторизации однократно. Сетевые сбои SHALL использовать их существующее восстановление соединений. Наблюдательный REST SHALL зависеть только от необходимого успешного локального восстановления, а не от торговой готовности. Исторический backfill и подключение private WS MUST NOT становиться новыми условиями Trading READY.
 
-### Requirement: Temporary connection failures preserve the authorization session
-ABI SHALL сохранять принятую пару в памяти при транспортном сбое проверки и допускать повтор проверки без нового пароля. После успешной авторизации временные REST и WS ошибки SHALL использовать существующее поведение повторных подключений и исполнения.
+#### Scenario: Observer reconnects
+- **WHEN** после авторизации наблюдательный WS или REST сталкивается с временным сетевым сбоем
+- **THEN** принятая пара сохраняется, новый пароль не требуется и повторные observers не создаются
 
-#### Scenario: Bybit is temporarily unreachable
-- **WHEN** проверка принятой пары завершилась таймаутом или транспортной ошибкой
-- **THEN** торговля остаётся заблокированной, причина доступна оператору и ограниченные по времени проверки повторяются с backoff без запроса пароля
+### Requirement: Shutdown prevents late authorization and activation
+В начале shutdown ABI MUST запретить новые авторизации и торговые допуски, закрыть канал авторизации и отменить незавершённую проверку/активацию до ожидания завершения HTTP. Запоздавшие результаты MUST NOT разрешать авторизацию или торговлю. Уже допущенные операции SHALL сохранять существующий корректный drain.
 
-#### Scenario: Credentials or account are explicitly rejected
-- **WHEN** Bybit достоверно отклонил credentials или права либо UID не совпал с фиксированным ожидаемым UID
-- **THEN** эта пара не активирует торговлю и допускается новая авторизация
-- **AND** generic HTTP 403, VPN-сбой или неразобранная ошибка не считаются доказательством неверного ключа
+#### Scenario: Shutdown races with successful verification or activation
+- **WHEN** shutdown начался до завершения асинхронной проверки или активации
+- **THEN** её поздний успех не открывает admission, не создаёт новые observers и не переводит систему в READY
+- **AND** допущенные ранее команды завершаются по существующим правилам
 
 ### Requirement: Execution admission is atomic with a definitive rejection
 ABI SHALL принимать одно решение о допуске до биржевых запросов и изменений состояния исполнения. HTTP 503 execution_not_ready SHALL означать отсутствие любых торговых побочных действий этой попытки. Наблюдательная диагностика допускается.

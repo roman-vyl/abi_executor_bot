@@ -4,7 +4,7 @@
 Abi SHALL expose process liveness separately from execution readiness. Docker health SHALL use GET /health/live. GET /health/ready SHALL report execution readiness. GET /health SHALL retain its existing readiness meaning for callers.
 
 #### Scenario: Healthy process awaits credentials
-- **WHEN** protected ABI is LOCKED, AUTHORIZING, or RECOVERING
+- **WHEN** ABI awaits credentials, verifies a candidate, or has not completed necessary trading startup checks
 - **THEN** /health/live returns 200 and Docker health can become healthy
 - **AND** /health/ready returns 503 while /health retains its existing readiness meaning
 - **AND** Runtime and the ordinary deployment can start without an operator password
