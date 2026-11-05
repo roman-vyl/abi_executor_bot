@@ -1,3 +1,5 @@
+> Текущий следующий шаг ограничен [stage-3a.md](stage-3a.md) и [correlation-startup-phases](specs/correlation-startup-phases/spec.md). Apply не разрешён. Предыдущие решения ниже, противоречащие authorization-reset.md или 3A, исторические и не подлежат реализации.
+
 ## Context
 
 PR #49 реализует age и startup-барьер, PR #103 добавляет интерактивную ветку деплоя. Новая цель отделяет Deploy от авторизации. Исследованы src/app/server.ts, config.ts, lifecycleEvents.ts, exchangeStreamStartup.ts и createExchangeRestReconciler, а в Runtime — entry bridge, _execute_one и UncertainExchangeStateResolver.

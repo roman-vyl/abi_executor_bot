@@ -1,3 +1,5 @@
+> Текущий следующий шаг ограничен [stage-3a.md](stage-3a.md) и [correlation-startup-phases](specs/correlation-startup-phases/spec.md). Apply не разрешён. Предыдущие решения ниже, противоречащие authorization-reset.md или 3A, исторические и не подлежат реализации.
+
 > Актуальное решение о чистом старте и границах первого шага записано в [authorization-reset.md](authorization-reset.md). Предыдущие артефакты ниже требуют синхронизации с этим решением перед дальнейшей реализацией.
 
 ## Why
@@ -16,6 +18,8 @@
 ## Capabilities
 
 ### New Capabilities
+
+- `correlation-startup-phases` — шаг 3A: независимые результаты локального восстановления и биржевой проверки с сохранением текущего запуска.
 
 - `runtime-authorization` — поздняя авторизация, атомарный допуск, отсутствие очереди и ограниченное взаимодействие с существующим reconciliation Runtime.
 
