@@ -5,13 +5,13 @@
 - [x] 1.1 Добавить typed execution_not_ready в существующие модели и codecs entry, lookup/recovery и position management. Передать entry-отказ через существующий bridge.
 - [x] 1.2 В _execute_one снимать только маркер своей гарантированно отклонённой попытки. Проверить Replace с успешным CANCEL и отказом APPLY. Сохранить resolver и pending при timeout и других неоднозначных результатах.
 - [x] 1.3 Проверить точный HTTP envelope, первый APPLY с 503, сохранение чужого маркера, Replace, timeout, lookup 503 и существующий reconciliation. Выполнить pytest, lint, format-check и typecheck Runtime.
-- [ ] 1.4 Опубликовать этап на ревью и получить разрешение на этап 2.
+- [x] 1.4 Опубликовать этап на ревью и получить разрешение на этап 2.
 
 ## 2. ABI — работа в LOCKED без ключа
 
-- [ ] 2.1 Адаптировать protected config и PR #49 для запуска HTTP и локальных хранилищ в LOCKED. Разделить локальный replay и биржевые проверки активации без повторения локальных изменений.
-- [ ] 2.2 Добавить атомарный admission gate и 503 execution_not_ready для exchange-dependent routes. Разделить liveness/readiness и обновить OpenAPI. Сохранить env-based запуск.
-- [ ] 2.3 Проверить отсутствие биржевых и durable execution побочных действий до допуска и обе стороны гонки admission. После допуска сохранить прежние результаты. Выполнить ABI unit tests, typecheck, build и fake smoke.
+- [x] 2.1 Адаптировать protected config и PR #49 для запуска HTTP и локальных хранилищ в LOCKED. Разделить локальный replay и биржевые проверки активации без повторения локальных изменений.
+- [x] 2.2 Добавить атомарный admission gate и 503 execution_not_ready для exchange-dependent routes. Разделить liveness/readiness и обновить OpenAPI. Сохранить env-based запуск.
+- [x] 2.3 Проверить отсутствие биржевых и durable execution побочных действий до допуска и обе стороны гонки admission. После допуска сохранить прежние результаты. Выполнить ABI unit tests, typecheck, build и fake smoke.
 - [ ] 2.4 Опубликовать этап на ревью и получить разрешение на этап 3.
 
 ## 3. ABI — передача ключа работающему процессу
@@ -31,7 +31,9 @@
 
 - [ ] 5.1 Упростить PR #103 до обычного Deploy Demo без интерактивной ветки и пропуска ABI. Использовать liveness healthcheck и restart policy unless-stopped. Сохранить abi:8787, данные и текущие торговые настройки.
 - [ ] 5.2 Документировать authorize/status, повтор проверки без пароля при сетевых сбоях, expected UID и действия после рестарта. Отметить startup change как superseded без синхронизации его устаревших требований.
-- [ ] 5.3 Проверить Compose/workflow и запуск полного стека без ключа с последующей авторизацией без рестарта контейнера. Опубликовать этап на ревью.
+- [ ] 5.3 Согласовать OpenAPI snapshot assertions Runtime с новым 503, проверить Compose/workflow и запуск полного стека без ключа с последующей авторизацией без рестарта контейнера. Опубликовать этап на ревью.
 - [ ] 5.4 После приёмки всех пяти этапов и отдельного разрешения провести интеграционный Demo smoke — Deploy → LOCKED → авторизация → READY → торговый цикл → restart ABI → LOCKED. Проверить существующий Runtime resolver, Mainnet guard и очистку только тестовых заявок/позиций.
 
 Этап 1 реализован в strategy_runtime PR #46, коммит 6a455e4. Проверки — 1756 pytest tests, ruff check, format-check и mypy. Приёмка этапа 1 и разрешение этапа 2 ожидаются.
+
+Этап 2 реализован в ABI PR #51, коммит 2ef91b7. 1066 тестов, typecheck, build, OpenAPI validation и fake smoke прошли. Живой LOCKED-процесс с активной hedge-записью отклоняет все 11 биржевых маршрутов без биржевых запросов и изменения correlation journal. Защищённый режим выбирается явно через ABI_AUTHORIZATION_MODE=runtime. Приёмка этапа 2 и разрешение этапа 3 ожидаются.
