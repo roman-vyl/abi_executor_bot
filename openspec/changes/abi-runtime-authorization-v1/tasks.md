@@ -38,7 +38,7 @@
 
 ## Результат разрешённой интеграции
 
-- ABI [draft PR #55](https://github.com/roman-vyl/abi_executor_bot/pull/55), 5054a14, поверх #54 и с REST из #53. 1140 npm tests, typecheck, build и OpenAPI validation успешны. Код src/correlation, lifecycleEvents.ts и positionModeAssuranceSeams.ts не менялся.
+- ABI [draft PR #55](https://github.com/roman-vyl/abi_executor_bot/pull/55), 0724fad, поверх #54 и с REST из #53. 1150 npm tests, typecheck, build и OpenAPI validation успешны. src/correlation и lifecycleEvents.ts не менялись; существующая assurance дополнена признаком retryable для unavailable.
 - bbb_stack [draft PR #105](https://github.com/roman-vyl/bbb_stack/pull/105), ветка codex/abi-late-authorization-deploy. Обычный workflow сохранён, один прежний abi с прежними данными/адресом; env_file с ключами удалён, health использует liveness, tmpfs и swap limits настроены. Четыре Python checks и Compose config validation прошли. Локальная команда находит контейнер по labels без зависимости от runner env или image manifest. Ранее предложенный интерактивный deploy #103 не используется.
 - Runtime [draft PR #47](https://github.com/roman-vyl/strategy_runtime/pull/47), 8593d43, поверх #46: только тесты актуального OpenAPI 503, без production-изменений. 330 contract tests и Ruff check/format успешны.
 - Изолированный Compose/production image стартовал healthy в LOCKED при risk sizing. Проверены tmpfs, directory/socket modes 0700/0600, memory.swap.max=0, отсутствие credential env. Тестовый проект удалён.
