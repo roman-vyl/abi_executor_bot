@@ -88,7 +88,7 @@ python3 scripts/abi-authorize.py "$cid" authorize /path/to/credentials.age
 python3 scripts/abi-authorize.py "$cid" retry
 ```
 
-Для основного bbb_stack используйте его scripts/authorize_abi.py, который сам находит существующий контейнер основного Compose-проекта. AUTHORIZED подтверждает полномочия; /health/ready сообщает торговую готовность. При потерянном ответе сначала status; после временного сбоя retry не требует пароля. После рестарта снова LOCKED. Mainnet запрещён.
+Для основного bbb_stack используйте его scripts/authorize_abi.py, который сам находит существующий контейнер основного Compose-проекта. AUTHORIZED подтверждает полномочия; /health/ready сообщает торговую готовность. При потерянном ответе сначала status. После временного сбоя ABI сам повторяет проверку credentials или торговых привязок через 5/15/30 секунд и далее по 30 секунд, без участия Mac и повторного пароля. Ручной retry остаётся диагностическим. После рестарта снова LOCKED. Mainnet запрещён.
 
 Socket находится в tmpfs /run/abi-authorization (каталог 0700, socket 0600). Команда проверяет memory.swap.max=0 до передачи. Отсутствие swap macOS и уничтожение всех копий в памяти не гарантируются. Подробные границы и dummy-only Docker smoke: [verifier-delivery.md](authorization/verifier-delivery.md).
 

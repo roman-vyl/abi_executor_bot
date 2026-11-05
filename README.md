@@ -730,10 +730,12 @@ Close подтверждает и zero position, и terminality attributed entry
 
 Это **не общий retry/recovery daemon**:
 
-- ABI не имеет бесконечного background retry loop;
+- ABI не повторяет торговые POST фоновым циклом;
 - transport failure не превращается автоматически в success;
 - ambiguous result fail-closed;
 - durable pending/correlation state сохраняет контекст, необходимый для повторной команды или startup replay.
+
+Отдельно composition root автоматически повторяет только стартовую проверку сохранённых credentials и временно недоступных торговых привязок: 5/15/30 секунд, затем по 30 секунд. Пароль передаётся один раз; replay, observers и торговые POST этим таймером не повторяются.
 
 ---
 

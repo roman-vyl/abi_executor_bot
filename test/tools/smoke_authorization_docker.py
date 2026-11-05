@@ -72,11 +72,13 @@ def main():
         preload = temp / "bybit-transport.cjs"
         preload.write_text('''const {createHmac}=require('node:crypto');
 // Test-only response transport; production source/image has no accepted bypass.
+let verificationAttempts=0;
 globalThis.fetch=async (url,init)=>{
  if(url!=='https://api-demo.bybit.com/v5/user/query-api'||init.method!=='GET'||init.body!==undefined)throw new Error('Unexpected smoke request');
  const h=new Headers(init.headers);
  const expected=createHmac('sha256','smoke-secret').update(h.get('X-BAPI-TIMESTAMP')+'smoke-key'+h.get('X-BAPI-RECV-WINDOW')).digest('hex');
  if(h.get('X-BAPI-API-KEY')!=='smoke-key'||h.get('X-BAPI-SIGN')!==expected)throw new Error('Invalid smoke signature');
+ if(++verificationAttempts===1)throw new Error('Simulated temporary network failure');
  return new Response(JSON.stringify({retCode:0,result:{apiKey:'smoke-key',userID:123,readOnly:0,permissions:{ContractTrade:['Order','Position']}}}));
 };''')
         # Plaintext is pipe input only. age prompts through the controlling TTY.
@@ -107,7 +109,7 @@ globalThis.fetch=async (url,init)=>{
                      expected_success=False, passphrase=b"deliberately-wrong-test-passphrase\n")
             assert health()["authorization"] == "LOCKED"
             transcript = terminal(lambda: subprocess.run(["python3", str(ROOT / "scripts/abi-authorize.py"), NAME, "authorize", str(encrypted)], check=True))
-            assert b'"result": "accepted"' in transcript
+            assert b'"result": "temporary_failure"' in transcript
             for _ in range(100):
                 ready = health()
                 if ready["status"] == 200:
@@ -125,7 +127,7 @@ globalThis.fetch=async (url,init)=>{
                     pass
                 time.sleep(0.1)
             assert ready["status"] == 503 and ready["authorization"] == "LOCKED"
-            print("PASS: Docker LOCKED -> age password -> AUTHORIZED -> Trading READY, same container; restart -> LOCKED")
+            print("PASS: one age password -> temporary network failure -> autonomous ABI retry -> AUTHORIZED -> Trading READY, same container; restart -> LOCKED")
         finally:
             command("docker", "rm", "-f", NAME)
 

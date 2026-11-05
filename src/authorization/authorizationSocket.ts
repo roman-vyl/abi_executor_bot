@@ -1,15 +1,15 @@
 import { createServer, type Socket } from "node:net";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { AuthorizationService } from "./authorizationService.js";
+import { AuthorizationService, type AuthorizationResult } from "./authorizationService.js";
 import { createBybitCredentialsVerifier, type VerificationPolicy } from "./bybitCredentialsVerifier.js";
 import { decodeControlFrame, FRAME_LIMIT } from "./credentialProtocol.js";
 
-// Independent component only. Production composition root does not start it yet.
+// The socket reports verification outcomes; retry scheduling belongs to composition root.
 export async function createAuthorizationSocket(input: {
   path: string;
   policy: VerificationPolicy;
-  onAuthorized?: () => void;
+  onAuthorizationResult?: (result: AuthorizationResult) => void;
 }, testOptions: { fetch?: typeof fetch; verificationTimeoutMs?: number; frameTimeoutMs?: number } = {}) {
   const verifier = createBybitCredentialsVerifier(input.policy, { fetch: testOptions.fetch, timeoutMs: testOptions.verificationTimeoutMs });
   const authorization = new AuthorizationService(verifier.verify);
@@ -60,9 +60,9 @@ export async function createAuthorizationSocket(input: {
           const result = await (request.op === "retry" ? authorization.retry() : authorization.authorize({
             apiKey: request.credentials[0], apiSecret: request.credentials[1],
           }));
-          if (!stopping && authorization.credentials() !== undefined) {
-            // Authorization is already committed; an activation notification cannot rewrite its result.
-            try { input.onAuthorized?.(); } catch { /* Root reports activation failures independently. */ }
+          if (!stopping) {
+            // Notification cannot rewrite an already completed verification result.
+            try { input.onAuthorizationResult?.(result); } catch { /* Root reports its own failures. */ }
           }
           if (!stopping) answer(socket, { result, ...(result === "temporary_failure" ? { reason: verifier.reason() } : {}) });
         } catch {

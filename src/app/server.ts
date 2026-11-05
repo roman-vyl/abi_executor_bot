@@ -42,14 +42,18 @@ import { handleSystemRoutes } from "../routes/systemRoutes.js";
 
 // The exchange facts store is opened by the caller before anything listens;
 // nothing in order execution uses it.
-export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState) {
+export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStoreState,
+  retryTimers: Pick<typeof globalThis, "setTimeout" | "clearTimeout"> = globalThis) {
   let stopping = false;
   let activate: () => void = () => undefined;
+  let authorizationChanged: () => void = () => undefined;
   const control = await createAuthorizationSocket({
     path: config.authorizationSocketPath,
     policy: { environment: config.bybitEnvironment as "demo" | "testnet", expectedUid: config.expectedBybitUid,
       category: config.bybitCategory as "linear" | "spot", recvWindow: config.bybitRecvWindow },
-    onAuthorized: () => activate(),
+    onAuthorizationResult: result => {
+      if (result !== "busy" && result !== "retry_required" && result !== "no_candidate") authorizationChanged();
+    },
   });
   const authorization = control.authorization;
   const bybit = new RestBybitAdapter(config, { credentialsSource: authorization });
@@ -60,6 +64,41 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
   let activation: Promise<void> | undefined;
   const accountReady = () => !stopping && authorization.status() === "AUTHORIZED";
   const executionReady = () => accountReady() && readiness.isReady && bindingsVerified;
+  // One completion-based timer for the two safe startup read phases. Never retries trading commands.
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryPhase: "authorization" | "bindings" | undefined;
+  let retryStep = 0;
+  let authorizationAttempt: Promise<void> | undefined;
+  const cancelRetryTimer = () => {
+    if (retryTimer !== undefined) retryTimers.clearTimeout(retryTimer);
+    retryTimer = undefined;
+  };
+  const resetRetry = () => { cancelRetryTimer(); retryPhase = undefined; retryStep = 0; };
+  const scheduleRetry = (phase: "authorization" | "bindings") => {
+    if (stopping || retryTimer !== undefined) return;
+    if (retryPhase !== phase) { retryPhase = phase; retryStep = 0; }
+    const delayMs = [5_000, 15_000, 30_000][Math.min(retryStep++, 2)];
+    retryTimer = retryTimers.setTimeout(() => {
+      retryTimer = undefined;
+      if (stopping) return;
+      if (authorization.status() === "RETRY_PENDING" && !authorizationAttempt) {
+        authorizationAttempt = (async () => {
+          await authorization.retry();
+          authorizationChanged();
+        })().finally(() => { authorizationAttempt = undefined; });
+      } else if (accountReady()) activate();
+    }, delayMs);
+    retryTimer.unref?.();
+    emitEvent("info", "startup_retry_scheduled", { phase, delayMs });
+  };
+  authorizationChanged = () => {
+    if (stopping) return;
+    cancelRetryTimer();
+    const state = authorization.status();
+    if (state === "RETRY_PENDING") scheduleRetry("authorization");
+    else if (state === "AUTHORIZED") activate();
+    else if (state === "LOCKED") resetRetry();
+  };
   // Keeps the pooled Bybit connection in use between bars; trading never
   // waits for it (abi-bybit-connection-keepalive-v1).
   const bybitHeartbeat = new BybitConnectionHeartbeat({ adapter: bybit, intervalMs: config.bybitHeartbeatIntervalMs });
@@ -177,17 +216,21 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
         if (stopping) return;
         bindingsVerified = result.ok;
         activationReason = result.ok ? undefined : result.reason;
-        if (result.ok) emitEvent("info", "execution_ready");
-        else emitEvent("warn", "execution_activation_failed", { reason: result.reason });
+        if (result.ok) { resetRetry(); emitEvent("info", "execution_ready"); }
+        else {
+          emitEvent("warn", "execution_activation_failed", { reason: result.reason });
+          if (result.retryable) scheduleRetry("bindings");
+          else resetRetry();
+        }
       } catch {
         activationReason = "activation_failed";
         emitEvent("warn", "execution_activation_failed", { reason: activationReason });
-      } finally { activation = undefined; }
-    })();
+      }
+    })().finally(() => { activation = undefined; });
   };
 
   // Cover an authorization that completed while the socket was being opened.
-  activate();
+  authorizationChanged();
 
   const server = createServer(async (request, response) => {
     if (await handleSystemRoutes({
@@ -285,6 +328,7 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
   let controlClosed: Promise<void> | undefined;
   const beginShutdown = () => {
     stopping = true;
+    resetRetry();
     controlClosed ??= control.close();
     // Observe rejection immediately even while HTTP requests drain.
     void controlClosed.catch(() => undefined);
@@ -292,6 +336,7 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
   const release = async () => {
     beginShutdown();
     await controlClosed;
+    await authorizationAttempt;
     await activation;
     bybitHeartbeat.stop();
     try {

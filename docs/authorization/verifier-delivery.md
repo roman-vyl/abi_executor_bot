@@ -2,11 +2,11 @@
 
 Эта версия подключает авторизацию к существующему startServer. После обычного запуска ABI находится в LOCKED; age/socket авторизация выполняется без рестарта. Деплой действующего Demo требует отдельного разрешения и согласованных ABI/Runtime image pins. Mainnet запрещён.
 
-`createAuthorizationSocket({ path, policy })` создаёт один AuthorizationService с настоящим Bybit verifier. Возвращённый `authorization` — тот же единственный владелец credentials для будущего подключения REST; `close()` немедленно прекращает приём, отменяет проверку и закрывает соединения. Factory не знает о journal, readiness или trading-компонентах.
+`createAuthorizationSocket({ path, policy })` создаёт один AuthorizationService с настоящим Bybit verifier. Возвращённый `authorization` — тот же единственный владелец credentials для рабочего REST; `close()` немедленно прекращает приём, отменяет проверку и закрывает соединения. Factory не знает о journal, readiness или trading-компонентах.
 
-Policy содержит environment (demo/testnet), expectedUid (строка UID целевого аккаунта), category (linear/spot), recvWindow. UID и права проверяются одним подписанным GET /v5/user/query-api. Verifier не имеет произвольных URL/методов или order writes. Общий deadline 10 s, response limit 64 KiB; временная ошибка сохраняет кандидата для явного retry. Файлы tests используют подставной транспорт с реальным кодом подписи/проверки, production fake accepted отсутствует.
+Policy содержит environment (demo/testnet), expectedUid (строка UID целевого аккаунта), category (linear/spot), recvWindow. UID и права проверяются одним подписанным GET /v5/user/query-api. Verifier не имеет произвольных URL/методов или order writes. Общий deadline 10 s, response limit 64 KiB; временная ошибка сохраняет кандидата для автоматического повторения внутри ABI. Файлы tests используют подставной транспорт с реальным кодом подписи/проверки, production fake accepted отсутствует.
 
-Socket frame: JSON+LF и EOF write-side; максимум 4096 bytes, 5 s на приём. Команды authorize (полная credentials-пара), retry, status. Одна активная control connection. Ответ accepted сообщает только AUTHORIZED, не Trading READY. При потерянном ответе сначала status, автоматического resubmit нет. Закрытие после начала authorize не отменяет его результат.
+Socket frame: JSON+LF и EOF write-side; максимум 4096 bytes, 5 s на приём. Команды authorize (полная credentials-пара), retry, status. Одна активная control connection. Ответ accepted сообщает только AUTHORIZED, не Trading READY. При потерянном ответе сначала status: клиент не пересылает пару повторно. Временные сетевые отказы ABI обрабатывает самостоятельно, без Mac/Python. Закрытие после начала authorize не отменяет его результат.
 
 Файл .age содержит JSON `[apiKey, apiSecret]`. Для будущего штатного контейнера:
 
@@ -41,4 +41,12 @@ docker build -t abi:authorization-root-review .
 python3 -B test/tools/smoke_authorization_docker.py
 ```
 
-Smoke использует только публичные dummy credentials и dummy passphrase. Test-only preload подменяет транспорт Bybit и проверяет реальный HMAC; он не входит в production image или Compose. Проверяются неверный пароль, LOCKED → AUTHORIZED → READY в одном контейнере, restart → LOCKED. Это не реальный Demo smoke. Production путь не содержит тестового accepted, host override или test transport env-настройки.
+Smoke использует только публичные dummy credentials и dummy passphrase. Test-only preload подменяет транспорт Bybit и проверяет реальный HMAC; он не входит в production image или Compose. Проверяются неверный пароль, временный сетевой отказ после ввода правильного пароля, автономный retry внутри ABI после завершения Mac-команды, AUTHORIZED → READY в одном контейнере, restart → LOCKED. Это не реальный Demo smoke. Production путь не содержит тестового accepted, host override или test transport env-настройки.
+
+## Автономные повторы после передачи ключа
+
+Composition root использует один ограниченный по частоте таймер: 5, 15, 30 секунд, затем по 30 секунд после завершения каждой неуспешной попытки. Он вызывает AuthorizationService.retry() для RETRY_PENDING, затем повторяет только временно недоступную проверку торговых привязок. При смене фазы backoff начинается с 5 секунд. Пара сохраняется внутри ABI; пароль и Mac-команда больше не нужны. Ручной retry оставлен для диагностики.
+
+Подтверждённо неверные credentials/UID/права удаляются сервисом и не повторяются автоматически. Не повторяются повреждённый local replay, несовместимая binding policy и доказанное несовпадение position mode. Текущая категория unavailable означает отсутствие достоверных биржевых данных, в том числе сеть/неполный ответ; такие read-only проверки повторяются с backoff без изменения режима биржи.
+
+Ни торговые POST, ни локальный replay/cleanup, ни создание observers таймер не повторяет. Авторизация и assurance не запускаются параллельно с другой попыткой той же фазы. Shutdown снимает таймер, отменяет verifier и блокирует позднюю активацию. Отдельного сервиса или scheduler-компонента нет.

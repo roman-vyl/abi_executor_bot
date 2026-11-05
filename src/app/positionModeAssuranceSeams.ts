@@ -14,7 +14,7 @@ import { effectivePositionBindingMode, type LinearPositionBindingPolicy } from "
 export async function assureReplayedActiveBindings(input: {
   bybit: BybitAdapter;
   activeRecords: EntryPackageExecutionRecord[];
-}): Promise<{ ok: true } | { ok: false }> {
+}): Promise<{ ok: true } | { ok: false; retryable?: true }> {
   const expectedByScope = new Map<string, { scope: InstrumentPositionScope; bindings: PositionBindingGeometry[] }>();
 
   for (const record of input.activeRecords) {
@@ -31,8 +31,9 @@ export async function assureReplayedActiveBindings(input: {
 
   for (const { scope, bindings } of expectedByScope.values()) {
     for (const expected of bindings) {
-      if ((await assureBybitPositionMode({ bybit: input.bybit, instrumentScope: scope, expected })).kind !== "verified") {
-        return { ok: false };
+      const outcome = await assureBybitPositionMode({ bybit: input.bybit, instrumentScope: scope, expected });
+      if (outcome.kind !== "verified") {
+        return { ok: false, ...(outcome.kind === "unavailable" ? { retryable: true as const } : {}) };
       }
     }
   }
@@ -53,7 +54,7 @@ export async function assureConfiguredActiveBindings(input: {
   bybit: BybitAdapter;
   activeRecords: EntryPackageExecutionRecord[];
   linearPolicy: LinearPositionBindingPolicy;
-}): Promise<{ ok: true } | { ok: false; reason: string }> {
+}): Promise<{ ok: true } | { ok: false; reason: string; retryable?: true }> {
   for (const record of input.activeRecords) {
     if (record.position_binding_mode === null) {
       return { ok: false, reason: "active_legacy_one_way_record_requires_drain" };
@@ -78,7 +79,8 @@ export async function assureConfiguredActiveBindings(input: {
   }
 
   const result = await assureReplayedActiveBindings({ bybit: input.bybit, activeRecords: input.activeRecords });
-  return result.ok ? result : { ok: false, reason: "active_binding_position_mode_assurance_failed" };
+  return result.ok ? result : { ok: false, reason: "active_binding_position_mode_assurance_failed",
+    ...(result.retryable ? { retryable: true } : {}) };
 }
 
 function sameGeometry(a: PositionBindingGeometry, b: PositionBindingGeometry): boolean {
