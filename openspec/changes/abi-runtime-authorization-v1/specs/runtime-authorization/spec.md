@@ -29,7 +29,7 @@ ABI SHALL иметь единственного владельца кандид�
 
 #### Scenario: Verification is inconclusive
 - **WHEN** произошли timeout, сетевой или VPN сбой, generic HTTP 403 либо нераспознанный ответ
-- **THEN** результат temporary_failure, кандидат сохранён только для явного retry без нового пароля и не доступен рабочему REST
+- **THEN** результат temporary_failure, кандидат сохранён для автоматического retry внутри ABI без нового пароля и не доступен рабочему REST
 
 #### Scenario: Verification finishes after cancellation
 - **WHEN** shutdown или deadline отменили попытку, а транспорт позднее вернул успешный ответ
@@ -102,3 +102,23 @@ bbb_stack SHALL обновлять весь стек обычным workflow, с
 - **WHEN** оператор выполняет Deploy Demo
 - **THEN** весь стек стартует, ABI становится живым в LOCKED, Runtime запускается
 - **AND** Mainnet остаётся заблокирован существующим guard
+
+### Requirement: Startup read checks retry autonomously with bounded frequency
+После передачи кандидата ABI SHALL автоматически повторять temporary_failure авторизации и unavailable проверки торговых привязок без Mac, Python и повторного ввода пароля. Composition root MUST использовать один retry-таймер с задержками 5, 15, 30 секунд, затем по 30 секунд после завершения предыдущей попытки; смена фазы сбрасывает backoff к 5 секундам. Одновременно MUST NOT выполняться несколько проверок одной фазы, включая гонку с ручным retry. Ручной retry SHALL оставаться диагностическим.
+
+#### Scenario: Network recovers after password entry
+- **WHEN** переданный кандидат несколько раз не удалось проверить из-за временной сети, после чего сеть восстановилась
+- **THEN** ABI самостоятельно доходит до AUTHORIZED и необходимых торговых проверок с сохранённой парой, без новой доставки credentials
+
+#### Scenario: Trading bindings become available later
+- **WHEN** авторизация успешна, но assurance временно не имеет достоверных биржевых данных
+- **THEN** ABI повторяет только read-only assurance до успеха с backoff, сохраняя AUTHORIZED
+- **AND** local replay, cleanup, observers и торговые POST не запускаются повторно этим таймером
+
+#### Scenario: Definitive rejection does not loop
+- **WHEN** кандидат достоверно отклонён, replay неуспешен, policy несовместима или position mode доказанно не совпадает
+- **THEN** соответствующая проверка не повторяется автоматически и торговая готовность остаётся закрытой
+
+#### Scenario: Shutdown stops retries
+- **WHEN** ABI останавливается с назначенным или выполняющимся автоматическим повтором
+- **THEN** таймер снят, verifier отменён, новые попытки не запускаются и поздний результат не разрешает торговлю

@@ -26,6 +26,8 @@
 - [x] 4.6 Согласовать admission/routes/guards/health: account зависит от авторизации, торговые циклы дополнительно от существующего recovery/bindings; 503 только до исполнения, без очереди. Убрать credential checks из config; сохранить остальные safety gates.
 - [ ] 4.7 Проверки auth/recovery, сломанного journal при AUTHORIZED, активации без дублей, сети, shutdown и unit/integration выполнены. Осталась внешняя приёмка совместимого набора PR #55/#105/#47. При необходимости разбить интеграцию на согласуемые PR без слияния неработоспособных промежуточных версий.
 
+- [x] 4.8 Дополнение перед merge: один retry-таймер root для temporary_failure авторизации и unavailable assurance, backoff 5/15/30/30…, без Mac/Python/пароля, без POST/replay/дублей observers; тесты частоты, конкуренции, постоянных отказов и shutdown.
+
 ## Завершение — отдельное разрешение
 
 - [ ] 5.1 Согласовать Runtime #46 и обычный bbb_stack Deploy без пароля, сохранив abi:8787, данные и настройки; отказаться от интерактивного deploy в #103.
@@ -42,3 +44,5 @@
 - Изолированный Compose/production image стартовал healthy в LOCKED при risk sizing. Проверены tmpfs, directory/socket modes 0700/0600, memory.swap.max=0, отсутствие credential env. Тестовый проект удалён.
 - Docker + настоящий age на публичной dummy-паре и dummy passphrase: неверный пароль оставляет LOCKED; правильный пароль → stdin/socket → реальный код HMAC/verifier → AUTHORIZED → Trading READY без смены container ID; restart → LOCKED. Подменялся только ответ Bybit через test-only preload, отсутствующий в production image/config. Это не реальная проверка Demo-аккаунта. test/tools/smoke_authorization_docker.py воспроизводит сценарий; контейнер удаляется.
 - Действующий Demo и его image pins не менялись, merge/deploy и реальных Bybit-запросов не было. Перед переключением требуются внешняя приёмка, согласованные ABI/Runtime images, trusted Demo UID и сверка необходимых несекретных настроек старого env_file оператором. Задача 5.3 (реальный Demo smoke) не выполнена и без отдельного разрешения не выполняется. Mainnet запрещён.
+
+Дополнение автоматического retry реализовано в PR #55, коммит 0724fad. 1150 npm tests, typecheck, build и OpenAPI прошли. Root tests проверяют 5/15/30/30…, сброс backoff при смене фазы, гонку с ручной проверкой, единственный таймер/observers, отсутствие повторного replay/cleanup и shutdown. Docker + настоящий age на dummy credentials подтвердил: Mac-команда закончилась после первой временной ошибки, затем ABI самостоятельно дошёл до AUTHORIZED/READY без второго ввода пароля; restart вернул LOCKED. Подменён только Bybit transport тестового контейнера; настоящий Demo не менялся. positionModeAssuranceSeams.ts теперь сохраняет retryable=true только для unavailable; journal/replay по-прежнему не менялись.
