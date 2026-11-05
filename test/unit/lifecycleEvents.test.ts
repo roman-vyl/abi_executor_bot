@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { CorrelationReplayResult } from "../../src/correlation/entryPackageCorrelationRepository.js";
-import { replayCorrelationStore } from "../../src/app/lifecycleEvents.js";
+import { replayCorrelationStore, replayLocalCorrelationStore, activateExecutionBindings } from "../../src/app/lifecycleEvents.js";
 import type { CorrelationReplayer } from "../../src/app/lifecycleEvents.js";
 import type { EntryPackageExecutionRecord } from "../../src/correlation/entryPackageExecutionRecord.js";
 import { FakeBybitAdapter } from "../fakes/fakeBybitAdapter.js";
@@ -284,3 +284,23 @@ function activeRecord(
     current_binding_started_at: "2026-08-29T00:00:00.000Z",
   };
 }
+
+test("local replay does not activate execution or repeat local writes during activation", async () => {
+  const state = fakeReadiness();
+  let replays = 0;
+  let admissions = 0;
+  const repository: CorrelationReplayer = {
+    async replay() { replays++; return { ok: true }; },
+    async closeLeftoverAdmissionIntents() { admissions++; return []; },
+  };
+
+  assert.equal(await replayLocalCorrelationStore(repository, state.readiness), true);
+  assert.equal(state.ready, false);
+  assert.equal(replays, 1);
+  assert.equal(admissions, 1);
+
+  await activateExecutionBindings(state.readiness);
+  assert.equal(state.ready, true);
+  assert.equal(replays, 1);
+  assert.equal(admissions, 1);
+});

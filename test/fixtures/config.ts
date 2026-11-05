@@ -2,6 +2,7 @@ import type { AbiConfig } from "../../src/config/config.js";
 
 export function makeTestConfig(overrides: Partial<AbiConfig> = {}): AbiConfig {
   return {
+    authorizationMode: "env",
     host: "127.0.0.1",
     port: 8787,
     dryRun: true,

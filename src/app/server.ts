@@ -21,10 +21,11 @@ import { EntryCycleRecoveryResolutionService } from "../services/entryCycleRecov
 import { EntryPackageApplicationService } from "../services/entryPackage/entryPackageApplicationService.js";
 import { OpenPositionResolutionService } from "../services/openPosition/openPositionResolutionService.js";
 import { ProtectionApplicationService } from "../services/protection/protectionApplicationService.js";
+import { executionIsReady } from "./executionAdmission.js";
 import { EntryPackageReadiness } from "./entryPackageReadiness.js";
 import type { ExchangeFactsStoreState } from "./exchangeFactsStartup.js";
 import { writeJson } from "./http.js";
-import { replayCorrelationStore } from "./lifecycleEvents.js";
+import { replayCorrelationStore, replayLocalCorrelationStore } from "./lifecycleEvents.js";
 import { installShutdownHandlers } from "./shutdown.js";
 import { handleAccountRoutes } from "../routes/accountRoutes.js";
 import { handleEntryCycleRecoveryRoutes } from "../routes/entryCycleRecoveryRoutes.js";
@@ -142,11 +143,16 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
     isCorrelationReady: () => readiness.isReady,
   });
 
-  void replayCorrelationStore(correlationRepository, readiness, {
-    bybit,
-    linearPolicy: config.bybitLinearPositionBindingMode,
-    getActiveRecords: () => correlationRepository.findAllActiveRecords(),
-  });
+  if (config.authorizationMode === "runtime") {
+    void replayLocalCorrelationStore(correlationRepository, readiness);
+  } else {
+    void replayCorrelationStore(correlationRepository, readiness, {
+      bybit,
+      linearPolicy: config.bybitLinearPositionBindingMode,
+      getActiveRecords: () => correlationRepository.findAllActiveRecords(),
+    });
+  }
+  const isExecutionReady = () => executionIsReady(config, readiness.isReady);
 
   const server = createServer(async (request, response) => {
     if (await handleSystemRoutes({
@@ -164,7 +170,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
       return;
     }
 
-    if (await handleAccountRoutes({ request, response, config, bybit })) {
+    if (await handleAccountRoutes({ request, response, config, bybit, isReady: isExecutionReady })) {
       return;
     }
 
@@ -191,7 +197,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         applicationService,
-        isReady: () => readiness.isReady,
+        isReady: isExecutionReady,
       })
     ) {
       return;
@@ -202,7 +208,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         resolutionService: openPositionResolutionService,
-        isReady: () => readiness.isReady,
+        isReady: isExecutionReady,
       })
     ) {
       return;
@@ -213,7 +219,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         request,
         response,
         resolutionService: entryCycleRecoveryResolutionService,
-        isReady: () => readiness.isReady,
+        isReady: isExecutionReady,
       })
     ) {
       return;
@@ -226,7 +232,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
         protectionApplicationService,
         closeApplicationService,
         entryRemainderCancelService,
-        isReady: () => readiness.isReady,
+        isReady: isExecutionReady,
       })
     ) {
       return;
@@ -244,7 +250,7 @@ export function startServer(config: AbiConfig, exchangeFacts: ExchangeFactsStore
   exchangeStream.start();
   exchangeLinker.start();
   exchangeRest.start();
-  bybitHeartbeat.start();
+  if (config.authorizationMode === "env") bybitHeartbeat.start();
 
   installShutdownHandlers({
     server,

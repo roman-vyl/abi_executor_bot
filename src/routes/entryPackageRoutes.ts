@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { admitExecution } from "../app/executionAdmission.js";
 import { readJsonBody, writeJson } from "../app/http.js";
 import {
   internalErrorResult,
@@ -88,11 +89,7 @@ async function handleEntryPackageRoutesSafely(
     return true;
   }
 
-  if (!isReady()) {
-    // Correlation-store replay hasn't completed (or failed) yet — fail
-    // closed with the existing safe internal_error response rather than
-    // risk acting before durable state is recovered.
-    writeResult(response, internalErrorResult());
+  if (!admitExecution(response, isReady)) {
     return true;
   }
 

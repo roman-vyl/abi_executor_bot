@@ -30,7 +30,7 @@ test("OpenAPI owns transport shape without constraining Runtime value formats", 
   const schemas = document.components.schemas;
 
   assert.equal(document.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "422", "500"]);
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "422", "500", "503"]);
   assert.equal(operation.parameters.length, 2);
 
   for (const parameter of operation.parameters) {

@@ -260,3 +260,19 @@ test("live entry config refuses to start when the path cannot be read", () => {
 
   assert.throws(() => loadConfig({ ABI_CONFIG_PATH: dir }), /cannot be read/);
 });
+
+test("runtime authorization starts risk sizing without a credential pair", () => {
+  const config = loadConfig({ ABI_AUTHORIZATION_MODE: "runtime", ABI_POSITION_SIZING_MODE: "risk" });
+  assert.equal(config.authorizationMode, "runtime");
+  assert.equal(config.positionSizingMode, "risk");
+  assert.equal(config.bybitApiKey, "");
+  assert.equal(config.bybitApiSecret, "");
+});
+
+test("runtime authorization rejects environment credentials and invalid modes", () => {
+  for (const credentials of [{ BYBIT_API_KEY: "key" }, { BYBIT_API_SECRET: "" }]) {
+    assert.throws(() => loadConfig({ ABI_AUTHORIZATION_MODE: "runtime", ...credentials }), /does not accept credentials/);
+  }
+  assert.throws(() => loadConfig({ ABI_AUTHORIZATION_MODE: "automatic" }), /must be env or runtime/);
+  assert.equal(loadConfig({}).authorizationMode, "env");
+});

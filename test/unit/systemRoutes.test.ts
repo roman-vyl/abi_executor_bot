@@ -220,3 +220,26 @@ test("health reports REST reconciliation and completeness without changing ok or
   assert.deepEqual(response.body().exchangeRest, exchangeRest);
   assert.deepEqual(response.body().exchangeCompleteness, exchangeCompleteness);
 });
+
+test("LOCKED process stays live but cannot report execution readiness", async () => {
+  for (const [url, expectedStatus] of [
+    ["/health/live", 200], ["/health/ready", 503], ["/health", 503], ["/execution/mode", 200],
+  ] as const) {
+    const response = makeResponse();
+    await handleSystemRoutes({
+      request: makeRequest("GET", url),
+      response: response.response,
+      config: makeTestConfig({ authorizationMode: "runtime" }),
+      entryPackageReady: true,
+      exchangeFacts: { status: "disabled" },
+      exchangeStream: disabledStreamStatus("no_api_key"),
+      exchangeLinker: disabledLinkerStatus("store_not_enabled"),
+      ...restDisabled,
+    });
+    assert.equal(response.status(), expectedStatus);
+    if (url === "/execution/mode") {
+      assert.equal(response.body().authorizationState, "LOCKED");
+      assert.equal(response.body().canExecuteLive, false);
+    }
+  }
+});

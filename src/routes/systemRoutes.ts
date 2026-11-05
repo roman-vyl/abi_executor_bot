@@ -7,6 +7,7 @@ import type { ExchangeLinkerStatus } from "../exchangeFacts/exchangeOrderLinker.
 import type { ExchangeCompletenessStatus, ExchangeRestStatus } from "../exchangeFacts/exchangeRestReconciler.js";
 import type { ExchangeStreamStatus } from "../exchangeStream/exchangeStreamRecorder.js";
 import type { BybitConnectionStatus } from "../exchange/bybitConnectionHeartbeat.js";
+import { executionIsReady } from "../app/executionAdmission.js";
 import { writeJson } from "../app/http.js";
 
 export async function handleSystemRoutes(input: {
@@ -34,9 +35,15 @@ export async function handleSystemRoutes(input: {
     bybitConnection,
   } = input;
 
-  if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, entryPackageReady ? 200 : 503, {
-      ok: entryPackageReady,
+  const executionReady = executionIsReady(config, entryPackageReady);
+  if (request.method === "GET" && request.url === "/health/live") {
+    writeJson(response, 200, { ok: true });
+    return true;
+  }
+
+  if (request.method === "GET" && (request.url === "/health" || request.url === "/health/ready")) {
+    writeJson(response, executionReady ? 200 : 503, {
+      ok: executionReady,
       host: config.host,
       port: config.port,
       dryRun: config.dryRun,
@@ -49,7 +56,7 @@ export async function handleSystemRoutes(input: {
       bybitSettleCoin: config.bybitSettleCoin,
       bybitTriggerBy: config.bybitTriggerBy,
       bybitApiKeyConfigured: config.bybitApiKey !== "",
-      entryPackageReady,
+      entryPackageReady: executionReady,
       // Informational only: the journal state never changes ok or the status.
       exchangeFactsStore: exchangeFacts.status,
       ...(exchangeFacts.status === "unavailable" ? { exchangeFactsStoreReason: exchangeFacts.reason } : {}),
@@ -65,7 +72,12 @@ export async function handleSystemRoutes(input: {
   }
 
   if (request.method === "GET" && request.url === "/execution/mode") {
-    writeJson(response, 200, getLiveExecutionMode(config));
+    const mode = getLiveExecutionMode(config);
+    writeJson(response, 200, {
+      ...mode,
+      authorizationState: config.authorizationMode === "runtime" ? "LOCKED" : executionReady ? "READY" : "RECOVERING",
+      canExecuteLive: mode.canExecuteLive && executionReady,
+    });
     return true;
   }
 

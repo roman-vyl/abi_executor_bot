@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { admitExecution } from "../app/executionAdmission.js";
 import { writeJson } from "../app/http.js";
 import type { EntryPackageValidationDetail } from "../domain/entryPackageApi.js";
 import { decodeOpaquePathValue, internalErrorResult, validationFailedResult } from "../domain/openPositionApi.js";
@@ -58,12 +59,7 @@ async function handleOpenPositionRoutesSafely(
     return true;
   }
 
-  if (!isReady()) {
-    // Correlation-store replay hasn't completed (or failed) yet — fail
-    // closed with the same safe internal_error response the entry-package
-    // PUT route already uses for the same condition, rather than resolving
-    // against not-yet-recovered state.
-    writeResult(response, internalErrorResult());
+  if (!admitExecution(response, isReady)) {
     return true;
   }
 

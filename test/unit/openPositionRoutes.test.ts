@@ -101,8 +101,8 @@ test("not-ready readiness fails closed without calling the resolution service", 
     }),
     true,
   );
-  assert.deepEqual(response.body(), internalErrorResult().body);
-  assert.equal(response.status(), 500);
+  assert.deepEqual(response.body(), { error: { code: "execution_not_ready", message: "ABI execution is not ready" } });
+  assert.equal(response.status(), 503);
 });
 
 test("when ready, decoded identifiers are handed to the resolution service and its result is returned as-is", async () => {
