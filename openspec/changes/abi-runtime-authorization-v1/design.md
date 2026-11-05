@@ -32,6 +32,8 @@ age на Mac расшифровывает файл; после успешног�
 
 ### Затем отдельная интеграция composition root
 
+Конкретная схема следующего ревью: [root-integration-review.md](root-integration-review.md). В частности, существующий локальный replay можно использовать без изменения lifecycleEvents.ts; отдельный подготовительный этап журнала не нужен.
+
 ```text
 age → Unix socket → AuthorizationService ← ограниченный verifier
                             │
