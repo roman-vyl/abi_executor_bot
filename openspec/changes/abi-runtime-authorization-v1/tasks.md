@@ -9,7 +9,7 @@
 
 ## Следующий шаг — реальный verifier и доставка, без journal
 
-- [ ] 3.1 Перед Apply согласовать узкий интерфейс verifier, фиксированные read-only endpoints Bybit, проверку expected UID/прав, классификацию ошибок, deadline/cancellation и протокол Unix socket.
+- [ ] 3.1 Контракт подготовлен в [verifier-delivery-contract.md](verifier-delivery-contract.md), ожидает ревью. Перед Apply согласовать узкий интерфейс verifier, фиксированные read-only endpoints Bybit, проверку expected UID/прав, классификацию ошибок, deadline/cancellation и протокол Unix socket.
 - [ ] 3.2 После разрешения реализовать ограниченный реальный verifier с подставным транспортом в тестах. Исключить order writes, произвольные endpoints и production fake accepted.
 - [ ] 3.3 Проверить accepted, неверные credentials/UID/права, отсутствие expected UID, malformed/unknown responses, timeout/VPN/403, retry, зависший Promise, отмену и поздний accepted. Убедиться, что service не зависит от сети, журнала и readiness.
 - [ ] 3.4 После разрешения адаптировать age и Unix socket: полный ограниченный frame, права/tmpfs, container swap check, stdin, очистка, безопасные ошибки. Тестировать отдельно от production composition root.
