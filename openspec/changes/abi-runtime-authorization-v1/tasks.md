@@ -18,13 +18,13 @@
 
 ## Отдельно согласуемая интеграция
 
-- [ ] 4.1 Схема root, observers и минимального откладывания биржевой проверки подготовлена в [root-integration-review.md](root-integration-review.md); после ревью получить отдельное разрешение Apply.
-- [ ] 4.2 Подключить настоящий verifier/socket/service и обязательный REST source без env fallback. AUTHORIZED независим от journal; временные сетевые ошибки не удаляют пару.
-- [ ] 4.3 Только здесь минимально разделить существующую startup-последовательность: сохранить результат локального восстановления, отложить bindings до авторизации, не повторять replay/cleanup при повторной биржевой проверке. Не менять correlation subsystem и формат данных.
-- [ ] 4.4 Однократно создавать реальные WS/REST observers после авторизации. Сохранить их reconnect/worker; backfill не блокирует торговлю, наблюдение зависит только от необходимой локальной готовности.
-- [ ] 4.5 Обеспечить shutdown до ожидания HTTP close: запрет нового admission/authorize, закрытие канала, cancellation и защита от поздних результатов; сохранить drain допущенных операций.
-- [ ] 4.6 Согласовать admission/routes/guards/health: account зависит от авторизации, торговые циклы дополнительно от существующего recovery/bindings; 503 только до исполнения, без очереди. Убрать credential checks из config; сохранить остальные safety gates.
-- [ ] 4.7 Проверить обе последовательности auth/recovery, сломанный journal при AUTHORIZED, повтор активации без дублей, сеть и shutdown; выполнить unit/integration checks и отдельное ревью работоспособного набора. При необходимости разбить интеграцию на согласуемые PR без слияния неработоспособных промежуточных версий.
+- [x] 4.1 Схема [root-integration-review.md](root-integration-review.md) принята к Apply пользователем; интеграция реализована в draft PR #55.
+- [x] 4.2 Подключить настоящий verifier/socket/service и обязательный REST source без env fallback. AUTHORIZED независим от journal; временные сетевые ошибки не удаляют пару.
+- [x] 4.3 Только здесь минимально разделить существующую startup-последовательность: сохранить результат локального восстановления, отложить bindings до авторизации, не повторять replay/cleanup при повторной биржевой проверке. Не менять correlation subsystem и формат данных.
+- [x] 4.4 Однократно создавать реальные WS/REST observers после авторизации. Сохранить их reconnect/worker; backfill не блокирует торговлю, наблюдение зависит только от необходимой локальной готовности.
+- [x] 4.5 Обеспечить shutdown до ожидания HTTP close: запрет нового admission/authorize, закрытие канала, cancellation и защита от поздних результатов; сохранить drain допущенных операций.
+- [x] 4.6 Согласовать admission/routes/guards/health: account зависит от авторизации, торговые циклы дополнительно от существующего recovery/bindings; 503 только до исполнения, без очереди. Убрать credential checks из config; сохранить остальные safety gates.
+- [ ] 4.7 Проверки auth/recovery, сломанного journal при AUTHORIZED, активации без дублей, сети, shutdown и unit/integration выполнены. Осталась внешняя приёмка совместимого набора PR #55/#105/#47. При необходимости разбить интеграцию на согласуемые PR без слияния неработоспособных промежуточных версий.
 
 ## Завершение — отдельное разрешение
 
@@ -33,3 +33,12 @@
 - [ ] 5.3 Только после разрешения выполнить полный Demo smoke и сверку заявок/позиций. Mainnet запрещён.
 
 Шаг 3 реализован в draft [PR #54](https://github.com/roman-vyl/abi_executor_bot/pull/54), коммит 6127546, поверх PR #52. npm test: 1123 pass, 0 fail (включает запуск 7 Python unit tests); typecheck/build успешны. Настоящие Bybit-запросы не выполнялись. Production root, journal, observers, routes, guards и Docker не менялись. Приёмка PR #54 ожидается. Задачи раздела 4 не разрешены к Apply.
+
+## Результат разрешённой интеграции
+
+- ABI [draft PR #55](https://github.com/roman-vyl/abi_executor_bot/pull/55), 5054a14, поверх #54 и с REST из #53. 1140 npm tests, typecheck, build и OpenAPI validation успешны. Код src/correlation, lifecycleEvents.ts и positionModeAssuranceSeams.ts не менялся.
+- bbb_stack [draft PR #105](https://github.com/roman-vyl/bbb_stack/pull/105), ветка codex/abi-late-authorization-deploy. Обычный workflow сохранён, один прежний abi с прежними данными/адресом; env_file с ключами удалён, health использует liveness, tmpfs и swap limits настроены. Четыре Python checks и Compose config validation прошли. Локальная команда находит контейнер по labels без зависимости от runner env или image manifest. Ранее предложенный интерактивный deploy #103 не используется.
+- Runtime [draft PR #47](https://github.com/roman-vyl/strategy_runtime/pull/47), 8593d43, поверх #46: только тесты актуального OpenAPI 503, без production-изменений. 330 contract tests и Ruff check/format успешны.
+- Изолированный Compose/production image стартовал healthy в LOCKED при risk sizing. Проверены tmpfs, directory/socket modes 0700/0600, memory.swap.max=0, отсутствие credential env. Тестовый проект удалён.
+- Docker + настоящий age на публичной dummy-паре и dummy passphrase: неверный пароль оставляет LOCKED; правильный пароль → stdin/socket → реальный код HMAC/verifier → AUTHORIZED → Trading READY без смены container ID; restart → LOCKED. Подменялся только ответ Bybit через test-only preload, отсутствующий в production image/config. Это не реальная проверка Demo-аккаунта. test/tools/smoke_authorization_docker.py воспроизводит сценарий; контейнер удаляется.
+- Действующий Demo и его image pins не менялись, merge/deploy и реальных Bybit-запросов не было. Перед переключением требуются внешняя приёмка, согласованные ABI/Runtime images, trusted Demo UID и сверка необходимых несекретных настроек старого env_file оператором. Задача 5.3 (реальный Demo smoke) не выполнена и без отдельного разрешения не выполняется. Mainnet запрещён.

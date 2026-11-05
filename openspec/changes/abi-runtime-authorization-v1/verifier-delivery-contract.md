@@ -1,6 +1,6 @@
 # Пункт 3.1 — контракт verifier и доставки credentials
 
-Статус: пользователь разрешил Apply шага 3. Реализация опубликована в draft PR #54 и ожидает приёмки. Production composition root и correlation journal не меняются; новых подготовительных этапов журнала нет.
+Статус: пользователь разрешил Apply шага 3. Реализация опубликована в draft PR #54 и ожидает приёмки. Сам verifier не зависит от production composition root и correlation journal; новых подготовительных этапов журнала нет. Последующая разрешённая интеграция реализована в draft PR #55 без изменения correlation subsystem.
 
 ## 1. Минимальный интерфейс
 

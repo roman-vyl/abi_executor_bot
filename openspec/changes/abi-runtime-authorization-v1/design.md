@@ -18,7 +18,7 @@ REST использует Pick<AuthorizationService, "credentials">; одна п
 
 ### Следующий шаг: verifier и защищённая доставка
 
-Конкретный контракт на ревью: [verifier-delivery-contract.md](verifier-delivery-contract.md). Пользователь разрешил Apply независимого шага 3; draft PR #54 ожидает приёмки. Production-интеграция ещё не разрешена.
+Конкретный контракт на ревью: [verifier-delivery-contract.md](verifier-delivery-contract.md). Пользователь разрешил Apply независимого шага 3; draft PR #54 ожидает приёмки. Production-интеграция отдельно разрешена к Apply и опубликована в draft PR #55, приёмка ожидается.
 
 Verifier — отдельная ограниченная проверка кандидата, не режим рабочего REST-адаптера. Только фиксированные операции чтения, необходимые для проверки credentials, expected UID и требуемых прав; произвольные пути, order writes и публичный обход с accepted исключены. Конкретные Bybit endpoints и классификация ответов сверяются с официальным контрактом и выносятся на отдельное ревью перед Apply этого шага.
 
