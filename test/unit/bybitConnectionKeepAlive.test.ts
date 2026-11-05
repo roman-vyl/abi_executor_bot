@@ -12,7 +12,7 @@ import { makeTestConfig } from "../fixtures/config.js";
 const OK_BODY = { retCode: 0, retMsg: "OK", result: {} };
 
 function keyedConfig(overrides: Parameters<typeof makeTestConfig>[0] = {}) {
-  return makeTestConfig({ bybitApiKey: "key", bybitApiSecret: "secret", bybitReadTimeoutMs: 500, ...overrides });
+  return makeTestConfig({ bybitReadTimeoutMs: 500, ...overrides });
 }
 
 async function authorizedAdapter(config: ReturnType<typeof keyedConfig>, options: { baseUrl?: string } = {}) {

@@ -1,3 +1,4 @@
+import type { CredentialsSource } from "../exchange/bybitAdapter.js";
 import type { ExchangeFactsStoreState } from "../app/exchangeFactsStartup.js";
 import type { AbiConfig } from "../config/config.js";
 import {
@@ -18,17 +19,17 @@ export type ExchangeStreamHandle = {
 export function createExchangeStreamRecorder(
   config: AbiConfig,
   exchangeFacts: ExchangeFactsStoreState,
+  credentialsSource: CredentialsSource,
 ): ExchangeStreamHandle {
   if (exchangeFacts.status !== "enabled") {
     return disabledHandle("store_not_enabled");
   }
-  if (config.bybitApiKey === "" || config.bybitApiSecret === "") {
+  if (credentialsSource.credentials() === undefined) {
     return disabledHandle("no_api_key");
   }
   return new ExchangeStreamRecorder({
     url: PRIVATE_STREAM_URLS[config.bybitEnvironment],
-    apiKey: config.bybitApiKey,
-    apiSecret: config.bybitApiSecret,
+    credentialsSource,
     sink: exchangeFacts.store,
   });
 }

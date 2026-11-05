@@ -49,7 +49,7 @@ async function adapter(readTimeoutMs = 50): Promise<RestBybitAdapter> {
   const credentialsSource = new AuthorizationService(async () => "accepted");
   await credentialsSource.authorize({ apiKey: "key", apiSecret: "secret" });
   return new RestBybitAdapter(
-    makeTestConfig({ bybitApiKey: "key", bybitApiSecret: "secret", bybitReadTimeoutMs: readTimeoutMs }),
+    makeTestConfig({ bybitReadTimeoutMs: readTimeoutMs }),
     { credentialsSource },
   );
 }

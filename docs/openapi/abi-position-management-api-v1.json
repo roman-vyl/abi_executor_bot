@@ -135,6 +135,22 @@
                 "example": { "error": { "code": "internal_error", "message": "internal error" } }
               }
             }
+          },
+          "503": {
+            "description": "Execution was rejected before admission; no trading side effects or queued command.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionNotReady"
+                },
+                "example": {
+                  "error": {
+                    "code": "execution_not_ready",
+                    "message": "execution is not ready"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -266,6 +282,22 @@
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/InternalError" },
                 "example": { "error": { "code": "internal_error", "message": "internal error" } }
+              }
+            }
+          },
+          "503": {
+            "description": "Execution was rejected before admission; no trading side effects or queued command.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionNotReady"
+                },
+                "example": {
+                  "error": {
+                    "code": "execution_not_ready",
+                    "message": "execution is not ready"
+                  }
+                }
               }
             }
           }
@@ -412,6 +444,22 @@
                   "error": {
                     "code": "internal_error",
                     "message": "internal error"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Execution was rejected before admission; no trading side effects or queued command.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionNotReady"
+                },
+                "example": {
+                  "error": {
+                    "code": "execution_not_ready",
+                    "message": "execution is not ready"
                   }
                 }
               }
@@ -747,6 +795,33 @@
             "properties": {
               "code": { "const": "internal_error" },
               "message": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "ExecutionNotReady": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "execution_not_ready",
+                "type": "string"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }

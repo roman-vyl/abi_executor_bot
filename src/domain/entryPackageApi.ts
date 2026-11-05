@@ -67,7 +67,8 @@ export type EntryPackageErrorCode =
   | "malformed_json"
   | "unsupported_media_type"
   | "validation_failed"
-  | "internal_error";
+  | "internal_error"
+  | "execution_not_ready";
 
 export type EntryPackageErrorResponse = {
   error: {
@@ -101,7 +102,7 @@ export type EntryPackageFailureDiagnostic = {
 };
 
 export type EntryPackageHttpResult = {
-  statusCode: 200 | 400 | 415 | 422 | 500;
+  statusCode: 200 | 400 | 415 | 422 | 500 | 503;
   body: EntryPackageResponseBody;
   diagnostic?: EntryPackageFailureDiagnostic;
 };

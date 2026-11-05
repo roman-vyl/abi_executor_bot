@@ -90,7 +90,8 @@ export type PositionManagementErrorCode =
   | "position_not_open"
   | "close_execution_incomplete"
   | "entry_not_filled"
-  | "internal_error";
+  | "internal_error"
+  | "execution_not_ready";
 
 export type PositionManagementErrorResponse = {
   error: {
@@ -107,7 +108,7 @@ export type PositionManagementResponseBody =
   | PositionManagementErrorResponse;
 
 export type PositionManagementHttpResult = {
-  statusCode: 200 | 400 | 415 | 422 | 500;
+  statusCode: 200 | 400 | 415 | 422 | 500 | 503;
   body: PositionManagementResponseBody;
 };
 

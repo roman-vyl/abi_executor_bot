@@ -16,7 +16,8 @@ export function installShutdownHandlers(input: {
   server: Pick<Server, "close">;
   // Releases resources after the HTTP server has closed (e.g. the exchange
   // facts store); runs before exit on both outcomes.
-  onServerClosed?: () => void;
+  onShutdownStarted?: () => void;
+  onServerClosed?: () => void | Promise<void>;
   processLike?: ProcessLike;
   emit?: EmitLike;
 }): void {
@@ -31,24 +32,22 @@ export function installShutdownHandlers(input: {
 
     shuttingDown = true;
     emit("info", "shutdown_started", { signal });
+    input.onShutdownStarted?.();
     input.server.close((error?: Error) => {
-      try {
-        input.onServerClosed?.();
-      } catch (closeError) {
-        emit("error", "shutdown_failed", {
-          signal,
-          reason: closeError instanceof Error ? closeError.message : String(closeError),
-        });
-        processLike.exit(1);
-      }
-
-      if (error) {
-        emit("error", "shutdown_failed", { signal, reason: error.message });
-        processLike.exit(1);
-      }
-
-      emit("info", "shutdown_completed", { signal });
-      processLike.exit(0);
+      const fail = (closeError: unknown): never => {
+        emit("error", "shutdown_failed", { signal,
+          reason: closeError instanceof Error ? closeError.message : String(closeError) });
+        return processLike.exit(1);
+      };
+      const finish = () => {
+        if (error) return fail(error);
+        emit("info", "shutdown_completed", { signal });
+        return processLike.exit(0);
+      };
+      let cleanup: void | Promise<void>;
+      try { cleanup = input.onServerClosed?.(); } catch (closeError) { fail(closeError); return; }
+      if (cleanup && typeof cleanup.then === "function") void cleanup.then(finish, fail);
+      else finish();
     });
   };
 

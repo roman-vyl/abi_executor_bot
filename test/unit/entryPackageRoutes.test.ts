@@ -99,11 +99,11 @@ test("application/json and UTF-8 charset are supported", async () => {
     const response = await invokeRoute(makePackagePayload(), {
       "content-type": contentType,
     });
-    assert.equal(response.status(), 500);
+    assert.equal(response.status(), 503);
     assert.deepEqual(response.body(), {
       error: {
-        code: "internal_error",
-        message: "internal error",
+        code: "execution_not_ready",
+        message: "execution is not ready",
       },
     });
   }
@@ -176,11 +176,11 @@ test("valid absence reaches safe unconfigured boundary without fabricated succes
     risk_multiplier: "1",
   });
 
-  assert.equal(response.status(), 500);
+  assert.equal(response.status(), 503);
   assert.deepEqual(response.body(), {
     error: {
-      code: "internal_error",
-      message: "internal error",
+      code: "execution_not_ready",
+      message: "execution is not ready",
     },
   });
 });
@@ -422,3 +422,17 @@ function makeResponse(): {
     body: () => JSON.parse(responseBody) as Record<string, any>,
   };
 }
+
+test("admitted command keeps its existing result when readiness changes during execution", async () => {
+  let ready = true;
+  let checked = 0;
+  let calls = 0;
+  const request = makeRequest("PUT", route(), JSON.stringify({ ticker: "BTCUSDT.P", desired_entry: null, risk_multiplier: "1" }), { "content-type": "application/json" });
+  const response = makeResponse();
+  await handleEntryPackageRoutes({ request, response: response.response,
+    isReady: () => { checked++; return ready; },
+    applicationService: { async apply() { calls++; ready = false; await Promise.resolve(); return internalErrorResult(); } },
+  });
+  assert.equal(checked, 1); assert.equal(calls, 1);
+  assert.equal(response.status(), 500); assert.equal(response.body().error.code, "internal_error");
+});

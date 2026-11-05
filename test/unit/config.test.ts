@@ -126,14 +126,17 @@ test("position sizing mode fails closed on an unknown value", () => {
   assert.throws(() => loadConfig({ ABI_POSITION_SIZING_MODE: "" }), /ABI_POSITION_SIZING_MODE/);
 });
 
-test("risk sizing requires API credentials, also in dry-run", () => {
+test("risk sizing starts without credentials; env keys are ignored", () => {
   for (const env of [
     { ABI_POSITION_SIZING_MODE: "risk" },
     { ABI_POSITION_SIZING_MODE: "risk", BYBIT_API_KEY: "key" },
     { ABI_POSITION_SIZING_MODE: "risk", BYBIT_API_SECRET: "secret" },
     { ABI_POSITION_SIZING_MODE: "risk", ABI_DRY_RUN: "true", BYBIT_API_KEY: " " , BYBIT_API_SECRET: "secret" },
   ]) {
-    assert.throws(() => loadConfig(env), /requires BYBIT_API_KEY and BYBIT_API_SECRET/);
+    const config = loadConfig(env);
+    assert.equal(config.positionSizingMode, "risk");
+    assert.equal("bybitApiKey" in config, false);
+    assert.equal("bybitApiSecret" in config, false);
   }
   const dryRun = loadConfig({
     ABI_POSITION_SIZING_MODE: "risk",

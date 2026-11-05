@@ -1,3 +1,4 @@
+import type { CredentialsSource } from "../exchange/bybitAdapter.js";
 import { createHmac } from "node:crypto";
 
 import WebSocket from "ws";
@@ -81,8 +82,7 @@ type EmitLike = (level: EventLevel, event: string, fields?: Record<string, unkno
 
 export type ExchangeStreamRecorderOptions = {
   url: string;
-  apiKey: string;
-  apiSecret: string;
+  credentialsSource: CredentialsSource;
   sink: StreamBatchSink;
   emit?: EmitLike;
   now?: () => number;
@@ -266,9 +266,11 @@ export class ExchangeStreamRecorder {
     }
     this.lastFrameAtMs = this.now();
     this.log("connected", null);
+    const credentials = this.options.credentialsSource.credentials();
+    if (!credentials) { socket.terminate(); return; }
     const expires = this.now() + AUTH_EXPIRES_IN_MS;
-    const signature = createHmac("sha256", this.options.apiSecret).update(`GET/realtime${expires}`).digest("hex");
-    socket.send(JSON.stringify({ op: "auth", args: [this.options.apiKey, expires, signature] }));
+    const signature = createHmac("sha256", credentials.apiSecret).update(`GET/realtime${expires}`).digest("hex");
+    socket.send(JSON.stringify({ op: "auth", args: [credentials.apiKey, expires, signature] }));
     this.pingTimer = setInterval(() => this.safely(() => this.onPingTick(socket)), this.pingIntervalMs);
     this.pingTimer.unref?.();
   }

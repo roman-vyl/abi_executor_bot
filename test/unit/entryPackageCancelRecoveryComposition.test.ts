@@ -37,8 +37,6 @@ test("a lost EntryPackageAbsent response after a positively confirmed cancel is 
       config: makeTestConfig({
         dryRun: false,
         liveTradingEnabled: true,
-        bybitApiKey: "test-key",
-        bybitApiSecret: "test-secret",
         bybitEnvironment: "testnet",
       }),
       bybit: applyBybit,

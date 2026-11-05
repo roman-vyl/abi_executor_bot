@@ -9,6 +9,7 @@ import { decodeControlFrame, FRAME_LIMIT } from "./credentialProtocol.js";
 export async function createAuthorizationSocket(input: {
   path: string;
   policy: VerificationPolicy;
+  onAuthorized?: () => void;
 }, testOptions: { fetch?: typeof fetch; verificationTimeoutMs?: number; frameTimeoutMs?: number } = {}) {
   const verifier = createBybitCredentialsVerifier(input.policy, { fetch: testOptions.fetch, timeoutMs: testOptions.verificationTimeoutMs });
   const authorization = new AuthorizationService(verifier.verify);
@@ -59,6 +60,10 @@ export async function createAuthorizationSocket(input: {
           const result = await (request.op === "retry" ? authorization.retry() : authorization.authorize({
             apiKey: request.credentials[0], apiSecret: request.credentials[1],
           }));
+          if (!stopping && authorization.credentials() !== undefined) {
+            // Authorization is already committed; an activation notification cannot rewrite its result.
+            try { input.onAuthorized?.(); } catch { /* Root reports activation failures independently. */ }
+          }
           if (!stopping) answer(socket, { result, ...(result === "temporary_failure" ? { reason: verifier.reason() } : {}) });
         } catch {
           if (!stopping) answer(socket, { result: "protocol_error" });

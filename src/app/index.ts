@@ -14,4 +14,7 @@ const exchangeFacts = openExchangeFactsStore(config);
 
 emitEvent("info", "service_starting", serviceStartingFields(config, exchangeFacts));
 
-startServer(config, exchangeFacts);
+void startServer(config, exchangeFacts).catch(() => {
+  emitEvent("error", "startup_failed", { reason: "ABI startup failed; check authorization policy and socket configuration" });
+  process.exitCode = 1;
+});

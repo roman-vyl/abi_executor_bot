@@ -80,7 +80,7 @@ test("protection operation owns transport shape and the documented error codes",
   const schemas = document.components.schemas;
 
   assert.equal(document.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500"]);
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500", "503"]);
 
   for (const parameter of operation.parameters) {
     assert.equal(parameter.schema.minLength, 1);
@@ -111,7 +111,7 @@ test("close operation requires exposure_fraction and owns the documented error c
   });
   assert.deepEqual(schemas.CloseRequest.required, ["exposure_fraction"]);
   assert.equal(schemas.CloseRequest.additionalProperties, false);
-  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500"]);
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500", "503"]);
   assert.equal(schemas.TradeCycleClosedResponse.additionalProperties, false);
   assert.equal(schemas.TradeCycleClosedResponse.properties.status.const, "trade_cycle_closed");
 
@@ -153,7 +153,7 @@ test("entry-remainder cancel OpenAPI examples and error codes conform to the run
     );
   }
 
-  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500"]);
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "415", "422", "500", "503"]);
   assert.deepEqual(
     schemas.EntryRemainderCancelBusinessError.oneOf.map((entry: { $ref: string }) => entry.$ref),
     [

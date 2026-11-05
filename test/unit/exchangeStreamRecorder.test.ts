@@ -137,8 +137,7 @@ function recorder(
   emitted: Emitted[] = [],
 ): ExchangeStreamRecorder {
   const instance = new ExchangeStreamRecorder({
-    apiKey: "test-key",
-    apiSecret: "test-secret",
+    credentialsSource: { credentials: () => ({ apiKey: "test-key", apiSecret: "test-secret" }) },
     emit: (level, event, fields) => emitted.push({ level, event, fields }),
     ...FAST,
     ...options,
@@ -443,9 +442,9 @@ test("stop closes the socket and writes what is buffered", async (t) => {
 });
 
 test("the recorder is not created without an enabled store or without a key", () => {
-  const disabled = createExchangeStreamRecorder(makeTestConfig({ bybitApiKey: "k", bybitApiSecret: "s" }), {
+  const disabled = createExchangeStreamRecorder(makeTestConfig({}), {
     status: "disabled",
-  });
+  }, { credentials: () => undefined });
   assert.deepEqual(disabled.status(), {
     state: "disabled",
     reason: "store_not_enabled",
@@ -458,16 +457,16 @@ test("the recorder is not created without an enabled store or without a key", ()
     duplicateRecords: 0,
   });
 
-  const unavailable = createExchangeStreamRecorder(makeTestConfig({ bybitApiKey: "k", bybitApiSecret: "s" }), {
+  const unavailable = createExchangeStreamRecorder(makeTestConfig({}), {
     status: "unavailable",
     reason: "open_failed",
-  });
+  }, { credentials: () => undefined });
   assert.equal(unavailable.status().reason, "store_not_enabled");
 
-  const noKey = createExchangeStreamRecorder(makeTestConfig({ bybitApiKey: "", bybitApiSecret: "" }), {
+  const noKey = createExchangeStreamRecorder(makeTestConfig({}), {
     status: "enabled",
     store: {} as ExchangeFactsStore,
-  });
+  }, { credentials: () => undefined });
   assert.equal(noKey.status().reason, "no_api_key");
   noKey.start();
   noKey.stop();

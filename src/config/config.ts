@@ -13,8 +13,8 @@ export type AbiConfig = {
   bybitHeartbeatIntervalMs: number;
   bybitEnvironment: "demo" | "testnet" | "mainnet";
   bybitTestnet: boolean;
-  bybitApiKey: string;
-  bybitApiSecret: string;
+  expectedBybitUid: string;
+  authorizationSocketPath: string;
   bybitAccountType: string;
   bybitRecvWindow: string;
   bybitCategory: string;
@@ -45,15 +45,10 @@ const CONFIG_FILE_KEYS = new Set(["live_entry_mode", "touch_trigger_entry_order_
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
   const bybitEnvironment = readBybitEnvironment(env);
-  const bybitApiKey = env.BYBIT_API_KEY?.trim() ?? "";
-  const bybitApiSecret = env.BYBIT_API_SECRET?.trim() ?? "";
   const positionSizingMode = readPositionSizingMode(env.ABI_POSITION_SIZING_MODE);
   const liveEntryConfig = readLiveEntryConfigFile(env.ABI_CONFIG_PATH);
-  // Risk sizing reads the wallet balance on every entry, so it cannot run
-  // without credentials — also in dry-run, where those reads still happen.
-  if (positionSizingMode === "risk" && (bybitApiKey === "" || bybitApiSecret === "")) {
-    throw new Error("ABI_POSITION_SIZING_MODE=risk requires BYBIT_API_KEY and BYBIT_API_SECRET");
-  }
+  const expectedBybitUid = env.ABI_EXPECTED_BYBIT_UID?.trim() ?? "";
+  if (expectedBybitUid !== "" && !/^[1-9][0-9]*$/.test(expectedBybitUid)) throw new Error("Invalid ABI_EXPECTED_BYBIT_UID");
 
   return {
     host: readString("ABI_HOST", env.ABI_HOST, "127.0.0.1"),
@@ -88,8 +83,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AbiConfig {
     ),
     bybitEnvironment,
     bybitTestnet: bybitEnvironment === "testnet",
-    bybitApiKey,
-    bybitApiSecret,
+    expectedBybitUid,
+    authorizationSocketPath: env.ABI_AUTHORIZATION_SOCKET_PATH ?? "/run/abi-authorization/control.sock",
     bybitAccountType: readString("BYBIT_ACCOUNT_TYPE", env.BYBIT_ACCOUNT_TYPE, "UNIFIED", (value) => value.toUpperCase()),
     bybitRecvWindow: readPositiveNumberString("BYBIT_RECV_WINDOW", env.BYBIT_RECV_WINDOW, "5000"),
     bybitCategory: readString("BYBIT_CATEGORY", env.BYBIT_CATEGORY, "linear", (value) => value.toLowerCase()),

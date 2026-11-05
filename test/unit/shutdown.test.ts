@@ -153,3 +153,16 @@ test("the onServerClosed hook runs after the server closed and before exit", () 
   assert.throws(() => signalHandlers.get("SIGTERM")!(), ExitCalled);
   assert.deepEqual(order, ["server_closed", "store_closed", "exit:0"]);
 });
+
+test("shutdown-start hook blocks new work before HTTP drain begins", () => {
+  const handlers = new Map<string, () => void>();
+  const order: string[] = [];
+  installShutdownHandlers({
+    server: { close() { order.push("http_drain"); } },
+    onShutdownStarted: () => { order.push("stop_authorization_and_admission"); },
+    processLike: { once(event, listener) { handlers.set(event, listener); return process; }, exit(): never { throw new ExitCalled(0); } },
+    emit() {},
+  });
+  handlers.get("SIGTERM")!();
+  assert.deepEqual(order, ["stop_authorization_and_admission", "http_drain"]);
+});

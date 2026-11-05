@@ -3,9 +3,16 @@ services:
     build:
       context: .
     image: abi:local
+    mem_limit: ${ABI_MEMORY_LIMIT:-1g}
+    memswap_limit: ${ABI_MEMORY_LIMIT:-1g}
+    ulimits:
+      core: 0
+    tmpfs:
+      - /run/abi-authorization:rw,noexec,nosuid,size=64k,mode=0700,uid=1000,gid=1000
     ports:
       - "127.0.0.1:8787:8787"
     environment:
+      ABI_EXPECTED_BYBIT_UID: ${ABI_EXPECTED_BYBIT_UID:?Set the trusted target account UID}
       ABI_HOST: "0.0.0.0"
       ABI_PORT: "8787"
       ABI_DRY_RUN: "true"
@@ -25,7 +32,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:8787/health').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:8787/health/live').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s

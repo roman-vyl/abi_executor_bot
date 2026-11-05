@@ -589,10 +589,11 @@ test("the reconciler waits for the correlation replay and does not start without
 
   const deps = { reader: history, listRecords: () => [], isCorrelationReady: () => true };
   assert.deepEqual(createExchangeRestReconciler(makeTestConfig(), { status: "disabled" }, deps).status().reason, "store_not_enabled");
-  const noKey = makeTestConfig({ bybitApiKey: "", bybitApiSecret: "" });
+  const noKey = makeTestConfig({});
   const handle = createExchangeRestReconciler(noKey, { status: "enabled", store }, deps);
-  assert.equal(handle.status().state, "disabled");
-  assert.equal(handle.status().reason, "no_api_key");
+  // Root creates this observer after authorization; factory has no credential state.
+  assert.equal(handle.status().state, "backfilling");
+  handle.stop();
 });
 
 test("after stop no request is sent and no answer is written", async (t) => {

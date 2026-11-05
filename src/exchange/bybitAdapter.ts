@@ -84,6 +84,7 @@ export type PlaceMarketOrderInput = {
 };
 
 export interface BybitAdapter {
+  isAuthorized(): boolean;
   getServerTime(): Promise<unknown>;
   getWalletBalance(input?: GetWalletBalanceInput): Promise<unknown>;
   getAccountInfo(): Promise<unknown>;
@@ -181,8 +182,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   };
 
   // `baseUrl` is a test seam only; production derives it from BYBIT_ENV.
-  constructor(config: BybitAdapterConfig, options: { baseUrl?: string; credentialsSource?: CredentialsSource } = {}) {
-    // Temporary optional dependency for the stacked integration PR; never fall back to config credentials.
+  constructor(config: BybitAdapterConfig, options: { baseUrl?: string; credentialsSource: CredentialsSource }) {
     this.credentialsSource = options.credentialsSource;
     this.config = {
       bybitEnvironment: config.bybitEnvironment, bybitAccountType: config.bybitAccountType,
@@ -448,6 +448,8 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
     return stub("placeMarketOrder", input);
   }
 
+  isAuthorized(): boolean { return this.credentialsSource?.credentials() !== undefined; }
+
   private requireCredentials(): Credentials {
     const pair = this.credentialsSource?.credentials();
     if (pair === undefined) throw new Error("Bybit authorization is required");
@@ -572,6 +574,7 @@ function getBybitBaseUrl(config: Pick<AbiConfig, "bybitEnvironment">): string {
 }
 
 export class StubBybitAdapter implements BybitAdapter {
+  isAuthorized(): boolean { return false; }
   async getServerTime(): Promise<unknown> {
     return stub("getServerTime");
   }

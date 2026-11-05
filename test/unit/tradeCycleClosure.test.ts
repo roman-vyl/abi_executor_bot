@@ -762,8 +762,6 @@ async function withServices(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const lookup = new OpenPositionResolutionService({ correlationRepository: repo, bybit, mutex });

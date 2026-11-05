@@ -372,8 +372,6 @@ async function withService(
     const config = makeTestConfig({
       dryRun: false,
       liveTradingEnabled: true,
-      bybitApiKey: "test-key",
-      bybitApiSecret: "test-secret",
       bybitEnvironment: "testnet",
     });
     const bybit = new FakeBybitAdapter();

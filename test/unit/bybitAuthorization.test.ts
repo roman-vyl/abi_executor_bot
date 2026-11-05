@@ -16,8 +16,8 @@ for (const state of ["LOCKED", "VERIFYING", "RETRY_PENDING", "rejected", "missin
       : state === "rejected" ? "rejected" : "temporary_failure");
     if (state !== "LOCKED" && state !== "missing") void auth.authorize(pair);
     await Promise.resolve();
-    const adapter = new RestBybitAdapter(makeTestConfig({ bybitApiKey: "decoy", bybitApiSecret: "decoy" }),
-      state === "missing" ? {} : { credentialsSource: auth });
+    const adapter = new RestBybitAdapter(makeTestConfig({}),
+      state === "missing" ? {} as never : { credentialsSource: auth });
     let calls = 0;
     const original = globalThis.fetch;
     globalThis.fetch = async () => { calls++; return response(); };
@@ -31,7 +31,7 @@ for (const state of ["LOCKED", "VERIFYING", "RETRY_PENDING", "rejected", "missin
 
 test("the same adapter signs GET and POST only after authorization, using the confirmed pair", async () => {
   const auth = new AuthorizationService(async () => "accepted");
-  const adapter = new RestBybitAdapter(makeTestConfig({ bybitApiKey: "decoy", bybitApiSecret: "decoy" }), { credentialsSource: auth });
+  const adapter = new RestBybitAdapter(makeTestConfig({}), { credentialsSource: auth });
   const original = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async (url, init) => {
@@ -77,7 +77,7 @@ test("a logical GET snapshots credentials once across its retry", async () => {
 });
 
 test("all public market reads work without credentials and send no authentication headers", async () => {
-  const adapter = new RestBybitAdapter(makeTestConfig());
+  const adapter = new RestBybitAdapter(makeTestConfig(), { credentialsSource: { credentials: () => undefined } });
   const original = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async (_url, init) => {
