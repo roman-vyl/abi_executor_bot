@@ -9,7 +9,7 @@ ABI SHALL verify current entry orderId/orderLinkId, category, symbol, side, inst
 
 #### Scenario: One complete execution supplies the true timestamp
 - **WHEN** one unique correctly linked Trade execution covers the entire confirmed fill
-- **THEN** its execTime is verified without an execution-list REST request
+- **THEN** its execTime is verified after the unsuccessful execution-list REST capture
 
 #### Scenario: Several partial executions are complete and out of order
 - **WHEN** several matching unique executions arrive out of time order and their exact summed quantities equal confirmed cumExecQty
@@ -21,14 +21,14 @@ ABI SHALL verify current entry orderId/orderLinkId, category, symbol, side, inst
 
 #### Scenario: A missing earlier partial execution
 - **WHEN** the local quantity is less than confirmed cumExecQty
-- **THEN** ABI SHALL NOT accept its minimum timestamp and SHALL use the existing REST fallback
+- **THEN** ABI SHALL NOT accept its minimum timestamp and SHALL retain the original REST failure semantics
 
 #### Scenario: Overcount or wrong owner
 - **WHEN** quantities exceed the proof or an order, symbol, side, role, cycle or generation conflicts
 - **THEN** local evidence SHALL NOT provide first_fill, even if a subset would match
 
 ### Requirement: Local verification is bounded and optional
-ABI SHALL accept no truncated local read as complete. A read reaching its limit, unavailable/disabled store, missing identity/link, malformed evidence or read failure SHALL yield an unavailable local result and the existing REST fallback. ABI SHALL NOT turn SQLite availability into an admission/readiness dependency or alter its schema.
+ABI SHALL accept no truncated local read as complete. A read reaching its limit, unavailable/disabled store, missing identity/link, malformed evidence or read failure SHALL yield an unavailable local result after the already-attempted REST capture. ABI SHALL NOT turn SQLite availability into an admission/readiness dependency or alter its schema.
 
 #### Scenario: Read limit reached despite an apparently sufficient prefix
 - **WHEN** readFactsForOrder returns its full configured limit
@@ -36,10 +36,10 @@ ABI SHALL accept no truncated local read as complete. A read reaching its limit,
 
 #### Scenario: Store unavailable or ambiguous
 - **WHEN** SQLite is disabled, throws or cannot prove identity/completeness
-- **THEN** existing REST capture remains available and successful REST proof is handled as before
+- **THEN** the already-obtained REST failure retains its existing branch-specific semantics
 
 ### Requirement: One verifier is used without changing cycle truth or persistence rules
-ABI SHALL reuse the same local proof rules for open-position and both recovery capture branches, after their existing truth determination and before REST capture. Saved first_fill SHALL remain immutable. Existing mutex, generation continuity, closure priority and persistence-error semantics SHALL remain unchanged. No execution fact alone SHALL reopen a closed cycle or authorize an exchange write.
+ABI SHALL reuse the same local proof rules for open-position and both recovery capture branches, after their existing truth determination and only after the existing REST capture cannot establish a timestamp. Saved first_fill SHALL remain immutable. Existing mutex, generation continuity, closure priority and persistence-error semantics SHALL remain unchanged. No execution fact alone SHALL reopen a closed cycle or authorize an exchange write.
 
 #### Scenario: Cycle closes before lookup
 - **WHEN** existing lookup proves closure despite stored entry executions
@@ -52,3 +52,21 @@ ABI SHALL reuse the same local proof rules for open-position and both recovery c
 #### Scenario: No local proof and empty REST
 - **WHEN** neither source establishes a usable time
 - **THEN** existing branch-specific failure/best-effort behavior remains unchanged, without a fabricated timestamp
+
+### Requirement: Successful REST capture never reads SQLite
+ABI SHALL use saved first_fill, otherwise the existing REST capture, and only on its failure attempt verified local facts. Successful REST capture SHALL NOT perform any SQLite fact or link read. This source order SHALL NOT bypass initial exchange-state or closure checks and SHALL NOT add new exchange writes or a second REST capture after the local attempt.
+
+#### Scenario: Saved timestamp or successful REST
+- **WHEN** a timestamp is already saved or the initial REST capture finds it
+- **THEN** ABI SHALL return through its existing path without any SQLite verification read
+
+#### Scenario: REST unavailable and SQLite cannot prove a value
+- **WHEN** the initial REST capture fails and the bounded SQLite attempt is unavailable
+- **THEN** ABI preserves the original branch-specific failure/best-effort behavior without looping through REST again
+
+### Requirement: Synchronous-read latency is reviewed before deployment
+Before deploying this change, the team SHALL measure address-scoped bounded reads and verifier latency on representative working-volume data under concurrent WS batch writes, on equivalent Mac Docker Desktop storage. The report SHALL include sample counts, p50/p95/p99/max read durations, event-loop lag, WS processing/flush latency, drops, backlog and a no-fallback baseline. Exceptions handling SHALL NOT be represented as a time bound for a synchronous query.
+
+#### Scenario: Functional tests pass but latency is unreviewed
+- **WHEN** functional tests pass but the representative latency and WS-impact measurements are absent or unaccepted
+- **THEN** the change SHALL NOT be deployed until those results are separately reviewed

@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
-### Requirement: Missing recovery first-fill uses the shared verified execution proof before REST
-After existing recovery truth resolution, ABI SHALL reuse a captured first_fill unchanged or use verified-first-fill-evidence before the existing REST capture. Both position_open capture and terminal_after_fill best-effort capture SHALL use identical proof rules. This SHALL NOT change recovery outcome classification, convergence, public responses or write-failure semantics.
+### Requirement: Missing recovery first-fill uses the shared verified execution proof after unsuccessful REST
+After existing recovery truth resolution, ABI SHALL reuse a captured first_fill unchanged or perform the existing REST capture first, using verified-first-fill-evidence only if REST cannot establish a timestamp. Both position_open capture and terminal_after_fill best-effort capture SHALL use identical proof rules. This SHALL NOT change recovery outcome classification, convergence, public responses or write-failure semantics.
 
 #### Scenario: Open recovery has complete local executions while REST history is delayed
 - **WHEN** recovery proves position_open, no first_fill is saved and matching complete executions are locally available
-- **THEN** ABI obtains the true earliest time from that proof and follows existing capture/convergence, without waiting for REST execution history
+- **THEN** ABI obtains the true earliest time from that proof and follows existing capture/convergence, after the unsuccessful REST capture, without waiting for future REST history propagation
 
 #### Scenario: Terminal recovery retains best-effort timestamp capture
 - **WHEN** terminal_after_fill is independently proven but neither local nor REST capture provides a timestamp

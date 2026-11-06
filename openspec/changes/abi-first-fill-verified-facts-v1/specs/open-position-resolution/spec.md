@@ -8,7 +8,7 @@ derived from any field describing an order's current or most-recently-observed s
 trusted to represent the *first* fill once more than one execution has occurred). ABI SHALL NOT introduce,
 read, derive, or depend on any strategy timeframe/interval/grid concept to produce this value. ABI SHALL
 capture this value durably exactly once per trade cycle, the first time this cycle's own evidence proves a
-fill occurred and no value is captured yet, by first verifying a complete local execution set under verified-first-fill-evidence, or otherwise querying every one of this order's own executions through the existing REST path, and
+fill occurred and no value is captured yet, by first querying every one of this order's own executions through the existing REST path, or, if that capture cannot establish a value, verifying a complete local execution set under verified-first-fill-evidence, and
 taking the minimum of their own timestamps — never by inspecting only the first-returned or
 most-recently-observed execution. Once captured, `first_fill_at_ms` SHALL be immutable: no later
 observation, however different, SHALL overwrite an already-captured value.
@@ -35,12 +35,12 @@ observation, however different, SHALL overwrite an already-captured value.
 #### Scenario: A pre-existing durable record without a captured value is backfilled once
 - **WHEN** a durable record already shows a final, nonzero own-cycle fill but has never captured
   `first_fill_at_ms`
-- **THEN** ABI first attempts the verified local proof and, if unavailable, performs the existing fresh REST query of this order's own executions to capture the value, even though
+- **THEN** ABI first performs the existing fresh REST query of this order's own executions and only if it cannot establish a timestamp attempts the verified local proof to capture the value, even though
   the stored fill facts themselves need no refresh
 
 
 ### Requirement: first_fill_at_ms's capture accumulates every page of this order's own executions before computing a value, never assuming their returned order
-When the verified local proof is unavailable and capture uses REST, ABI SHALL retrieve every available page of this cycle's own entry
+When capture uses the initial REST path, ABI SHALL retrieve every available page of this cycle's own entry
 order's own executions before computing the minimum timestamp, following the exchange's own pagination
 cursor to completion, and SHALL NOT assume executions are returned in any particular chronological order.
 ABI SHALL NOT compute or accept a candidate value derived from an incomplete set of pages.
@@ -54,7 +54,7 @@ ABI SHALL NOT compute or accept a candidate value derived from an incomplete set
 #### Scenario: An unbounded or excessive page count fails closed rather than using a partial result
 - **WHEN** this order's own executions span more pages than ABI's bounded pagination allows
 - **THEN** ABI does not compute `first_fill_at_ms` from the pages it did retrieve
-- **AND** ABI returns `internal_error` without a durable write
+- **AND** if the subsequent verified local proof is also unavailable, ABI returns `internal_error` without a durable write
 
 
 ### Requirement: A first-fill capture that finds no executions for an order already proven filled fails closed
