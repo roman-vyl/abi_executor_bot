@@ -4,15 +4,30 @@ Define a bounded, optional verification of already stored executions that proves
 
 ## ADDED Requirements
 
+### Requirement: SQLite proof requires an already terminal entry order
+Before any local fact/link read, ABI SHALL require an authoritative own-order proof of the current entry's terminal exchange status and positive final cumExecQty from the same consistent observation. Only existing supported terminal statuses (Filled or a supported final status with a proven positive fill) qualify. A live PartiallyFilled order, unknown terminality or a correlation lifecycle status alone SHALL NOT qualify. ABI SHALL NOT derive eligibility from SQLite or issue new exchange queries for it. An existing final observation may be reused only under its existing validity rules.
+
+#### Scenario: A later fill replaces a missing earlier fill in a live-order sample
+- **WHEN** a live entry was confirmed at cumExecQty=2, its early execution of 2 is missing locally and a later execution of 2 arrives before fallback
+- **THEN** ABI SHALL reject SQLite eligibility without reading facts/links, even if a local sum would equal 2, and retain the unsuccessful REST capture's existing semantics
+
+#### Scenario: Multiple executions of a terminal entry
+- **WHEN** an entry is already proven Filled or another supported terminal status with positive final cumExecQty
+- **THEN** all identity, unique-quantity completeness and earliest-time checks SHALL still be required before using its stored executions
+
+#### Scenario: Terminal entry cancelled after a partial fill
+- **WHEN** the remaining quantity was cancelled and the existing proof establishes terminal status and positive final executed quantity
+- **THEN** completeness SHALL be tested against that final cumExecQty, not the larger original order quantity
+
 ### Requirement: Local evidence is accepted only with exact identity and complete unique quantity
-ABI SHALL verify current entry orderId/orderLinkId, category, symbol, side, instance, cycle, generation and role using the authoritative own-order proof and matching store link. ABI SHALL reject inconsistent execution rows, deduplicate matching Trade executions by execId, sum their positive quantities with exact decimal arithmetic and require equality with the positive confirmed own-order cumExecQty. Only then SHALL min(valid execTime) be accepted; receipt/write times SHALL NOT be used.
+For an entry eligible under the terminal-order requirement, ABI SHALL verify current entry orderId/orderLinkId, category, symbol, side, instance, cycle, generation and role using the authoritative own-order proof and matching store link. ABI SHALL reject inconsistent execution rows, deduplicate matching Trade executions by execId, sum their positive quantities with exact decimal arithmetic and require equality with the positive confirmed own-order cumExecQty. Only then SHALL min(valid execTime) be accepted; receipt/write times SHALL NOT be used.
 
 #### Scenario: One complete execution supplies the true timestamp
-- **WHEN** one unique correctly linked Trade execution covers the entire confirmed fill
+- **WHEN** a proven terminal entry has one unique correctly linked Trade execution that covers the entire confirmed fill
 - **THEN** its execTime is verified after the unsuccessful execution-list REST capture
 
 #### Scenario: Several partial executions are complete and out of order
-- **WHEN** several matching unique executions arrive out of time order and their exact summed quantities equal confirmed cumExecQty
+- **WHEN** a proven terminal entry has several matching unique executions that arrive out of time order and their exact summed quantities equal confirmed cumExecQty
 - **THEN** ABI verifies their minimum execTime, independent of arrival order
 
 #### Scenario: Duplicate and conflicting execIds
@@ -54,7 +69,7 @@ ABI SHALL reuse the same local proof rules for open-position and both recovery c
 - **THEN** existing branch-specific failure/best-effort behavior remains unchanged, without a fabricated timestamp
 
 ### Requirement: Successful REST capture never reads SQLite
-ABI SHALL use saved first_fill, otherwise the existing REST capture, and only on its failure attempt verified local facts. Successful REST capture SHALL NOT perform any SQLite fact or link read. This source order SHALL NOT bypass initial exchange-state or closure checks and SHALL NOT add new exchange writes or a second REST capture after the local attempt.
+ABI SHALL use saved first_fill, otherwise the existing REST capture, and only on its failure and with terminal-entry eligibility attempt verified local facts. Successful REST capture SHALL NOT perform any SQLite fact or link read. This source order SHALL NOT bypass initial exchange-state or closure checks and SHALL NOT add new exchange writes or a second REST capture after the local attempt.
 
 #### Scenario: Saved timestamp or successful REST
 - **WHEN** a timestamp is already saved or the initial REST capture finds it

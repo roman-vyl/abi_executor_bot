@@ -14,3 +14,11 @@ After existing recovery truth resolution, ABI SHALL reuse a captured first_fill 
 #### Scenario: Local facts do not decide recovery truth
 - **WHEN** local executions exist but existing recovery resolution cannot establish a non-contradictory outcome
 - **THEN** the verifier SHALL NOT convert the unresolved outcome into position_open or terminal_after_fill
+
+
+### Requirement: Local first-fill fallback never uses a live entry cumulative snapshot
+Any SQLite timestamp fallback in this capability SHALL require terminal-entry eligibility under verified-first-fill-evidence before reading local facts or links. It SHALL NOT change existing REST capture for live partial fills or existing branch-specific failure/best-effort semantics.
+
+#### Scenario: REST capture is empty while the entry remains live
+- **WHEN** no timestamp is saved, REST capture cannot establish one and the entry is PartiallyFilled or otherwise not proven terminal
+- **THEN** ABI SHALL NOT read SQLite to capture first_fill and SHALL retain the existing outcome of that branch

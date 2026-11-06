@@ -1,7 +1,7 @@
 ## 1. Общая проверка execution-фактов — только после отдельного Apply
 
-- [ ] 1.1 Добавить один небольшой verifier: identity/role/generation, raw/normalized agreement, execId deduplication, exact sum against authoritative cumExecQty, min(execTime), bounded read with explicit truncation rejection; optional store и безопасные причины unavailable.
-- [ ] 1.2 Покрыть single fill, несколько partial fills вне порядка, одинаковые дубли WS/REST, конфликт execId, отсутствующий ранний fill, превышение суммы, неправильные orderId/orderLinkId/symbol/side/cycle/role/generation, malformed time/qty, missing link/orderId и достижение read limit при видимой достаточной сумме.
+- [ ] 1.1 Добавить один небольшой verifier: terminal exchange status и positive final cumExecQty из одного authoritative proof до любых SQLite reads, identity/role/generation, raw/normalized agreement, execId deduplication, exact sum against authoritative cumExecQty, min(execTime), bounded read with explicit truncation rejection; optional store и безопасные причины unavailable.
+- [ ] 1.2 Покрыть single fill терминального entry, несколько partial fills терминального ордера вне порядка, terminal cancellation после partial fill, одинаковые дубли WS/REST, конфликт execId, отсутствующий ранний fill, превышение суммы, неправильные orderId/orderLinkId/symbol/side/cycle/role/generation, malformed time/qty, missing link/orderId и достижение read limit при видимой достаточной сумме.
 
 ## 2. Подключение в существующие capture paths
 
@@ -12,7 +12,7 @@
 ## 3. Регрессии и приёмка
 
 - [ ] 3.1 Fake integration обоих сервисов: delayed/empty REST executions + complete local proof → прежний успешный контракт; REST-success → ноль SQLite reads; REST-failure + unavailable/incomplete/truncated/conflicting local data → прежняя branch-specific семантика; empty/error REST без local proof → прежняя branch-specific семантика. Проверить отсутствие дополнительных order/position queries и любых новых exchange writes.
-- [ ] 3.2 Проверить closure до lookup и между initial read/locked capture, смену generation, уже сохранённый first_fill, частичный fill с продолжающимся входом и изменившимся cumulative snapshot, существующие ошибки persistence/convergence. Локальный fill не переоткрывает закрытый цикл.
+- [ ] 3.2 Проверить closure до lookup и между initial read/locked capture, смену generation, уже сохранённый first_fill, гонку live PartiallyFilled: confirmed cumExecQty=2, ранний fill 2 отсутствует, поздний fill 2 уже в SQLite — ноль SQLite reads и прежний REST-отказ; неизвестную терминальность и несогласованные status/quantity snapshots, существующие ошибки persistence/convergence. Локальный fill не переоткрывает закрытый цикл.
 - [ ] 3.3 Выполнить npm test, npm run typecheck, npm run build, npm run validate:openapi и strict OpenSpec validation; опубликовать diff и результаты для ревью. Проверить отсутствие изменения HTTP-контрактов, Runtime, Docker, close, схем журналов и Mainnet guard.
 
 Merge/deploy и реальный Demo smoke не входят в этот Apply и требуют отдельного разрешения. Сейчас выполняется только подготовка спека; все implementation tasks остаются открытыми.

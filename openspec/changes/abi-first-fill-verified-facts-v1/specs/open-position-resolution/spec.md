@@ -97,3 +97,12 @@ ABI SHALL NOT use the correlation record's `order_id` captured from the create a
 
 
 The first-fill source SHALL follow verified-first-fill-evidence; locally stored facts SHALL NOT supply response entry identifiers in place of the already-authoritative current own-order proof.
+
+## ADDED Requirements
+
+### Requirement: Local first-fill fallback never uses a live entry cumulative snapshot
+Any SQLite timestamp fallback in this capability SHALL require terminal-entry eligibility under verified-first-fill-evidence before reading local facts or links. It SHALL NOT change existing REST capture for live partial fills or existing branch-specific failure/best-effort semantics.
+
+#### Scenario: REST capture is empty while the entry remains live
+- **WHEN** no timestamp is saved, REST capture cannot establish one and the entry is PartiallyFilled or otherwise not proven terminal
+- **THEN** ABI SHALL NOT read SQLite to capture first_fill and SHALL retain the existing outcome of that branch
