@@ -1,0 +1,278 @@
+{
+  "runtime": "v20.20.2",
+  "arch": "arm64",
+  "snapshotBytes": 1417216,
+  "secondsPerPhase": 20,
+  "requestRate": 20,
+  "wsFramesPerSecond": 20,
+  "executionsPerFrame": 5,
+  "readLimit": 1000,
+  "flushIntervalMs": 1000,
+  "caveat": "First request is connection-cold; host/VM filesystem caches are not evicted. captureMs includes immediate fake REST and is a conservative upper bound on full verifier time, not WAN latency. Synthetic local WS; no WAN latency. No production database opened.",
+  "phases": [
+    {
+      "phase": "rest_success",
+      "firstRequestMs": 0.2325830000000053,
+      "requests": 396,
+      "failures": 0,
+      "readMs": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "linkReadMs": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "factReadMs": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "captureMs": {
+        "samples": 396,
+        "p50": 0.0778,
+        "p95": 0.1329,
+        "p99": 0.2247,
+        "max": 0.5973
+      },
+      "eventLoopMs": {
+        "p50": 1.615871,
+        "p95": 1.728511,
+        "p99": 2.344959,
+        "max": 15.409151
+      },
+      "wsReceiveMs": {
+        "samples": 1980,
+        "p50": 0.5111,
+        "p95": 0.8445,
+        "p99": 1.5403,
+        "max": 2.0912
+      },
+      "wsFlushMs": {
+        "samples": 1980,
+        "p50": 500.27,
+        "p95": 949.5733,
+        "p99": 996.1797,
+        "max": 999.621
+      },
+      "batchWriteMs": {
+        "samples": 21,
+        "p50": 10.0805,
+        "p95": 11.7001,
+        "p99": 13.4058,
+        "max": 13.4058
+      },
+      "sent": 1980,
+      "received": 1980,
+      "dropped": 0,
+      "backlog": 0,
+      "finalDbBytes": 2543616
+    },
+    {
+      "phase": "fallback_small",
+      "firstRequestMs": 0.384542000003421,
+      "requests": 396,
+      "failures": 0,
+      "readMs": {
+        "samples": 794,
+        "p50": 0.1505,
+        "p95": 0.258,
+        "p99": 0.3117,
+        "max": 0.5058
+      },
+      "linkReadMs": {
+        "samples": 397,
+        "p50": 0.1638,
+        "p95": 0.2587,
+        "p99": 0.3166,
+        "max": 0.3582
+      },
+      "factReadMs": {
+        "samples": 397,
+        "p50": 0.1297,
+        "p95": 0.258,
+        "p99": 0.2957,
+        "max": 0.5058
+      },
+      "captureMs": {
+        "samples": 396,
+        "p50": 0.4417,
+        "p95": 0.6965,
+        "p99": 0.9187,
+        "max": 1.0321
+      },
+      "eventLoopMs": {
+        "p50": 1.614847,
+        "p95": 1.686527,
+        "p99": 2.271231,
+        "max": 13.205503
+      },
+      "wsReceiveMs": {
+        "samples": 1980,
+        "p50": 0.5404,
+        "p95": 1.2398,
+        "p99": 1.4401,
+        "max": 1.8229
+      },
+      "wsFlushMs": {
+        "samples": 1980,
+        "p50": 506.6835,
+        "p95": 956.5565,
+        "p99": 1000.4719,
+        "max": 1006.0033
+      },
+      "batchWriteMs": {
+        "samples": 21,
+        "p50": 9.7053,
+        "p95": 11.1112,
+        "p99": 11.3695,
+        "max": 11.3695
+      },
+      "sent": 1980,
+      "received": 1980,
+      "dropped": 0,
+      "backlog": 0,
+      "finalDbBytes": 2551808
+    },
+    {
+      "phase": "fallback_near_limit",
+      "firstRequestMs": 4.352250000003551,
+      "requests": 396,
+      "failures": 0,
+      "readMs": {
+        "samples": 794,
+        "p50": 1.3632,
+        "p95": 7.9227,
+        "p99": 8.845,
+        "max": 9.4064
+      },
+      "linkReadMs": {
+        "samples": 397,
+        "p50": 0.1484,
+        "p95": 0.2721,
+        "p99": 0.3693,
+        "max": 1.3632
+      },
+      "factReadMs": {
+        "samples": 397,
+        "p50": 4.9638,
+        "p95": 8.3341,
+        "p99": 9.2778,
+        "max": 9.4064
+      },
+      "captureMs": {
+        "samples": 396,
+        "p50": 8.511,
+        "p95": 12.2038,
+        "p99": 13.2407,
+        "max": 14.7735
+      },
+      "eventLoopMs": {
+        "p50": 1.612799,
+        "p95": 2.121727,
+        "p99": 11.599871,
+        "max": 16.449535
+      },
+      "wsReceiveMs": {
+        "samples": 1980,
+        "p50": 0.4176,
+        "p95": 10.0461,
+        "p99": 12.1045,
+        "max": 13.2407
+      },
+      "wsFlushMs": {
+        "samples": 1980,
+        "p50": 505.7712,
+        "p95": 953.5732,
+        "p99": 994.1427,
+        "max": 1003.8748
+      },
+      "batchWriteMs": {
+        "samples": 21,
+        "p50": 7.1804,
+        "p95": 10.614,
+        "p99": 11.292,
+        "max": 11.292
+      },
+      "sent": 1980,
+      "received": 1980,
+      "dropped": 0,
+      "backlog": 0,
+      "finalDbBytes": 3301376
+    },
+    {
+      "phase": "fallback_at_limit",
+      "firstRequestMs": 1.911459000002651,
+      "requests": 396,
+      "failures": 0,
+      "readMs": {
+        "samples": 794,
+        "p50": 1.086,
+        "p95": 7.7472,
+        "p99": 8.8537,
+        "max": 10.104
+      },
+      "linkReadMs": {
+        "samples": 397,
+        "p50": 0.1885,
+        "p95": 0.2986,
+        "p99": 0.3675,
+        "max": 1.086
+      },
+      "factReadMs": {
+        "samples": 397,
+        "p50": 6.5321,
+        "p95": 8.2017,
+        "p99": 9.1967,
+        "max": 10.104
+      },
+      "captureMs": {
+        "samples": 396,
+        "p50": 6.8876,
+        "p95": 8.502,
+        "p99": 9.5857,
+        "max": 10.4335
+      },
+      "eventLoopMs": {
+        "p50": 1.615871,
+        "p95": 2.067455,
+        "p99": 8.929279,
+        "max": 13.582335
+      },
+      "wsReceiveMs": {
+        "samples": 1980,
+        "p50": 0.4303,
+        "p95": 7.724,
+        "p99": 8.6287,
+        "max": 10.0241
+      },
+      "wsFlushMs": {
+        "samples": 1980,
+        "p50": 507.4207,
+        "p95": 952.0546,
+        "p99": 992.3753,
+        "max": 1002.1782
+      },
+      "batchWriteMs": {
+        "samples": 21,
+        "p50": 7.4186,
+        "p95": 10.7275,
+        "p99": 11.5574,
+        "max": 11.5574
+      },
+      "sent": 1980,
+      "received": 1980,
+      "dropped": 0,
+      "backlog": 0,
+      "finalDbBytes": 3223552
+    }
+  ]
+}
