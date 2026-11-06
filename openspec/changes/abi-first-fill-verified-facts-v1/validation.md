@@ -32,7 +32,7 @@
 
 `capture` включает немедленный fake REST и является консервативной верхней оценкой затрат полного verifier в этом стенде, не измерением живого HTTP lookup. Отдельно измерены link/facts SELECT. Ошибок ожидаемого результата нет; на лимите ожидается отказ, а не успешное доказательство. Потерь WS и остаточного backlog нет. WS flush p99 ≈ 992.375–1000.472 ms, max ≈ 999.621–1006.003 ms при flush interval 1000 ms. Batch write max ≈ 11.292–13.406 ms.
 
-Первый capture после открытия store: rest_success: 0.233 ms; fallback_small: 0.385 ms; fallback_near_limit: 4.352 ms; fallback_at_limit: 1.911 ms. Это connection-cold, не физически холодный диск: кеши macOS/VM не сбрасывались. Из двух коротких последовательных прогонов нельзя вывести worst-case bound, причинность каждого максимума или безопасность при деградации общего диска. Try/catch и LIMIT не прерывают синхронный I/O stall. Нулевой риск event-loop blocking не заявляется.
+Первый capture после открытия store: rest_success: 0.233 ms; fallback_small: 0.385 ms; fallback_near_limit: 4.352 ms; fallback_at_limit: 1.911 ms. Это connection-cold, не физически холодный диск: кеши macOS/VM не сбрасывались. Из коротких последовательных прогонов нельзя вывести worst-case bound, причинность каждого максимума или безопасность при деградации общего диска. Try/catch и LIMIT не прерывают синхронный I/O stall. Нулевой риск event-loop blocking не заявляется.
 
 Измеренное следствие: малый fallback дешёв, у read limit заметно растут p99 event-loop и WS latency. Допустимость этой регрессии должна быть отдельно принята перед Deploy. Никаких автоматических новых очередей/workers или повышения лимита не предлагается.
 
@@ -62,3 +62,5 @@ docker run --rm --network none --read-only \
 ```
 
 Опциональный последний аргумент выбирает одну из четырёх фаз для отдельного процесса. Это позволяет повторять connection-cold samples без уничтожения host/VM cache и без воздействия на Demo.
+
+Для исключения выбора удобных максимумов сохранены и предварительные прогоны: `test/reports/first-fill-latency-preliminary-20261106.json`. В них до последнего namespace guard максимальный полный fallback у 999 фактов достигал 17.965 ms, WS receive — 18.727 ms. В baseline первого прогона event-loop max был 52.429 ms на фоне batch write max 52.133 ms. Это дополнительно показывает разброс I/O; последняя таблица не является гарантированной верхней границей.
