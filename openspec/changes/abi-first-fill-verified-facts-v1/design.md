@@ -1,0 +1,49 @@
+## Context
+
+База: ABI c21ca11. OpenPositionResolutionService.resolveLiveQueryAdmissible() сначала вызывает lookupLive(), затем повторно проверяет first_fill и только потом capture. EntryCycleRecoveryResolutionService вызывает тот же REST primitive из position_open и best-effort terminal_after_fill. SQLite уже имеет readLinkForOrder()/readFactsForOrder(orderId, limit).
+
+## Goals / Non-Goals
+
+Единый проверяющий компонент для точного времени; неизменные live/recovery verdicts, serialization и контракты. Не менять авторизацию, торговую маршрутизацию, close, sizing или схему хранения. Никаких новых listeners, workers или REST retries.
+
+## Decisions
+
+### 1. Одна цепочка источников, после определения состояния
+
+existing lookupLive/recovery proof → saved first_fill → verified SQLite executions → existing REST capture → existing persistence/response.
+
+Сохранённое время не перечитывается и не перезаписывается. Если закрытие произошло до lookup, existing closure/terminal handling имеет приоритет: локальный entry fill не возвращает цикл к position_open. В recovery terminal_after_fill используется тот же компонент только для существующего best-effort capture; его неуспех не превращает уже доказанное terminal_after_fill в ошибку. Все прежние status-changing writes/convergence сохраняют прежние требования.
+
+### 2. Узкий вход и результат
+
+Компонент получает текущую identity: instance, cycle, generation, category, symbol, подтверждённые exact orderId/orderLinkId, side/binding и положительный cumExecQty собственного ордера. Quantity берётся из существующего достоверного fill proof (свежего или допустимого final observation), а не planned qty, агрегатной позиции или SQLite order-state. Требуется минимально передать этот proof-context в capture, не делать новых сетевых запросов ради SQLite. Если authoritative orderId отсутствует — SQLite непригоден, остаётся REST. Нельзя брать create ACK order_id или binding_history вместо идентичности текущего доказательства.
+
+Один optional read-only порт к существующему store; result verified(firstFillAtMs) либо unavailable(reason). Одинаковый verifier используется во всех трёх call sites; внутренние типы не являются новым API. Точные reason нужны только для безопасных тестов/диагностики, без raw payload/credentials. SQLite exception/disabled трактуются как unavailable.
+
+### 3. Доказательство принадлежности и полноты
+
+readLinkForOrder должен совпасть по orderId, orderLinkId, instance, cycle, generation, role=entry. Проверяется среда store; raw execution сверяется с нормализованной строкой и proof: category, symbol, orderId/orderLinkId, side, execType=Trade. Execution не всегда содержит positionIdx: отсутствующее поле не выдумывается; принадлежность slot следует из подтверждённого ордера и текущей связи, явно противоречащее поле отвергается.
+
+Читается bounded snapshot фактов этого orderId. readFactsForOrder возвращает LIMIT без флага полноты: если length >= limit, результат консервативно непригоден и применяется REST, даже если первые строки уже дают нужную сумму. Нельзя объявлять полноту по усечённому префиксу или добавлять неограниченный SQL scan. Достаточно существующего bounded read; новая схема/pagination framework не нужна.
+
+Для execution-строк обязательны execId, целочисленный положительный execTime и положительный exact-decimal execQty. Дубли одного execId (WS/REST) считаются один раз только при совпадении identity/time/quantity; конфликт делает набор непригодным. Никаких Number/float или epsilon для суммы: sum(unique execQty) == confirmed cumExecQty > 0. Меньшая, большая сумма, неправильная identity, неизвестные/повреждённые execution-факты — fallback. Сопутствующие order_state строки не суммируются. Ошибку/конфликт нельзя «починить» выбором удобного подмножества.
+
+Только после всех проверок min(execTime) становится кандидатом. receivedAt/SQLite write time/order updatedTime и bar alignment запрещены. Удерживается существующий pair mutex, запись перечитывается и проверяется на current generation/closure как раньше; SQLite не запускает replay и не определяет open/closed.
+
+### 4. Fallback сохраняет прежнюю безопасность
+
+При unavailable всегда выполняется прежний REST capture. Корректный REST результат может дать время даже при непригодных локальных данных. Пустой/ошибочный REST сохраняет прежний отказ open-position/position_open recovery; terminal_after_fill сохраняет прежнюю best-effort семантику. Не добавляем fallback timestamp из агрегатной позиции и не возвращаем position_open=true без обязательного поля.
+
+Альтернативы: короткий retry не устраняет длительную пустоту REST; «первое полученное WS» не доказывает earliest; один новый orderId REST fallback не доказан как работающий раньше. Они не входят в изменение.
+
+## Risks / Trade-offs
+
+- Пропущен более ранний partial fill → полнота по уникальным qty и confirmed cumulative quantity; иначе REST.
+- Поток накопил больше read-limit или facts store отключён → выигрыш недоступен, прежнее поведение сохраняется.
+- Fill продолжился после proof snapshot → превышение суммы даёт fallback; не подгонять confirmed quantity под журнал.
+- Устарела generation/наступило закрытие → существующие mutex/re-read/closure guards сохраняются.
+- Факты могут оказаться непригодны во время долгой REST-пустоты → текущая доступность не гарантируется; этот спек не вводит новый recovery protocol.
+
+## Migration Plan
+
+Сейчас только документация и внешнее ревью. После отдельного Apply — ABI-only PR, unit/integration fakes, npm test/typecheck/build/OpenAPI. Любые merge, Demo deploy/smoke согласуются отдельно. Runtime/Compose остаются прежними; откат образом, без миграции данных. Mainnet не включать.

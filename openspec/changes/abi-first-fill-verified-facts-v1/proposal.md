@@ -1,0 +1,24 @@
+## Why
+
+Подтверждённая через Bybit открытая позиция не сопровождалась Runtime, пока дополнительный REST-поиск точного времени первого исполнения возвращал пустоту. Уже сохранённые execution-факты могут дать это время без ожидания REST, если принадлежность и полнота доказаны.
+
+## What Changes
+
+- Один небольшой компонент проверяет факты SQLite перед существующим REST-поиском first_fill; используется open-position и обеими ветками capture в recovery.
+- Проверяет текущую идентичность entry-ордера/цикла/поколения, уникальность execId и точное совпадение суммы Trade execQty с подтверждённым cumExecQty.
+- Использует min(execTime); сохранённое first_fill остаётся приоритетным и неизменяемым.
+- SQLite недоступен, усечён, неполон или неоднозначен: существующий REST fallback и прежняя безопасная семантика соответствующей ветки.
+- Никаких изменений определения open/closed, авторизации, Runtime/Router/Engine, HTTP-контрактов, формата correlation, sizing, close/SL/TP алгоритма или торговых POST. Demo продолжает работать без изменений; Mainnet запрещён. Этот PR содержит только спек, не разрешение Apply/deploy.
+
+## Capabilities
+
+### New Capabilities
+- `verified-first-fill-evidence`: единые правила проверки идентичности, полноты и времени execution-фактов.
+
+### Modified Capabilities
+- `open-position-resolution`: разрешить проверенные локальные факты между сохранённым first_fill и REST capture после существующего live lookup.
+- `entry-cycle-recovery-resolution`: применять тот же порядок источников, сохраняя существующую семантику position_open и terminal_after_fill.
+
+## Impact
+
+ABI: openPositionResolutionService, entryCycleRecoveryResolutionService, небольшой verifier и узкий read-only порт ExchangeFactsStore; минимальная сборка зависимости в composition root. Schema SQLite и correlation JSONL не меняются. Тесты изолированные, без сети и реальных ордеров; npm test/typecheck/build. Никаких новых сервисов или обязательной зависимости торговли от журнала.
