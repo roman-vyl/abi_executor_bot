@@ -129,7 +129,16 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
     tradingRules: rulesProvider,
   });
 
+  // The store was opened against this environment/category; keep that namespace
+  // on the narrow reader so a historical record in another category cannot use it.
+  const firstFillFacts = exchangeFacts.status === "enabled" ? {
+    category: config.bybitCategory,
+    readLinkForOrder: exchangeFacts.store.readLinkForOrder.bind(exchangeFacts.store),
+    readFactsForOrder: exchangeFacts.store.readFactsForOrder.bind(exchangeFacts.store),
+  } : undefined;
+
   const openPositionResolutionService = new OpenPositionResolutionService({
+    firstFillFacts,
     correlationRepository,
     bybit,
     // Used only to durably capture first_fill_at_ms exactly once
@@ -139,6 +148,7 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
   });
 
   const entryCycleRecoveryResolutionService = new EntryCycleRecoveryResolutionService({
+    firstFillFacts,
     correlationRepository,
     bybit,
     // Used only to durably capture first_fill_at_ms exactly once, when

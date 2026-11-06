@@ -1,3 +1,4 @@
+import { captureFirstFill, type EntryFillProof, type FirstFillFactsReader } from "../firstFill/verifiedFirstFill.js";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { compareDecimal } from "../../domain/exactDecimal.js";
@@ -27,7 +28,6 @@ import type { BybitGetOrderByLinkIdPayload, BybitGetOrderHistoryPayload } from "
 import {
   classifyEntryOrderForRecovery,
   classifyOwnCloseOrderOutcome,
-  resolveFirstAttributableFillAtMs,
 } from "../entryPackage/packageConfirmation.js";
 import type { OwnCloseOrderOutcome, RecoveryEntryOrderSignal } from "../entryPackage/packageConfirmation.js";
 import {
@@ -50,6 +50,7 @@ export type RecoveryQuery = {
 };
 
 export type EntryCycleRecoveryResolutionServiceDeps = {
+  firstFillFacts?: FirstFillFactsReader;
   correlationRepository: EntryPackageCorrelationRepository;
   bybit: BybitAdapter;
   // Used only to durably capture first_fill_at_ms exactly once, when
@@ -218,7 +219,10 @@ export class EntryCycleRecoveryResolutionService {
         });
 
         if (resolved !== undefined) {
-          return this.finalizeOutcome(resolved, record);
+          return this.finalizeOutcome(resolved, record,
+            orderSignal.kind === "terminal_with_fill" || orderSignal.kind === "live_with_fill"
+              ? { entryTerminal: orderSignal.kind === "terminal_with_fill", cumulativeFilledQty: orderSignal.cumulativeFilledQty, entryOrderId: orderSignal.orderId }
+              : undefined);
         }
       }
 
@@ -279,6 +283,7 @@ export class EntryCycleRecoveryResolutionService {
   private async finalizeOutcome(
     outcome: ResolvedOutcome,
     record: EntryPackageExecutionRecord,
+    proof?: EntryFillProof,
   ): Promise<RecoveryStateHttpResult> {
     // Every outcome now runs under the pair mutex, re-reading the record
     // fresh — a concurrent close, cancel-confirmation, or another recovery
@@ -288,12 +293,13 @@ export class EntryCycleRecoveryResolutionService {
     // convergence-v1, mirroring OpenPositionResolutionService.
     // resolveLiveQueryAdmissible).
     const key = correlationRecordKey(record.strategy_instance_id, record.trade_cycle_id);
-    return this.deps.mutex.withKeyLock(key, () => this.finalizeOutcomeLocked(outcome, record));
+    return this.deps.mutex.withKeyLock(key, () => this.finalizeOutcomeLocked(outcome, record, proof));
   }
 
   private async finalizeOutcomeLocked(
     outcome: ResolvedOutcome,
     resolvedAgainst: EntryPackageExecutionRecord,
+    proof?: EntryFillProof,
   ): Promise<RecoveryStateHttpResult> {
     const fresh = this.deps.correlationRepository.get(resolvedAgainst.strategy_instance_id, resolvedAgainst.trade_cycle_id);
     if (fresh === undefined) {
@@ -320,7 +326,7 @@ export class EntryCycleRecoveryResolutionService {
     }
 
     if (outcome.state === "terminal_after_fill") {
-      return this.resolveTerminalAfterFillResult(fresh);
+      return this.resolveTerminalAfterFillResult(fresh, proof);
     }
 
     if (outcome.state === "entry_order_live") {
@@ -349,7 +355,7 @@ export class EntryCycleRecoveryResolutionService {
     }
 
     // position_open
-    return this.resolvePositionOpenResultLocked(fresh, outcome.averageEntryPrice, outcome.entryOrderId);
+    return this.resolvePositionOpenResultLocked(fresh, outcome.averageEntryPrice, outcome.entryOrderId, proof);
   }
 
   // Runs entirely against a record already fresh, under the lock, and
@@ -359,6 +365,7 @@ export class EntryCycleRecoveryResolutionService {
     fresh: EntryPackageExecutionRecord,
     averageEntryPrice: string,
     entryOrderId: string | null,
+    proof?: EntryFillProof,
   ): Promise<RecoveryStateHttpResult> {
     if (fresh.pending_action === "amend" || fresh.pending_action === "cancel_and_create") {
       return internalErrorResult();
@@ -389,11 +396,8 @@ export class EntryCycleRecoveryResolutionService {
       );
     }
 
-    const captured = await resolveFirstAttributableFillAtMs({
-      bybit: this.deps.bybit,
-      category: fresh.exchange_category,
-      symbol: fresh.exchange_symbol,
-      orderLinkId: fresh.order_link_id,
+    const captured = await captureFirstFill({
+      bybit: this.deps.bybit, record: fresh, proof, reader: this.deps.firstFillFacts,
     });
 
     if (captured.kind !== "found") {
@@ -440,18 +444,15 @@ export class EntryCycleRecoveryResolutionService {
   // pattern for first_fill_at_ms — best-effort, never blocks the response —
   // before evaluating status convergence. Runs against a record already
   // fresh, under the lock, and binding-continuity-checked by the caller.
-  private async resolveTerminalAfterFillResult(fresh: EntryPackageExecutionRecord): Promise<RecoveryStateHttpResult> {
+  private async resolveTerminalAfterFillResult(fresh: EntryPackageExecutionRecord, proof?: EntryFillProof): Promise<RecoveryStateHttpResult> {
     let record = fresh;
     if (
       record.first_fill_at_ms === null &&
       record.order_link_id !== null &&
       (record.exchange_category === "linear" || record.exchange_category === "spot")
     ) {
-      const captured = await resolveFirstAttributableFillAtMs({
-        bybit: this.deps.bybit,
-        category: record.exchange_category,
-        symbol: record.exchange_symbol,
-        orderLinkId: record.order_link_id,
+      const captured = await captureFirstFill({
+        bybit: this.deps.bybit, record, proof, reader: this.deps.firstFillFacts,
       });
       if (captured.kind === "found") {
         try {

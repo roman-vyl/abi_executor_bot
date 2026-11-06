@@ -1,3 +1,4 @@
+import { captureFirstFill, type EntryFillProof, type FirstFillFactsReader } from "../firstFill/verifiedFirstFill.js";
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
 import type {
@@ -26,7 +27,6 @@ import {
   FILLED_STATUSES,
   isFillFactFinal,
   orderIdOrNull,
-  resolveFirstAttributableFillAtMs,
   TERMINAL_WITHOUT_FILL_STATUSES,
 } from "../entryPackage/packageConfirmation.js";
 import {
@@ -45,6 +45,7 @@ export type OpenPositionQuery = {
 };
 
 export type OpenPositionResolutionServiceDeps = {
+  firstFillFacts?: FirstFillFactsReader;
   correlationRepository: EntryPackageCorrelationRepository;
   bybit: BybitAdapter;
   // Used only by resolve() (the GET HTTP path), to durably capture
@@ -67,6 +68,7 @@ type StatusBucket = "durably_closed" | "live_query_admissible" | "unresolved";
 export type PositionDetermination =
   | {
       kind: "open";
+      entryFillProof?: EntryFillProof;
       // Verbatim pass-through of record.first_fill_at_ms — null if this
       // cycle's own fill has been proven but the durable capture has not
       // happened yet. determine() never computes or captures this itself;
@@ -368,8 +370,7 @@ export class OpenPositionResolutionService {
   // (authoritative — a concurrent close may have durably closed it since
   // resolve()'s outer, unlocked read), calls the lock-free determine(), and
   // — only when this cycle's own evidence proves an open position and
-  // first_fill_at_ms is not yet durably captured — performs the one and
-  // only capture of it in this entire codebase.
+  // first_fill_at_ms is not yet durably captured — captures it once via the shared REST-first policy.
   private async resolveLiveQueryAdmissible(query: OpenPositionQuery): Promise<OpenPositionHttpResult> {
     const record = this.deps.correlationRepository.get(query.strategyInstanceId, query.tradeCycleId);
     if (record === undefined) {
@@ -404,11 +405,8 @@ export class OpenPositionResolutionService {
       });
     }
 
-    const captured = await resolveFirstAttributableFillAtMs({
-      bybit: this.deps.bybit,
-      category: record.exchange_category,
-      symbol: record.exchange_symbol,
-      orderLinkId: record.order_link_id,
+    const captured = await captureFirstFill({
+      bybit: this.deps.bybit, record, proof: determination.entryFillProof, reader: this.deps.firstFillFacts,
     });
 
     if (captured.kind !== "found") {
@@ -529,6 +527,7 @@ function evaluateOpen(
 
   return {
     kind: "open",
+    entryFillProof: ownFacts,
     firstFillAtMs: record.first_fill_at_ms,
     averageEntryPrice: ownFacts.avgExecutionPrice,
     entryOrderId: ownFacts.entryOrderId,
