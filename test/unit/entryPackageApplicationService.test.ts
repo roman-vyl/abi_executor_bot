@@ -1547,10 +1547,10 @@ test("retry after config change confirms against the generation's durable hedge 
   }, { bybitLinearPositionBindingMode: "hedge" });
 });
 
-test("hedge policy never bypasses dry-run or mainnet live guards", async () => {
+test("hedge policy never bypasses dry-run or disabled-live guards", async () => {
   for (const overrides of [
     { dryRun: true, bybitEnvironment: "testnet" as const },
-    { dryRun: false, bybitEnvironment: "mainnet" as const },
+    { dryRun: false, liveTradingEnabled: false },
   ]) {
     await withService(async ({ service, bybit, repo }) => {
       bybit.openPositionsResponse = flatHedgePositionResponse();

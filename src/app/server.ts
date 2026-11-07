@@ -49,7 +49,7 @@ export async function startServer(config: AbiConfig, exchangeFacts: ExchangeFact
   let authorizationChanged: () => void = () => undefined;
   const control = await createAuthorizationSocket({
     path: config.authorizationSocketPath,
-    policy: { environment: config.bybitEnvironment as "demo" | "testnet", expectedUid: config.expectedBybitUid,
+    policy: { environment: config.bybitEnvironment, expectedUid: config.expectedBybitUid,
       category: config.bybitCategory as "linear" | "spot", recvWindow: config.bybitRecvWindow },
     onAuthorizationResult: result => {
       if (result !== "busy" && result !== "retry_required" && result !== "no_candidate") authorizationChanged();

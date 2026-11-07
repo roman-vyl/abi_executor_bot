@@ -1,10 +1,10 @@
 # Независимый verifier и доставка credentials
 
-Эта версия подключает авторизацию к существующему startServer. После обычного запуска ABI находится в LOCKED; age/socket авторизация выполняется без рестарта. Деплой действующего Demo требует отдельного разрешения и согласованных ABI/Runtime image pins. Mainnet запрещён.
+Эта версия подключает авторизацию к существующему startServer. После обычного запуска ABI находится в LOCKED; age/socket авторизация выполняется без рестарта. Деплой действующего Demo требует отдельного разрешения и согласованных ABI/Runtime image pins. Mainnet разрешён только при явной конфигурации и авторизации доверенного Mainnet UID.
 
 `createAuthorizationSocket({ path, policy })` создаёт один AuthorizationService с настоящим Bybit verifier. Возвращённый `authorization` — тот же единственный владелец credentials для рабочего REST; `close()` немедленно прекращает приём, отменяет проверку и закрывает соединения. Factory не знает о journal, readiness или trading-компонентах.
 
-Policy содержит environment (demo/testnet), expectedUid (строка UID целевого аккаунта), category (linear/spot), recvWindow. UID и права проверяются одним подписанным GET /v5/user/query-api. Verifier не имеет произвольных URL/методов или order writes. Общий deadline 10 s, response limit 64 KiB; временная ошибка сохраняет кандидата для автоматического повторения внутри ABI. Файлы tests используют подставной транспорт с реальным кодом подписи/проверки, production fake accepted отсутствует.
+Policy содержит environment (demo/testnet/mainnet), expectedUid (строка UID целевого аккаунта), category (linear/spot), recvWindow. UID и права проверяются одним подписанным GET /v5/user/query-api. Verifier не имеет произвольных URL/методов или order writes. Общий deadline 10 s, response limit 64 KiB; временная ошибка сохраняет кандидата для автоматического повторения внутри ABI. Файлы tests используют подставной транспорт с реальным кодом подписи/проверки, production fake accepted отсутствует.
 
 Socket frame: JSON+LF и EOF write-side; максимум 4096 bytes, 5 s на приём. Команды authorize (полная credentials-пара), retry, status. Одна активная control connection. Ответ accepted сообщает только AUTHORIZED, не Trading READY. При потерянном ответе сначала status: клиент не пересылает пару повторно. Временные сетевые отказы ABI обрабатывает самостоятельно, без Mac/Python. Закрытие после начала authorize не отменяет его результат.
 
@@ -28,7 +28,7 @@ Factory проверяет владельца и mode 0700 каталога, у�
 
 ## Интеграция и проверки
 
-Укажите ABI_EXPECTED_BYBIT_UID доверенного целевого Demo-аккаунта и tmpfs /run/abi-authorization (uid/gid 1000, mode 0700). HTTP /health/live доступен в LOCKED; /health/ready и /health показывают Trading READY. Состояния authorization, localRecoveryReady и bindingsVerified сообщаются отдельно. BYBIT_API_KEY/BYBIT_API_SECRET больше не читаются config, даже при risk sizing. Env-fallback отсутствует.
+Укажите ABI_EXPECTED_BYBIT_UID доверенного целевого аккаунта выбранного окружения и tmpfs /run/abi-authorization (uid/gid 1000, mode 0700). HTTP /health/live доступен в LOCKED; /health/ready и /health показывают Trading READY. Состояния authorization, localRecoveryReady и bindingsVerified сообщаются отдельно. BYBIT_API_KEY/BYBIT_API_SECRET больше не читаются config, даже при risk sizing. Env-fallback отсутствует.
 
 Root использует прежний replayCorrelationStore() без изменения lifecycleEvents.ts. Его локальный результат сохраняется, после авторизации выполняется прежняя assurance. Retry не повторяет replay/cleanup. AUTHORIZED не зависит от journal; account API сохраняет доступ при ошибке торгового восстановления. Observers создаются однократно после авторизации и не определяют торговую готовность. 503 execution_not_ready выдаётся до use case; после допуска сохраняется прежний результат.
 

@@ -19,9 +19,9 @@ const until = async (predicate: () => Promise<boolean>) => {
   for (let n = 0; n < 100; n++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   throw new Error("condition did not converge");
 };
-async function fixture(t: test.TestContext, transport: typeof fetch, observers = false, retryTimers?: Parameters<typeof startServer>[2]) {
+async function fixture(t: test.TestContext, transport: typeof fetch, observers = false, retryTimers?: Parameters<typeof startServer>[2], environment: "demo" | "mainnet" = "demo") {
   const directory = await mkdtemp(join(tmpdir(), "abi-root-"));
-  const config = makeTestConfig({ port: 0, bybitEnvironment: "demo", positionSizingMode: "risk",
+  const config = makeTestConfig({ port: 0, bybitEnvironment: environment, positionSizingMode: "risk",
     bybitLinearPositionBindingMode: "hedge", authorizationSocketPath: join(directory, "auth/control.sock"),
     entryPackageCorrelationPath: join(directory, "correlation.jsonl"), bybitHeartbeatIntervalMs: 0,
     exchangeFactsEnabled: observers, exchangeFactsDbPath: join(directory, "facts.sqlite3") });
@@ -308,4 +308,27 @@ test("shutdown cancels an in-flight automatic retry and ignores its late success
   await f.close(); release(keyInfo()); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.root.authorization.status(), "RETRY_PENDING");
   assert.equal(f.root.authorization.credentials(), undefined); assert.equal(clock.pending.size, 0); assert.equal(calls, 2);
+});
+
+
+test("Mainnet root authorizes over the existing socket and a replacement starts LOCKED", async t => {
+  const calls: string[] = [];
+  const transport: typeof fetch = async (url, init) => {
+    calls.push(String(url));
+    assert.equal(init?.method, "GET");
+    assert.equal(new URL(String(url)).host, "api.bybit.com");
+    return String(url).endsWith("/v5/user/query-api") ? keyInfo() : reply({ list: [] });
+  };
+  const f = await fixture(t, transport, false, undefined, "mainnet");
+  assert.equal((await f.health()).authorization, "LOCKED");
+  assert.equal(calls.length, 0);
+  const server = f.root.server;
+  assert.equal((await f.control("authorize")).result, "accepted");
+  await until(async () => (await f.health()).ok);
+  assert.equal(f.root.server, server);
+  await f.close();
+  const next = await fixture(t, transport, false, undefined, "mainnet");
+  assert.equal((await next.health()).authorization, "LOCKED");
+  assert.equal(next.root.authorization.credentials(), undefined);
+  assert.equal((await next.request(`${next.base}/health/ready`)).status, 503);
 });
