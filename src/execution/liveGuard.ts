@@ -24,10 +24,6 @@ export function getLiveExecutionMode(config: AbiConfig, authorized: boolean): Li
 
   if (!authorized) blockedReasons.push("Bybit authorization is required");
 
-  if (config.bybitEnvironment === "mainnet") {
-    blockedReasons.push("BYBIT_ENV must be demo or testnet for the first live smoke");
-  }
-
   return {
     dryRun: config.dryRun,
     liveTradingEnabled: config.liveTradingEnabled,

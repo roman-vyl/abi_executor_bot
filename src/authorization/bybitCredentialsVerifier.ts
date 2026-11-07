@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import type { Credentials, CredentialsVerifier, VerificationResult } from "./authorizationService.js";
 
 export type VerificationPolicy = Readonly<{
-  environment: "demo" | "testnet";
+  environment: "demo" | "testnet" | "mainnet";
   expectedUid: string;
   category: "linear" | "spot";
   recvWindow: string;
@@ -20,7 +20,7 @@ export function createBybitCredentialsVerifier(policy: VerificationPolicy, optio
   signal?: AbortSignal;
   timeoutMs?: number; // Tests may shorten, never extend the production deadline.
 } = {}): { verify: CredentialsVerifier; close(): void; reason(): VerificationReason } {
-  if (!/^[1-9][0-9]*$/.test(policy.expectedUid) || !["demo", "testnet"].includes(policy.environment) ||
+  if (!/^[1-9][0-9]*$/.test(policy.expectedUid) || !["demo", "testnet", "mainnet"].includes(policy.environment) ||
       !["linear", "spot"].includes(policy.category) || !/^[1-9][0-9]*$/.test(policy.recvWindow)) {
     throw new Error("Invalid verification policy");
   }
@@ -86,7 +86,7 @@ export function createBybitCredentialsVerifier(policy: VerificationPolicy, optio
         const timestamp = String(Date.now());
         const signature = createHmac("sha256", candidate.apiSecret)
           .update(`${timestamp}${candidate.apiKey}${config.recvWindow}`).digest("hex");
-        const host = config.environment === "demo" ? "api-demo.bybit.com" : "api-testnet.bybit.com";
+        const host = { demo: "api-demo.bybit.com", testnet: "api-testnet.bybit.com", mainnet: "api.bybit.com" }[config.environment];
         const response = await transport(`https://${host}/v5/user/query-api`, {
           method: "GET", redirect: "error", signal: request.signal,
           headers: { "X-BAPI-API-KEY": candidate.apiKey, "X-BAPI-TIMESTAMP": timestamp,

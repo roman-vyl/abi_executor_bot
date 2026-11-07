@@ -10,11 +10,12 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 function transport(body: unknown, status = 200): typeof fetch { return async () => response(body, status); }
 
 test("verifier uses one fixed read-only signed request and real validation for linear and spot", async () => {
+  for (const environment of ["demo", "testnet", "mainnet"] as const) {
   for (const category of ["linear", "spot"] as const) {
     let calls = 0;
-    const verifier = createBybitCredentialsVerifier({ ...policy, category }, { fetch: async (url, init) => {
+    const verifier = createBybitCredentialsVerifier({ ...policy, category, environment }, { fetch: async (url, init) => {
       calls++;
-      assert.equal(String(url), "https://api-demo.bybit.com/v5/user/query-api");
+      assert.equal(String(url), `https://${{ demo: "api-demo.bybit.com", testnet: "api-testnet.bybit.com", mainnet: "api.bybit.com" }[environment]}/v5/user/query-api`);
       assert.equal(init?.method, "GET"); assert.equal(init?.body, undefined); assert.equal(init?.redirect, "error");
       const h = new Headers(init?.headers);
       assert.equal(h.get("X-BAPI-SIGN"), createHmac("sha256", pair.apiSecret).update(`${h.get("X-BAPI-TIMESTAMP")}key5000`).digest("hex"));
@@ -24,6 +25,7 @@ test("verifier uses one fixed read-only signed request and real validation for l
     assert.equal(await service.authorize(pair), "accepted");
     assert.deepEqual(service.credentials(), pair);
     assert.equal(calls, 1); verifier.close();
+  }
   }
 });
 
@@ -41,7 +43,7 @@ for (const [name, mutate, expected] of [
 ] as const) {
   test(`verifier classifies ${name}`, async () => {
     const body = good(); mutate(body);
-    const verifier = createBybitCredentialsVerifier(policy, { fetch: transport(body) });
+    const verifier = createBybitCredentialsVerifier({ ...policy, environment: "mainnet" }, { fetch: transport(body) });
     try { assert.equal(await verifier.verify(pair), expected); } finally { verifier.close(); }
   });
 }
@@ -68,7 +70,7 @@ test("malformed, oversized and invalid UTF8 responses fail closed", async () => 
   }
 });
 test("invalid policy fails before any network call", () => {
-  for (const override of [{ expectedUid: "" }, { expectedUid: "01" }, { environment: "mainnet" }, { category: "option" }, { recvWindow: "" }]) {
+  for (const override of [{ expectedUid: "" }, { expectedUid: "01" }, { environment: "invalid" }, { category: "option" }, { recvWindow: "" }]) {
     assert.throws(() => createBybitCredentialsVerifier({ ...policy, ...override } as VerificationPolicy), /policy/);
   }
 });

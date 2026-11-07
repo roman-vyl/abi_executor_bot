@@ -679,10 +679,10 @@ ABI_LIVE_TRADING_ENABLED=true
 AND
 AuthorizationService = AUTHORIZED
 AND
-BYBIT_ENV is demo or testnet
+BYBIT_ENV is demo, testnet or mainnet
 ```
 
-Mainnet live execution в текущем контуре запрещён guard-ом.
+Mainnet использует те же authorization, readiness и live execution gates.
 
 Safe defaults:
 
@@ -885,7 +885,7 @@ Configuration читается из environment.
 | `ABI_CONFIG_PATH` | empty (no file) | JSON-файл режима входа, читается один раз при старте (см. ниже) |
 | `ABI_BYBIT_LINEAR_POSITION_BINDING_MODE` | `one_way` | internal expected geometry for new linear bindings; `hedge` requires the runbook activation gates |
 | `BYBIT_ENV` | see below | `demo`, `testnet` or `mainnet` |
-| `ABI_EXPECTED_BYBIT_UID` | required at startup | Доверенный UID целевого Demo/testnet-аккаунта |
+| `ABI_EXPECTED_BYBIT_UID` | required at startup | Доверенный UID целевого Demo/testnet/Mainnet-аккаунта |
 | `ABI_AUTHORIZATION_SOCKET_PATH` | `/run/abi-authorization/control.sock` | Закрытый Unix socket авторизации |
 | `BYBIT_ACCOUNT_TYPE` | `UNIFIED` | Bybit account type |
 | `BYBIT_RECV_WINDOW` | `5000` | signed request receive window |

@@ -6,9 +6,9 @@ Operational guide for running, checking, and troubleshooting Abi.
 
 - Node.js 20+
 - age и Python 3 на Mac для команды поздней авторизации
-- Доверенный ABI_EXPECTED_BYBIT_UID целевого Demo/testnet-аккаунта
+- Доверенный ABI_EXPECTED_BYBIT_UID целевого Demo/testnet/Mainnet-аккаунта
 - Docker and Docker Compose, for the container path
-- Bybit demo or testnet API credentials, only if you intend to exercise live Bybit calls
+- Bybit credentials for the selected environment, only if you intend to exercise live Bybit calls
 
 Install dependencies once:
 
@@ -88,7 +88,7 @@ python3 scripts/abi-authorize.py "$cid" authorize /path/to/credentials.age
 python3 scripts/abi-authorize.py "$cid" retry
 ```
 
-Для основного bbb_stack используйте его scripts/authorize_abi.py, который сам находит существующий контейнер основного Compose-проекта. AUTHORIZED подтверждает полномочия; /health/ready сообщает торговую готовность. При потерянном ответе сначала status. После временного сбоя ABI сам повторяет проверку credentials или торговых привязок через 5/15/30 секунд и далее по 30 секунд, без участия Mac и повторного пароля. Ручной retry остаётся диагностическим. После рестарта снова LOCKED. Mainnet запрещён.
+Для основного bbb_stack используйте его scripts/authorize_abi.py, который сам находит существующий контейнер основного Compose-проекта. AUTHORIZED подтверждает полномочия; /health/ready сообщает торговую готовность. При потерянном ответе сначала status. После временного сбоя ABI сам повторяет проверку credentials или торговых привязок через 5/15/30 секунд и далее по 30 секунд, без участия Mac и повторного пароля. Ручной retry остаётся диагностическим. После рестарта снова LOCKED. Mainnet разрешён только при явной конфигурации и авторизации доверенного Mainnet UID.
 
 Socket находится в tmpfs /run/abi-authorization (каталог 0700, socket 0600). Команда проверяет memory.swap.max=0 до передачи. Отсутствие swap macOS и уничтожение всех копий в памяти не гарантируются. Подробные границы и dummy-only Docker smoke: [verifier-delivery.md](authorization/verifier-delivery.md).
 
@@ -101,7 +101,7 @@ Live Bybit writes require all of:
 - `ABI_DRY_RUN=false`
 - `ABI_LIVE_TRADING_ENABLED=true`
 - AuthorizationService = AUTHORIZED
-- `BYBIT_ENV` set to `demo` or `testnet` (mainnet is always blocked)
+- `BYBIT_ENV` set to `demo`, `testnet` or `mainnet`
 
 Check the guard before relying on live behavior:
 
@@ -185,7 +185,7 @@ Do not set the policy to `hedge` for production until all of the following are t
    position-mode evidence keeps lifecycle readiness false.
 6. The first admission for each inactive instrument passes a fresh read-only mode check before its
    provisional durable claim. Begin with a controlled Demo/testnet rollout and retain a cleanup
-   plan. Mainnet execution remains blocked by the existing live guard.
+   plan. Mainnet requires explicit environment configuration, target UID authorization and the same execution guards.
 
 If any check fails, keep admission stopped and leave the policy at `one_way`; ABI must not attempt
 to repair the exchange mode. The current repository intentionally ships no deployment override
