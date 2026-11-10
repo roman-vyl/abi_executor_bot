@@ -27,4 +27,4 @@ Guarantee completion of each GET attempt when the event loop can process timers,
 
 ## Migration Plan
 
-Proposal only on an isolated branch. Implement after review, run fake/localhost tests and repository checks, then request separate deployment approval. No production probe, trading smoke or restart is needed to validate this contract. Rollback of a later deployment would restore the previous GET implementation and its known waiting gap; it would not change persisted data formats.
+The reviewed implementation remains on an isolated branch, with fake/localhost tests and repository checks complete. Deployment requires separate approval. No production probe, trading smoke or restart is needed to validate this contract. Rollback of a later deployment would restore the previous GET implementation and its known waiting gap; it would not change persisted data formats.

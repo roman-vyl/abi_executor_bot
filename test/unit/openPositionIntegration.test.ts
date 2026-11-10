@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { AuthorizationService } from "../../src/authorization/authorizationService.js";
+import { RestBybitAdapter } from "../../src/exchange/bybitAdapter.js";
+import { makeTestConfig } from "../fixtures/config.js";
+
 import { KeyedMutex } from "../../src/concurrency/keyedMutex.js";
 import { EntryPackageCorrelationRepository } from "../../src/correlation/entryPackageCorrelationRepository.js";
 import type {
@@ -366,4 +370,52 @@ function makeRecord(
     pending_action: null,
     current_binding_started_at: "2026-01-01T00:00:00.000Z",
   };
+}
+
+
+for (const lateSecond of ["success", "failure"] as const) {
+  test(`two uncooperative position GETs release the pair; late second ${lateSecond} cannot mutate it`, async () => {
+    const originalFetch = globalThis.fetch;
+    const credentialsSource = new AuthorizationService(async () => "accepted");
+    await credentialsSource.authorize({ apiKey: "fake", apiSecret: "fake" });
+    const rest = new RestBybitAdapter(makeTestConfig({ bybitReadTimeoutMs: 30 }), { credentialsSource });
+    const pending: { resolve: (r: Response) => void; reject: (e: Error) => void; signal: AbortSignal }[] = [];
+    let requests = 0; let lateReads = 0; let lateCancels = 0;
+    globalThis.fetch = (async (_url, init) => {
+      assert.equal(init?.method, "GET");
+      requests++;
+      if (requests <= 2) return new Promise<Response>((resolve, reject) => {
+        pending.push({ resolve, reject, signal: init?.signal as AbortSignal });
+      });
+      return new Response(JSON.stringify(envelope([row({})])), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withStack(async ({ service, bybit, repo }) => {
+        await repo.save(makeRecord({ status: "applied", side: "long", firstFillAtMs: 1785000012345 }));
+        const before = structuredClone(repo.get("instance", "cycle"));
+        bybit.queryPositionForInstrument = input => rest.queryPositionForInstrument(input);
+        const first = service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+        const next = service.resolve({ strategyInstanceId: "instance", tradeCycleId: "cycle" });
+        assert.equal((await first).statusCode, 500);
+        const fresh = await next;
+        assert.equal(fresh.statusCode, 200);
+        assert.equal(fresh.body.position_open, true);
+        assert.equal(requests, 3);
+        assert.ok(pending.every(p => p.signal.aborted));
+        assert.deepEqual(repo.get("instance", "cycle"), before);
+        pending[0].resolve({ text: async () => { lateReads++; return "invalid late response"; }, body: { cancel: async () => { lateCancels++; } } } as unknown as Response);
+        if (lateSecond === "failure") pending[1].reject(new Error("late failure after the next lookup"));
+        else pending[1].resolve({ text: async () => { lateReads++; return "{}"; }, body: { cancel: async () => { lateCancels++; } } } as unknown as Response);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(lateReads, 0); assert.equal(lateCancels, lateSecond === "success" ? 2 : 1);
+        assert.equal(requests, 3);
+        assert.deepEqual(repo.get("instance", "cycle"), before);
+        assert.equal(bybit.createOrderCalls.length, 0);
+        assert.equal(bybit.cancelOrderCalls.length, 0);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rest.close();
+    }
+  });
 }
