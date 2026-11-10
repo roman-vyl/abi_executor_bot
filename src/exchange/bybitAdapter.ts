@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import diagnosticsChannel from "node:diagnostics_channel";
 
 import { Agent } from "undici";
+import { runBybitGetAttempt } from "./bybitGetAttempt.js";
 
 import type { AuthorizationService, Credentials } from "../authorization/authorizationService.js";
 import type { AbiConfig } from "../config/config.js";
@@ -228,7 +229,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   async getServerTime(): Promise<unknown> {
     return this.readWithRetry("/v5/market/time", async (signal) => {
       const response = await fetch(`${this.baseUrl}/v5/market/time`, this.fetchInit({ signal }));
-      return readBybitResponse(response);
+      return response;
     });
   }
 
@@ -418,7 +419,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
         `${this.baseUrl}/v5/market/instruments-info?${params.toString()}`,
         this.fetchInit({ signal }),
       );
-      return readBybitResponse(response);
+      return response;
     });
   }
 
@@ -426,7 +427,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
     const params = new URLSearchParams({ category, symbol });
     return this.readWithRetry("/v5/market/price-limit", async (signal) => {
       const response = await fetch(`${this.baseUrl}/v5/market/price-limit?${params.toString()}`, this.fetchInit({ signal }));
-      return readBybitResponse(response);
+      return response;
     });
   }
 
@@ -438,7 +439,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
     const params = new URLSearchParams({ category: this.config.bybitCategory, symbol });
     const response = await this.readWithRetry("/v5/market/tickers", async (signal) => {
       const response = await fetch(`${this.baseUrl}/v5/market/tickers?${params}`, this.fetchInit({ signal }));
-      return readBybitResponse(response);
+      return response;
     });
 
     return readTickerLastPrice(response);
@@ -482,7 +483,7 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
         }),
       );
 
-      return readBybitResponse(response);
+      return response;
     });
   }
 
@@ -490,9 +491,9 @@ export class RestBybitAdapter implements BybitAdapter, BybitHistoryWindowReader 
   // established connection broke, is retried once at once with the same
   // timeout. Any other error, or a second failure, propagates unchanged.
   // Never used for POST (order writes).
-  private async readWithRetry(path: string, request: (signal: AbortSignal) => Promise<unknown>): Promise<unknown> {
+  private async readWithRetry(path: string, request: (signal: AbortSignal) => Promise<Response>): Promise<unknown> {
     const attempt = () =>
-      timeBybitRequest("GET", path, () => request(AbortSignal.timeout(this.config.bybitReadTimeoutMs)));
+      timeBybitRequest("GET", path, () => runBybitGetAttempt(request, this.config.bybitReadTimeoutMs, decodeBybitResponse));
     try {
       return await attempt();
     } catch (error) {
@@ -927,7 +928,10 @@ function readRecordNumber(record: Record<string, unknown>, key: string): number 
 }
 
 async function readBybitResponse(response: Response): Promise<unknown> {
-  const bodyText = await response.text();
+  return decodeBybitResponse(response, await response.text());
+}
+
+function decodeBybitResponse(response: Response, bodyText: string): unknown {
   let body: unknown;
 
   try {
