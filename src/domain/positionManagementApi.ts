@@ -1,3 +1,4 @@
+import { floorToStep } from "./exactDecimal.js";
 import type { EntryPackageValidationDetail } from "./entryPackageApi.js";
 import { isExactDecimalText, isPositiveExactDecimalText } from "./entryPackageApi.js";
 import { decimalEquals } from "./exactDecimal.js";
@@ -361,6 +362,7 @@ export function isNumericallyEqualExactDecimal(a: string, b: string): boolean {
 // type still makes that state representable so it fails closed rather than
 // being assumed away.
 export type ProtectionConfirmation = {
+  tickSize?: string;
   strategyInstanceId: string;
   tradeCycleId: string;
   acceptedStopPrice: string;
@@ -383,13 +385,15 @@ export function serializeProtectionApplied(input: ProtectionConfirmation): Posit
     (input.acceptedTakePrice !== null && !isPositiveExactDecimalText(input.acceptedTakePrice)) ||
     (input.confirmedTakePrice !== null && !isPositiveExactDecimalText(input.confirmedTakePrice)) ||
     (input.acceptedTakePrice === null) !== (input.confirmedTakePrice === null) ||
-    !isNumericallyEqualExactDecimal(input.acceptedStopPrice, input.confirmedStopPrice) ||
+    !isNumericallyEqualExactDecimal(input.tickSize === undefined ? input.acceptedStopPrice : floorToStep(input.acceptedStopPrice, input.tickSize), input.confirmedStopPrice) ||
     (input.acceptedTakePrice !== null &&
       input.confirmedTakePrice !== null &&
-      !isNumericallyEqualExactDecimal(input.acceptedTakePrice, input.confirmedTakePrice)) ||
+      !isNumericallyEqualExactDecimal(input.tickSize === undefined ? input.acceptedTakePrice : floorToStep(input.acceptedTakePrice, input.tickSize), input.confirmedTakePrice)) ||
     !isWellFormedProvingLeg(input.stopLeg) ||
     !isWellFormedProvingLeg(input.takeLeg) ||
-    !isNumericallyEqualExactDecimal(input.stopLeg.qty, input.takeLeg.qty)
+    !isNumericallyEqualExactDecimal(input.stopLeg.qty, input.takeLeg.qty) ||
+    !isNumericallyEqualExactDecimal(input.stopLeg.triggerPrice, input.confirmedStopPrice) ||
+    (input.confirmedTakePrice !== null && !isNumericallyEqualExactDecimal(input.takeLeg.triggerPrice, input.confirmedTakePrice))
   ) {
     return internalErrorResult();
   }

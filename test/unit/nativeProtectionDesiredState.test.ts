@@ -197,6 +197,7 @@ test("a non-null take_price passes through unchanged, and both legs' qty are alw
 
   assert.deepEqual(result, {
     ok: true,
+    tickSize: "0.5",
     desired: {
       stop: { triggerPrice: "98000", qty: "6" },
       take: { triggerPrice: "104000", qty: "6" },

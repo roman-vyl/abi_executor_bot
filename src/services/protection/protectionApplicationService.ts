@@ -1,3 +1,4 @@
+import { floorToStep } from "../../domain/exactDecimal.js";
 import type { KeyedMutex } from "../../concurrency/keyedMutex.js";
 import type { AbiConfig } from "../../config/config.js";
 import type { EntryPackageCorrelationRepository } from "../../correlation/entryPackageCorrelationRepository.js";
@@ -56,7 +57,7 @@ export class ProtectionApplicationService {
     return this.deps.mutex.withKeyLock(key, () => this.applyLocked(command));
   }
 
-  private async reconcileOwnProtection(command: ProtectionCommand, record: EntryPackageExecutionRecord): Promise<ReconciliationOutcome> {
+  private async reconcileOwnProtection(command: ProtectionCommand, record: EntryPackageExecutionRecord): Promise<ReconciliationOutcome & { tickSize?: string }> {
     if (record.order_link_id === null || record.desired_entry === null) {
       return { kind: "fail_closed", reason: "attribution_lost" };
     }
@@ -76,7 +77,7 @@ export class ProtectionApplicationService {
       return { kind: "fail_closed", reason: desiredResult.reason };
     }
 
-    return reconcileNativePartialProtection({
+    const outcome = await reconcileNativePartialProtection({
       bybit: this.deps.bybit,
       category,
       symbol: record.exchange_symbol,
@@ -84,6 +85,7 @@ export class ProtectionApplicationService {
       desired: desiredResult.desired,
       binding: positionBindingGeometry(requirePhysicalBinding(record)),
     });
+    return { ...outcome, tickSize: desiredResult.tickSize };
   }
 
   private async applyLocked(command: ProtectionCommand): Promise<PositionManagementHttpResult> {
@@ -172,9 +174,10 @@ export class ProtectionApplicationService {
       strategyInstanceId: command.strategyInstanceId,
       tradeCycleId: command.tradeCycleId,
       acceptedStopPrice: command.stopPrice,
+      tickSize: outcome.tickSize,
       acceptedTakePrice: command.takePrice,
-      confirmedStopPrice: command.stopPrice,
-      confirmedTakePrice: command.takePrice,
+      confirmedStopPrice: outcome.stop.triggerPrice,
+      confirmedTakePrice: command.takePrice === null ? null : outcome.take.triggerPrice,
       verificationSucceeded: true,
       stopLeg: outcome.stop,
       takeLeg: outcome.take,
@@ -252,8 +255,8 @@ export type DesiredProtectionStateResolutionFailure = "no_authoritative_qty" | "
 // Resolves a ProtectionCommand plus this cycle's own correlation record into
 // a full DesiredProtectionState (design.md Decision 4/5): qty from
 // resolveCurrentOwnFilledQty (fail-closed propagated), stop.triggerPrice
-// from command.stopPrice, take.triggerPrice from command.takePrice when
-// non-null, else a computed, tick-normalized surrogate anchored to this
+// from tick-normalized command.stopPrice, take.triggerPrice from the
+// tick-normalized command.takePrice when non-null, else a surrogate anchored to this
 // cycle's own immutable desired_entry.planned_entry_price (no
 // exchange-bound clamp — task 0 evidence, design.md Decision 5). Both legs
 // always carry the same qty.
@@ -262,7 +265,7 @@ export async function resolveDesiredProtectionState(input: {
   record: EntryPackageExecutionRecord;
   bybit: BybitAdapter;
   tradingRules: InstrumentTradingRulesProvider;
-}): Promise<{ ok: true; desired: DesiredProtectionState } | { ok: false; reason: DesiredProtectionStateResolutionFailure }> {
+}): Promise<{ ok: true; desired: DesiredProtectionState; tickSize: string } | { ok: false; reason: DesiredProtectionStateResolutionFailure }> {
   const { command, record, bybit, tradingRules } = input;
 
   const qtyResult = await resolveCurrentOwnFilledQty({ record, bybit });
@@ -278,32 +281,29 @@ export async function resolveDesiredProtectionState(input: {
     return { ok: false, reason: "no_authoritative_qty" };
   }
 
-  let takeTriggerPrice: string;
-  if (command.takePrice !== null) {
-    takeTriggerPrice = command.takePrice;
-  } else {
-    // getRules() throws on a transport/decode failure (see
-    // BybitInstrumentTradingRulesProvider) — this is an ordinary reconciler
-    // dependency failure, not a bug, so it must resolve to a typed
-    // fail-closed outcome rather than reject the production reconciliation
-    // returned Promise.
-    let rules: Awaited<ReturnType<InstrumentTradingRulesProvider["getRules"]>>;
-    try {
-      rules = await tradingRules.getRules(record.exchange_symbol, category);
-    } catch {
-      return { ok: false, reason: "trading_rules_unavailable" };
-    }
-    takeTriggerPrice = computeSurrogateTakePrice({
-      plannedEntryPrice: record.desired_entry.planned_entry_price,
-      side: record.desired_entry.side,
-      tickSize: rules.tickSize,
-    });
+  // Normalize every physical trigger once, before reconciliation. Bybit
+  // truncates positive trigger prices to the tick; read-back must compare
+  // with that same exact-decimal value, not the unquantized Engine input.
+  let rules: Awaited<ReturnType<InstrumentTradingRulesProvider["getRules"]>>;
+  try {
+    rules = await tradingRules.getRules(record.exchange_symbol, category);
+  } catch {
+    return { ok: false, reason: "trading_rules_unavailable" };
   }
+  const stopTriggerPrice = floorToStep(command.stopPrice, rules.tickSize);
+  const takeTriggerPrice = command.takePrice !== null
+    ? floorToStep(command.takePrice, rules.tickSize)
+    : computeSurrogateTakePrice({
+        plannedEntryPrice: record.desired_entry.planned_entry_price,
+        side: record.desired_entry.side,
+        tickSize: rules.tickSize,
+      });
 
   return {
     ok: true,
+    tickSize: rules.tickSize,
     desired: {
-      stop: { triggerPrice: command.stopPrice, qty: qtyResult.qty },
+      stop: { triggerPrice: stopTriggerPrice, qty: qtyResult.qty },
       take: { triggerPrice: takeTriggerPrice, qty: qtyResult.qty },
     },
   };
