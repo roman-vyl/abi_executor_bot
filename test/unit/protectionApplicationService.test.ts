@@ -352,6 +352,57 @@ test("successful protection does not mutate durable correlation", async () => {
   });
 });
 
+test("fractional ETH protection is normalized, confirmed and idempotent", async () => {
+  await withService(async ({ service, bybit, repo, tradingRules }) => {
+    await repo.save(makeRecord());
+    setOpenLong(bybit);
+    tradingRules.defaultRules.tickSize = "0.01";
+    installMutableAttributedRows(bybit);
+    const command = { ...makeCommand(), stopPrice: "1853.5652083333334", takePrice: "1799.8208333333328" };
+    const first = await service.apply(command);
+    assert.equal(first.statusCode, 200);
+    assert.deepEqual(bybit.amendOrderCalls.map(({ triggerPrice }) => triggerPrice), ["1853.56", "1799.82"]);
+    assert.equal((first.body as { stop_price: string }).stop_price, "1853.5652083333334");
+    assert.equal((first.body as { protection_orders: { stop: { trigger_price: string } } }).protection_orders.stop.trigger_price, "1853.56");
+    assert.equal((first.body as { take_price: string }).take_price, "1799.8208333333328");
+    const writes = bybit.amendOrderCalls.length;
+    assert.equal((await service.apply(command)).statusCode, 200);
+    assert.equal(bybit.amendOrderCalls.length, writes);
+  });
+});
+
+test("fractional stop with disabled take confirms physical stop and preserves logical null", async () => {
+  await withService(async ({ service, bybit, repo, tradingRules }) => {
+    const record = makeRecord({ side: "short" });
+    record.desired_entry!.planned_entry_price = "1913.55";
+    await repo.save(record);
+    setOpenLong(bybit);
+    (bybit.openPositionsResponse as { result: { list: Array<{ side: string }> } }).result.list[0]!.side = "Sell";
+    tradingRules.defaultRules.tickSize = "0.01";
+    installMutableAttributedRows(bybit);
+    const command = { ...makeCommand(), stopPrice: "1853.5652083333334", takePrice: null };
+    const first = await service.apply(command);
+    assert.equal(first.statusCode, 200);
+    assert.equal((first.body as { stop_price: string }).stop_price, "1853.5652083333334");
+    assert.equal((first.body as { protection_orders: { stop: { trigger_price: string } } }).protection_orders.stop.trigger_price, "1853.56");
+    assert.equal((first.body as { take_price: null }).take_price, null);
+    assert.equal((first.body as { protection_orders: { take: { trigger_price: string } } }).protection_orders.take.trigger_price, "956.77");
+    const writes = bybit.amendOrderCalls.length;
+    assert.equal((await service.apply(command)).statusCode, 200);
+    assert.equal(bybit.amendOrderCalls.length, writes);
+  });
+});
+
+test("explicit protection fails closed when tick rules cannot be obtained", async () => {
+  await withService(async ({ service, bybit, repo, tradingRules }) => {
+    await repo.save(makeRecord());
+    setOpenLong(bybit);
+    tradingRules.failure = new Error("unavailable");
+    assert.equal((await service.apply(makeCommand())).statusCode, 500);
+    assert.equal(bybit.amendOrderCalls.length, 0);
+  });
+});
+
 function installAttributedRows(
   bybit: FakeBybitAdapter,
   overrides: { stop?: Record<string, unknown>; take?: Record<string, unknown> } = {},
